@@ -1,6 +1,6 @@
 package define
 
-import "github.com/containers/common/pkg/strongunits"
+import "go.podman.io/common/pkg/strongunits"
 
 type SetOptions struct {
 	CPUs               *uint64
@@ -9,4 +9,5 @@ type SetOptions struct {
 	Rootful            *bool
 	UserModeNetworking *bool
 	USBs               *[]string
+	ImportNativeCA     *bool
 }

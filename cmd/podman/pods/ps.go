@@ -10,15 +10,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/common/pkg/report"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/utils"
-	"github.com/containers/podman/v5/cmd/podman/validate"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/docker/go-units"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/common/pkg/report"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/utils"
+	"go.podman.io/podman/v6/cmd/podman/validate"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 var (
@@ -194,9 +194,10 @@ func (l ListPodReporter) Created() string {
 	return units.HumanDuration(time.Since(l.ListPodsReport.Created)) + " ago"
 }
 
-// Labels returns a map of the pod's labels
-func (l ListPodReporter) Labels() map[string]string {
-	return l.ListPodsReport.Labels
+// Labels returns the pod's labels as a sorted, comma-separated list of
+// key=value pairs, matching Docker CLI output format.
+func (l ListPodReporter) Labels() string {
+	return common.FormatLabels(l.ListPodsReport.Labels)
 }
 
 // Label returns a map of the pod's labels
@@ -221,7 +222,7 @@ func (l ListPodReporter) ID() string {
 }
 
 // Id returns the Pod id
-func (l ListPodReporter) Id() string { //nolint:revive,stylecheck
+func (l ListPodReporter) Id() string {
 	if noTrunc {
 		return l.ListPodsReport.Id
 	}
@@ -235,7 +236,7 @@ func (l ListPodReporter) InfraID() string {
 
 // InfraId returns the infra container id for the pod
 // depending on trunc
-func (l ListPodReporter) InfraId() string { //nolint:revive,stylecheck
+func (l ListPodReporter) InfraId() string {
 	if len(l.ListPodsReport.InfraId) == 0 {
 		return ""
 	}

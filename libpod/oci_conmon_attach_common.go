@@ -11,13 +11,13 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/common/pkg/detach"
-	"github.com/containers/common/pkg/resize"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/errorhandling"
 	"github.com/moby/term"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/common/pkg/detach"
+	"go.podman.io/common/pkg/resize"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/errorhandling"
 	"golang.org/x/sys/unix"
 )
 
@@ -245,7 +245,7 @@ func setupStdioChannels(streams *define.AttachStreams, conn *net.UnixConn, detac
 
 func redirectResponseToOutputStreams(outputStream, errorStream io.Writer, writeOutput, writeError bool, conn io.Reader) error {
 	var err error
-	buf := make([]byte, 8192+1) /* Sync with conmon STDIO_BUF_SIZE */
+	buf := make([]byte, conmonAttachBufferSize)
 	for {
 		nr, er := conn.Read(buf)
 		if nr > 0 {
@@ -297,7 +297,7 @@ func readStdio(conn *net.UnixConn, streams *define.AttachStreams, receiveStdoutE
 		}
 		return err
 	case err = <-stdinDone:
-		if err == define.ErrDetach {
+		if errors.Is(err, define.ErrDetach) {
 			if err := socketCloseWrite(conn); err != nil {
 				logrus.Errorf("Failed to close stdin: %v", err)
 			}

@@ -5,14 +5,13 @@ package integration
 import (
 	"fmt"
 
-	. "github.com/containers/podman/v5/test/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/opencontainers/selinux/go-selinux"
+	. "go.podman.io/podman/v6/test/utils"
 )
 
 var _ = Describe("Podman inspect", func() {
-
 	It("podman inspect alpine image", func() {
 		session := podmanTest.Podman([]string{"inspect", "--format=json", ALPINE})
 		session.WaitWithDefaultTimeout()
@@ -135,7 +134,6 @@ var _ = Describe("Podman inspect", func() {
 	})
 
 	It("podman inspect with mount filters", func() {
-
 		ctrSession := podmanTest.Podman([]string{"create", "--name", "test", "-v", "/tmp:/test1", ALPINE, "top"})
 		ctrSession.WaitWithDefaultTimeout()
 		Expect(ctrSession).Should(ExitCleanly())
@@ -188,11 +186,7 @@ var _ = Describe("Podman inspect", func() {
 
 		ctrInspect := podmanTest.Podman([]string{"container", "inspect", ALPINE})
 		ctrInspect.WaitWithDefaultTimeout()
-		if IsRemote() {
-			Expect(ctrInspect).To(ExitWithError(125, fmt.Sprintf("no such container %q", ALPINE)))
-		} else {
-			Expect(ctrInspect).To(ExitWithError(125, fmt.Sprintf("no such container %s", ALPINE)))
-		}
+		Expect(ctrInspect).To(ExitWithError(125, fmt.Sprintf("no such container %q", ALPINE)))
 
 		imageInspect := podmanTest.Podman([]string{"image", "inspect", ALPINE})
 		imageInspect.WaitWithDefaultTimeout()
@@ -269,6 +263,15 @@ var _ = Describe("Podman inspect", func() {
 		Expect(baseJSON[0]).To(HaveField("Name", ctrName))
 	})
 
+	It("podman inspect should not escape special chars", func() {
+		ctrName := "testlabel"
+		podmanTest.PodmanExitCleanly("create", "--name", ctrName, "--label", "abc=&&**<>123", ALPINE, "sh")
+
+		// see https://github.com/containers/podman/issues/28560
+		inspect := podmanTest.PodmanExitCleanly("inspect", ctrName)
+		Expect(inspect.OutputToString()).To(ContainSubstring(`"abc=&&**<>123"`))
+	})
+
 	It("podman inspect - HostConfig.SecurityOpt ", func() {
 		if !selinux.GetEnabled() {
 			Skip("SELinux not enabled")
@@ -280,7 +283,8 @@ var _ = Describe("Podman inspect", func() {
 			"--security-opt", "seccomp=unconfined",
 			"--security-opt", "label=type:spc_t",
 			"--security-opt", "label=level:s0",
-			ALPINE, "sh"})
+			ALPINE, "sh",
+		})
 
 		create.WaitWithDefaultTimeout()
 		Expect(create).Should(ExitCleanly())
@@ -367,6 +371,17 @@ var _ = Describe("Podman inspect", func() {
 		Expect(session.OutputToString()).To(ContainSubstring("bridge"))
 	})
 
+	It("podman inspect networks with --type=all ", func() {
+		name_0, path_0 := generateNetworkConfig(podmanTest)
+		defer removeConf(path_0)
+		name_1, path_1 := generateNetworkConfig(podmanTest)
+		defer removeConf(path_1)
+
+		session := podmanTest.PodmanExitCleanly("inspect", "--type", "all", name_0, name_1, "--format", "{{.Name}}")
+		Expect(session.OutputToString()).To(ContainSubstring(name_0))
+		Expect(session.OutputToString()).To(ContainSubstring(name_1))
+	})
+
 	It("podman inspect a volume", func() {
 		session := podmanTest.Podman([]string{"volume", "create", "myvol"})
 		session.WaitWithDefaultTimeout()
@@ -399,11 +414,7 @@ var _ = Describe("Podman inspect", func() {
 
 		inspect := podmanTest.Podman([]string{"inspect", "--type", "container", podName})
 		inspect.WaitWithDefaultTimeout()
-		if IsRemote() {
-			Expect(inspect).To(ExitWithError(125, fmt.Sprintf("no such container %q", podName)))
-		} else {
-			Expect(inspect).To(ExitWithError(125, fmt.Sprintf("no such container %s", podName)))
-		}
+		Expect(inspect).To(ExitWithError(125, fmt.Sprintf("no such container %q", podName)))
 	})
 
 	It("podman inspect --type network on a container should fail", func() {
@@ -454,7 +465,7 @@ var _ = Describe("Podman inspect", func() {
 	})
 
 	It("Verify container inspect has default network", func() {
-		SkipIfRootless("Requires root CNI networking")
+		SkipIfRootless("Requires root networking")
 		ctrName := "testctr"
 		session := podmanTest.Podman([]string{"run", "-d", "--name", ctrName, ALPINE, "top"})
 		session.WaitWithDefaultTimeout()
@@ -466,7 +477,7 @@ var _ = Describe("Podman inspect", func() {
 	})
 
 	It("Verify stopped container still has default network in inspect", func() {
-		SkipIfRootless("Requires root CNI networking")
+		SkipIfRootless("Requires root networking")
 		ctrName := "testctr"
 		session := podmanTest.Podman([]string{"create", "--name", ctrName, ALPINE, "top"})
 		session.WaitWithDefaultTimeout()
@@ -605,4 +616,45 @@ var _ = Describe("Podman inspect", func() {
 		Expect(session.OutputToString()).To(ContainSubstring(commandNotFound))
 	})
 
+	It("podman inspect artifact", func() {
+		artifactFile, err := createArtifactFile(1024)
+		Expect(err).ToNot(HaveOccurred())
+
+		artifactName := "localhost/test/myartifact:mytag"
+		add := podmanTest.Podman([]string{"artifact", "add", artifactName, artifactFile})
+		add.WaitWithDefaultTimeout()
+		Expect(add).Should(ExitCleanly())
+
+		// Test explicit artifact type
+		inspect := podmanTest.Podman([]string{"inspect", "--type", "artifact", artifactName})
+		inspect.WaitWithDefaultTimeout()
+		Expect(inspect).Should(ExitCleanly())
+		Expect(inspect.OutputToString()).To(BeValidJSON())
+
+		// Test fallback to artifact when no other object type matches
+		inspect = podmanTest.Podman([]string{"inspect", artifactName})
+		inspect.WaitWithDefaultTimeout()
+		Expect(inspect).Should(ExitCleanly())
+		Expect(inspect.OutputToString()).To(BeValidJSON())
+
+		// Verify that the output contains artifact-specific fields
+		Expect(inspect.OutputToString()).To(ContainSubstring("Manifest"))
+		Expect(inspect.OutputToString()).To(ContainSubstring("Digest"))
+
+		// Test format with artifact-specific fields
+		inspect = podmanTest.Podman([]string{"inspect", "--format", "{{.Name}}", artifactName})
+		inspect.WaitWithDefaultTimeout()
+		Expect(inspect).Should(ExitCleanly())
+		Expect(inspect.OutputToString()).To(Equal(artifactName))
+
+		inspect2 := podmanTest.Podman([]string{"inspect", "--format", "{{.Digest}}", artifactName})
+		inspect2.WaitWithDefaultTimeout()
+		Expect(inspect2).Should(ExitCleanly())
+		Expect(inspect2.OutputToString()).To(ContainSubstring("sha256:"))
+
+		// Clean up
+		rm := podmanTest.Podman([]string{"artifact", "rm", artifactName})
+		rm.WaitWithDefaultTimeout()
+		Expect(rm).Should(ExitCleanly())
+	})
 })

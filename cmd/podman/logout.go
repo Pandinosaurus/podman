@@ -3,12 +3,13 @@ package main
 import (
 	"os"
 
-	"github.com/containers/common/pkg/auth"
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/image/v5/types"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/auth"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/image/v5/pkg/cli/basetls/tlsdetails"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
 )
 
 var (
@@ -21,8 +22,8 @@ var (
 		Args:              cobra.MaximumNArgs(1),
 		ValidArgsFunction: common.AutocompleteRegistries,
 		Example: `podman logout quay.io
-  podman logout --authfile dir/auth.json quay.io
-  podman logout --all`,
+podman logout --authfile dir/auth.json quay.io
+podman logout --all`,
 	}
 )
 
@@ -47,8 +48,14 @@ func init() {
 }
 
 // Implementation of podman-logout.
-func logout(cmd *cobra.Command, args []string) error {
-	sysCtx := &types.SystemContext{}
-	setRegistriesConfPath(sysCtx)
+func logout(_ *cobra.Command, args []string) error {
+	baseTLSConfig, err := tlsdetails.BaseTLSFromOptionalFile(registry.PodmanConfig().TLSDetailsFile)
+	if err != nil {
+		return err
+	}
+
+	sysCtx := &types.SystemContext{
+		BaseTLSConfig: baseTLSConfig.TLSConfig(),
+	}
 	return auth.Logout(sysCtx, &logoutOptions, args)
 }

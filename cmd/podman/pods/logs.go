@@ -5,14 +5,14 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/validate"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/util"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/validate"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/util"
 )
 
 // logsOptionsWrapper wraps entities.LogsOptions and prevents leaking
@@ -49,10 +49,10 @@ var (
 		RunE:              logs,
 		ValidArgsFunction: common.AutocompletePods,
 		Example: `podman pod logs podID
-		podman pod logs -c ctrname podName
-		podman pod logs --tail 2 mywebserver
-		podman pod logs --follow=true --since 10m podID
-		podman pod logs mywebserver`,
+podman pod logs -c ctrname podName
+podman pod logs --tail 2 mywebserver
+podman pod logs --follow=true --since 10m podID
+podman pod logs mywebserver`,
 	}
 )
 
@@ -92,7 +92,6 @@ func logsFlags(cmd *cobra.Command) {
 	flags.BoolVarP(&logsPodOptions.Timestamps, "timestamps", "t", false, "Output the timestamps in the log")
 	flags.BoolVarP(&logsPodOptions.Colors, "color", "", false, "Output the containers within a pod with different colors in the log")
 
-	flags.SetInterspersed(false)
 	_ = flags.MarkHidden("details")
 }
 
@@ -126,5 +125,5 @@ func logs(_ *cobra.Command, args []string) error {
 	if len(args) > 0 {
 		podName = args[0]
 	}
-	return registry.ContainerEngine().PodLogs(registry.GetContext(), podName, logsPodOptions.PodLogsOptions)
+	return registry.ContainerEngine().PodLogs(registry.Context(), podName, logsPodOptions.PodLogsOptions)
 }

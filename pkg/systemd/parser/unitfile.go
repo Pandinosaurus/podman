@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -8,6 +9,7 @@ import (
 	"os/user"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -48,7 +50,6 @@ type UnitFileParser struct {
 
 	currentGroup    *unitGroup
 	pendingComments []*unitLine
-	lineNr          int
 }
 
 func newUnitLine(key string, value string, isComment bool) *unitLine {
@@ -91,7 +92,8 @@ func (g *unitGroup) addLine(line *unitLine) {
 }
 
 func (g *unitGroup) prependLine(line *unitLine) {
-	n := []*unitLine{line}
+	n := make([]*unitLine, 0, 1+len(g.lines))
+	n = append(n, line)
 	g.lines = append(n, g.lines...)
 }
 
@@ -100,7 +102,8 @@ func (g *unitGroup) addComment(line *unitLine) {
 }
 
 func (g *unitGroup) prependComment(line *unitLine) {
-	n := []*unitLine{line}
+	n := make([]*unitLine, 0, 1+len(g.comments))
+	n = append(n, line)
 	g.comments = append(n, g.comments...)
 }
 
@@ -109,8 +112,7 @@ func (g *unitGroup) add(key string, value string) {
 }
 
 func (g *unitGroup) findLast(key string) *unitLine {
-	for i := len(g.lines) - 1; i >= 0; i-- {
-		l := g.lines[i]
+	for _, l := range slices.Backward(g.lines) {
 		if l.isKey(key) {
 			return l
 		}
@@ -205,7 +207,7 @@ func (f *UnitFile) Dup() *UnitFile {
 }
 
 func lineIsComment(line string) bool {
-	return len(line) == 0 || line[0] == '#' || line[0] == ':'
+	return len(line) == 0 || line[0] == '#' || line[0] == ';'
 }
 
 func lineIsGroup(line string) bool {
@@ -347,7 +349,7 @@ func (p *UnitFileParser) parseKeyValuePair(line string) error {
 	return nil
 }
 
-func (p *UnitFileParser) parseLine(line string) error {
+func (p *UnitFileParser) parseLine(line string, lineNr int) error {
 	switch {
 	case lineIsComment(line):
 		return p.parseComment(line)
@@ -356,7 +358,7 @@ func (p *UnitFileParser) parseLine(line string) error {
 	case lineIsKeyValuePair(line):
 		return p.parseKeyValuePair(line)
 	default:
-		return fmt.Errorf("file contains line %d: “%s” which is not a key-value pair, group, or comment", p.lineNr, line)
+		return fmt.Errorf("file contains line %d: “%s” which is not a key-value pair, group, or comment", lineNr, line)
 	}
 }
 
@@ -376,53 +378,39 @@ func (p *UnitFileParser) flushPendingComments(toComment bool) {
 	}
 }
 
-func nextLine(data string, afterPos int) (string, string) {
-	rest := data[afterPos:]
-	if i := strings.Index(rest, "\n"); i >= 0 {
-		return strings.TrimSpace(data[:i+afterPos]), data[i+afterPos+1:]
-	}
-	return data, ""
-}
-
-func trimSpacesFromLines(data string) string {
-	lines := strings.Split(data, "\n")
-	for i, line := range lines {
-		lines[i] = strings.TrimSpace(line)
-	}
-	return strings.Join(lines, "\n")
-}
-
 // Parse an already loaded unit file (in the form of a string)
 func (f *UnitFile) Parse(data string) error {
 	p := &UnitFileParser{
-		file:   f,
-		lineNr: 1,
+		file: f,
 	}
 
-	data = trimSpacesFromLines(data)
+	lines := strings.Split(strings.TrimSuffix(data, "\n"), "\n")
+	remaining := ""
 
-	for len(data) > 0 {
-		origdata := data
-		nLines := 1
-		var line string
-		line, data = nextLine(data, 0)
-
-		if !lineIsComment(line) {
-			// Handle multi-line continuations
-			// Note: This doesn't support comments in the middle of the continuation, which systemd does
-			if lineIsKeyValuePair(line) {
-				for len(data) > 0 && line[len(line)-1] == '\\' {
-					line, data = nextLine(origdata, len(line)+1)
-					nLines++
+	for lineNr, line := range lines {
+		line = strings.TrimSpace(line)
+		if lineIsComment(line) {
+			// ignore the comment is inside a continuation line.
+			if remaining != "" {
+				continue
+			}
+		} else {
+			if strings.HasSuffix(line, "\\") {
+				line = line[:len(line)-1]
+				if lineNr != len(lines)-1 {
+					remaining += line
+					continue
 				}
 			}
+			// check whether the line is a continuation of the previous line
+			if remaining != "" {
+				line = remaining + line
+				remaining = ""
+			}
 		}
-
-		if err := p.parseLine(line); err != nil {
+		if err := p.parseLine(line, lineNr+1); err != nil {
 			return err
 		}
-
-		p.lineNr += nLines
 	}
 
 	if p.currentGroup == nil {
@@ -623,14 +611,20 @@ func (f *UnitFile) LookupLast(groupName string, key string) (string, bool) {
 }
 
 // Look up the last instance of the named key in the group (if any)
-// The result have no trailing whitespace and line continuations are applied
+// The result have no trailing whitespace and line continuations are applied.
+// Surrounding matched double-quote pairs are stripped, but unmatched quotes
+// are preserved to avoid mangling embedded shell syntax.
 func (f *UnitFile) Lookup(groupName string, key string) (string, bool) {
 	v, ok := f.LookupLast(groupName, key)
 	if !ok {
 		return "", false
 	}
 
-	return strings.Trim(strings.TrimRightFunc(v, unicode.IsSpace), "\""), true
+	v = strings.TrimRightFunc(v, unicode.IsSpace)
+	if len(v) >= 2 && v[0] == '"' && v[len(v)-1] == '"' {
+		v = v[1 : len(v)-1]
+	}
+	return v, true
 }
 
 // Lookup the last instance of a key and convert the value to a bool
@@ -667,7 +661,7 @@ func convertNumber(v string) (int64, error) {
 		v = v[1:]
 	} else if strings.HasPrefix(v, "-") {
 		v = v[1:]
-		mult = int64(-11)
+		mult = int64(-1)
 	}
 
 	switch {
@@ -690,7 +684,6 @@ func (f *UnitFile) LookupInt(groupName string, key string, defaultValue int64) i
 	}
 
 	intVal, err := convertNumber(v)
-
 	if err != nil {
 		return defaultValue
 	}
@@ -842,33 +835,39 @@ func (f *UnitFile) LookupAllArgs(groupName string, key string) []string {
 // array of words. The split code is exec-like, and both unquotes and
 // applied c-style c escapes.  This is typically used for keys like
 // ExecStart
-func (f *UnitFile) LookupLastArgs(groupName string, key string) ([]string, bool) {
+func (f *UnitFile) LookupLastArgs(groupName string, key string) ([]string, bool, error) {
 	execKey, ok := f.LookupLast(groupName, key)
-	if ok {
-		execArgs, err := splitString(execKey, WhitespaceSeparators, SplitRelax|SplitUnquote|SplitCUnescape)
-		if err == nil {
-			return execArgs, true
-		}
+	if !ok {
+		return nil, false, nil
 	}
-	return nil, false
+	execArgs, err := splitString(execKey, WhitespaceSeparators, SplitRelax|SplitUnquote|SplitCUnescape)
+	if err != nil {
+		return nil, false, err
+	}
+	return execArgs, true, nil
 }
 
 // Look up 'Environment' style key-value keys
-func (f *UnitFile) LookupAllKeyVal(groupName string, key string) map[string]string {
-	res := make(map[string]string)
+func (f *UnitFile) LookupAllKeyVal(groupName string, key string) (map[string]*string, error) {
+	var warnings error
+	res := make(map[string]*string)
 	allKeyvals := f.LookupAll(groupName, key)
 	for _, keyvals := range allKeyvals {
 		assigns, err := splitString(keyvals, WhitespaceSeparators, SplitRelax|SplitUnquote|SplitCUnescape)
-		if err == nil {
-			for _, assign := range assigns {
-				key, value, found := strings.Cut(assign, "=")
-				if found {
-					res[key] = value
-				}
+		if err != nil {
+			warnings = errors.Join(warnings, err)
+			continue
+		}
+		for _, assign := range assigns {
+			key, value, found := strings.Cut(assign, "=")
+			if found {
+				res[key] = &value
+			} else {
+				res[key] = nil
 			}
 		}
 	}
-	return res
+	return res, warnings
 }
 
 func (f *UnitFile) Set(groupName string, key string, value string) {
@@ -886,6 +885,15 @@ func (f *UnitFile) Setv(groupName string, keyvals ...string) {
 func (f *UnitFile) Add(groupName string, key string, value string) {
 	group := f.ensureGroup(groupName)
 	group.add(key, value)
+}
+
+func (f *UnitFile) AddEscaped(groupName string, key string, value string) {
+	if wordNeedEscape(value) {
+		var escaped strings.Builder
+		appendEscapeWord(&escaped, value)
+		value = escaped.String()
+	}
+	f.Add(groupName, key, value)
 }
 
 func (f *UnitFile) AddCmdline(groupName string, key string, args []string) {
@@ -923,8 +931,8 @@ func (f *UnitFile) PrependComment(groupName string, comments ...string) {
 		group = f.ensureGroup(groupName)
 	}
 	// Prepend in reverse order to keep argument order
-	for i := len(comments) - 1; i >= 0; i-- {
-		group.prependComment(newUnitLine("", "# "+comments[i], true))
+	for _, v := range slices.Backward(comments) {
+		group.prependComment(newUnitLine("", "# "+v, true))
 	}
 }
 

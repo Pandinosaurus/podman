@@ -5,7 +5,7 @@ import (
 	"net"
 	"net/url"
 
-	"github.com/containers/podman/v5/pkg/bindings/internal/util"
+	"go.podman.io/podman/v6/pkg/bindings/internal/util"
 )
 
 // Changed returns true if named field has been set
@@ -106,6 +106,21 @@ func (o *PlayOptions) GetNetwork() []string {
 		return z
 	}
 	return *o.Network
+}
+
+// WithNoHostname set field NoHostname to given value
+func (o *PlayOptions) WithNoHostname(value bool) *PlayOptions {
+	o.NoHostname = &value
+	return o
+}
+
+// GetNoHostname returns value of field NoHostname
+func (o *PlayOptions) GetNoHostname() bool {
+	if o.NoHostname == nil {
+		var z bool
+		return z
+	}
+	return *o.NoHostname
 }
 
 // WithNoHosts set field NoHosts to given value
@@ -318,6 +333,21 @@ func (o *PlayOptions) GetUserns() string {
 	return *o.Userns
 }
 
+// WithValidate set field Validate to given value
+func (o *PlayOptions) WithValidate(value string) *PlayOptions {
+	o.Validate = &value
+	return o
+}
+
+// GetValidate returns value of field Validate
+func (o *PlayOptions) GetValidate() string {
+	if o.Validate == nil {
+		var z string
+		return z
+	}
+	return *o.Validate
+}
+
 // WithForce set field Force to given value
 func (o *PlayOptions) WithForce(value bool) *PlayOptions {
 	o.Force = &value
@@ -391,4 +421,19 @@ func (o *PlayOptions) GetServiceContainer() bool {
 		return z
 	}
 	return *o.ServiceContainer
+}
+
+// WithNoPodPrefix set field NoPodPrefix to given value
+func (o *PlayOptions) WithNoPodPrefix(value bool) *PlayOptions {
+	o.NoPodPrefix = &value
+	return o
+}
+
+// GetNoPodPrefix returns value of field NoPodPrefix
+func (o *PlayOptions) GetNoPodPrefix() bool {
+	if o.NoPodPrefix == nil {
+		var z bool
+		return z
+	}
+	return *o.NoPodPrefix
 }

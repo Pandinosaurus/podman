@@ -1,8 +1,12 @@
 ####> This option file is used in:
-####>   podman create, run
+####>   podman podman-container.unit.5.md.in, create, run, update
 ####> If file is edited, make sure the changes
 ####> are applicable to all of those.
+<< if is_quadlet >>
+### `Ulimit=option`
+<< else >>
 #### **--ulimit**=*option*
+<< endif >>
 
 Ulimit options. Sets the ulimits values inside of the container.
 
@@ -13,6 +17,11 @@ $ podman run --ulimit nofile=1024:1024 --rm ubi9 ulimit -n
 
 Set -1 for the soft or hard limit to set the limit to the maximum limit of the current
 process. In rootful mode this is often unlimited.
+
+
+If nofile and nproc are unset, a default value of 1048576 will be used, unless overridden
+in containers.conf(5).  However, if the default value exceeds the hard limit for the current
+rootless user, the current hard limit will be applied instead.
 
 Use **host** to copy the current configuration from the host.
 

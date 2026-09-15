@@ -3,16 +3,14 @@
 package integration
 
 import (
-	"os"
 	"os/user"
 
-	. "github.com/containers/podman/v5/test/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	. "go.podman.io/podman/v6/test/utils"
 )
 
 var _ = Describe("Podman top", func() {
-
 	It("podman top without container name or id", func() {
 		result := podmanTest.Podman([]string{"top"})
 		result.WaitWithDefaultTimeout()
@@ -82,9 +80,7 @@ var _ = Describe("Podman top", func() {
 		Expect(result.OutputToStringArray()[1]).To(Equal("0"))
 
 		user, err := user.Current()
-		if err != nil {
-			os.Exit(1)
-		}
+		Expect(err).ToNot(HaveOccurred())
 
 		result = podmanTest.Podman([]string{"container", "top", session.OutputToString(), "huid"})
 		result.WaitWithDefaultTimeout()
@@ -94,7 +90,7 @@ var _ = Describe("Podman top", func() {
 	})
 
 	It("podman top with ps(1) options", func() {
-		session := podmanTest.Podman([]string{"run", "-d", fedoraMinimal, "sleep", "inf"})
+		session := podmanTest.Podman([]string{"run", "-d", FEDORA_MINIMAL, "sleep", "inf"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 
@@ -113,7 +109,7 @@ var _ = Describe("Podman top", func() {
 		Expect(result.OutputToStringArray()).To(Equal([]string{"COMMAND", "sleep inf"}))
 
 		// Now make sure we use ps in the container with CAP_SYS_PTRACE
-		session = podmanTest.Podman([]string{"run", "-d", "--cap-add=SYS_PTRACE", fedoraMinimal, "sleep", "inf"})
+		session = podmanTest.Podman([]string{"run", "-d", "--cap-add=SYS_PTRACE", FEDORA_MINIMAL, "sleep", "inf"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 
@@ -122,7 +118,7 @@ var _ = Describe("Podman top", func() {
 		exec.WaitWithDefaultTimeout()
 		Expect(exec).Should(ExitWithError(125, "OCI runtime attempted to invoke a command that was not found"))
 
-		session = podmanTest.Podman([]string{"run", "-d", "--uidmap=0:1000:1000", "--user", "9", fedoraMinimal, "sleep", "inf"})
+		session = podmanTest.Podman([]string{"run", "-d", "--uidmap=0:1000:1000", "--user", "9", FEDORA_MINIMAL, "sleep", "inf"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 

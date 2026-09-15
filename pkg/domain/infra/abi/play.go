@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package abi
 
@@ -8,42 +8,44 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 
-	buildahDefine "github.com/containers/buildah/define"
-	bparse "github.com/containers/buildah/pkg/parse"
-	"github.com/containers/common/libimage"
-	nettypes "github.com/containers/common/libnetwork/types"
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/common/pkg/secrets"
-	"github.com/containers/image/v5/docker/reference"
-	"github.com/containers/image/v5/types"
-	"github.com/containers/podman/v5/cmd/podman/parse"
-	"github.com/containers/podman/v5/libpod"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/annotations"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	entitiesTypes "github.com/containers/podman/v5/pkg/domain/entities/types"
-	"github.com/containers/podman/v5/pkg/domain/infra/abi/internal/expansion"
-	v1apps "github.com/containers/podman/v5/pkg/k8s.io/api/apps/v1"
-	v1 "github.com/containers/podman/v5/pkg/k8s.io/api/core/v1"
-	metav1 "github.com/containers/podman/v5/pkg/k8s.io/apimachinery/pkg/apis/meta/v1"
-	"github.com/containers/podman/v5/pkg/specgen"
-	"github.com/containers/podman/v5/pkg/specgen/generate"
-	"github.com/containers/podman/v5/pkg/specgen/generate/kube"
-	"github.com/containers/podman/v5/pkg/specgenutil"
-	"github.com/containers/podman/v5/pkg/systemd/notifyproxy"
-	"github.com/containers/podman/v5/pkg/util"
-	"github.com/containers/podman/v5/utils"
-	"github.com/containers/storage/pkg/fileutils"
 	"github.com/coreos/go-systemd/v22/daemon"
 	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/selinux/go-selinux"
 	"github.com/sirupsen/logrus"
+	buildahDefine "go.podman.io/buildah/define"
+	bparse "go.podman.io/buildah/pkg/parse"
+	"go.podman.io/common/libimage"
+	nettypes "go.podman.io/common/libnetwork/types"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/common/pkg/secrets"
+	"go.podman.io/image/v5/docker/reference"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/podman/v6/cmd/podman/parse"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/annotations"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	entitiesTypes "go.podman.io/podman/v6/pkg/domain/entities/types"
+	"go.podman.io/podman/v6/pkg/domain/infra/abi/internal/expansion"
+	v1apps "go.podman.io/podman/v6/pkg/k8s.io/api/apps/v1"
+	v1 "go.podman.io/podman/v6/pkg/k8s.io/api/core/v1"
+	metav1 "go.podman.io/podman/v6/pkg/k8s.io/apimachinery/pkg/apis/meta/v1"
+	"go.podman.io/podman/v6/pkg/specgen"
+	"go.podman.io/podman/v6/pkg/specgen/generate"
+	"go.podman.io/podman/v6/pkg/specgen/generate/kube"
+	"go.podman.io/podman/v6/pkg/specgenutil"
+	"go.podman.io/podman/v6/pkg/systemd/notifyproxy"
+	"go.podman.io/podman/v6/pkg/util"
+	"go.podman.io/storage/pkg/chrootarchive"
+	"go.podman.io/storage/pkg/fileutils"
+	"go.podman.io/storage/pkg/stringid"
 	yamlv3 "gopkg.in/yaml.v3"
 	"sigs.k8s.io/yaml"
 )
@@ -67,12 +69,6 @@ func (ic *ContainerEngine) createServiceContainer(ctx context.Context, name stri
 		}
 	}
 
-	// Similar to infra containers, a service container is using the pause image.
-	image, err := generate.PullOrBuildInfraImage(ic.Libpod, "")
-	if err != nil {
-		return nil, fmt.Errorf("image for service container: %w", err)
-	}
-
 	rtc, err := ic.Libpod.GetConfigNoCopy()
 	if err != nil {
 		return nil, err
@@ -83,7 +79,7 @@ func (ic *ContainerEngine) createServiceContainer(ctx context.Context, name stri
 		MemorySwappiness: -1,
 		ReadOnly:         true,
 		ReadWriteTmpFS:   false,
-		// No need to spin up slirp etc.
+		// No need to set up networking.
 		Net:                  &entities.NetOptions{Network: specgen.Namespace{NSMode: specgen.NoNetwork}},
 		StopTimeout:          rtc.Engine.StopTimeout,
 		HealthLogDestination: define.DefaultHealthCheckLocalDestination,
@@ -92,7 +88,7 @@ func (ic *ContainerEngine) createServiceContainer(ctx context.Context, name stri
 	}
 
 	// Create and fill out the runtime spec.
-	s := specgen.NewSpecGenerator(image, false)
+	s := specgen.NewSpecGenerator("", true)
 	if err := specgenutil.FillOutSpecGen(s, &ctrOpts, []string{}); err != nil {
 		return nil, fmt.Errorf("completing spec for service container: %w", err)
 	}
@@ -141,7 +137,7 @@ func (ic *ContainerEngine) prepareAutomountImages(ctx context.Context, forContai
 		return nil, nil
 	}
 
-	for _, imageName := range strings.Split(automount, ";") {
+	for imageName := range strings.SplitSeq(automount, ";") {
 		img, fullName, err := ic.Libpod.LibimageRuntime().LookupImage(imageName, nil)
 		if err != nil {
 			return nil, fmt.Errorf("image %s from container %s does not exist in local storage, cannot automount: %w", imageName, forContainer, err)
@@ -283,6 +279,27 @@ func (ic *ContainerEngine) PlayKube(ctx context.Context, body io.Reader, options
 	var configMaps []v1.ConfigMap
 
 	ranContainers := false
+	// set the ranContainers bool to true if at least one container was successfully started.
+	setRanContainers := func(r *entities.PlayKubeReport) {
+		if !ranContainers {
+			for _, p := range r.Pods {
+				numCons := len(p.Containers) + len(p.InitContainers)
+				if numCons == 0 {
+					// special case, the pod has no containers (besides infra)
+					// That seems to be valid per https://github.com/containers/podman/issues/25786
+					// and users could depend on it so mark it as running in that case.
+					ranContainers = true
+					break
+				}
+				// If the list of container errors is less then the total number of pod containers then we know it did start.
+				if len(p.ContainerErrors) < numCons {
+					ranContainers = true
+					break
+				}
+			}
+		}
+	}
+
 	// FIXME: both, the service container and the proxies, should ideally
 	// be _state_ of an object. The Kube code below is quite Spaghetti-code
 	// which we should refactor at some point to make it easier to extend
@@ -338,9 +355,11 @@ func (ic *ContainerEngine) PlayKube(ctx context.Context, body io.Reader, options
 			var podYAML v1.Pod
 			var podTemplateSpec v1.PodTemplateSpec
 
-			if err := yaml.Unmarshal(document, &podYAML); err != nil {
-				return nil, fmt.Errorf("unable to read YAML as Kube Pod: %w", err)
+			warnings, err := unmarshalKubeObject("Pod", options.Validate, document, &podYAML)
+			if err != nil {
+				return nil, err
 			}
+			report.ValidationWarnings = append(report.ValidationWarnings, warnings...)
 
 			podTemplateSpec.ObjectMeta = podYAML.ObjectMeta
 			podTemplateSpec.Spec = podYAML.Spec
@@ -363,14 +382,17 @@ func (ic *ContainerEngine) PlayKube(ctx context.Context, body io.Reader, options
 			notifyProxies = append(notifyProxies, proxies...)
 
 			report.Pods = append(report.Pods, r.Pods...)
+			report.ValidationWarnings = append(report.ValidationWarnings, r.ValidationWarnings...)
 			validKinds++
-			ranContainers = true
+			setRanContainers(r)
 		case "DaemonSet":
 			var daemonSetYAML v1apps.DaemonSet
 
-			if err := yaml.Unmarshal(document, &daemonSetYAML); err != nil {
-				return nil, fmt.Errorf("unable to read YAML as Kube DaemonSet: %w", err)
+			warnings, err := unmarshalKubeObject("DaemonSet", options.Validate, document, &daemonSetYAML)
+			if err != nil {
+				return nil, err
 			}
+			report.ValidationWarnings = append(report.ValidationWarnings, warnings...)
 
 			r, proxies, err := ic.playKubeDaemonSet(ctx, &daemonSetYAML, options, &ipIndex, configMaps, serviceContainer)
 			if err != nil {
@@ -379,14 +401,17 @@ func (ic *ContainerEngine) PlayKube(ctx context.Context, body io.Reader, options
 			notifyProxies = append(notifyProxies, proxies...)
 
 			report.Pods = append(report.Pods, r.Pods...)
+			report.ValidationWarnings = append(report.ValidationWarnings, r.ValidationWarnings...)
 			validKinds++
-			ranContainers = true
+			setRanContainers(r)
 		case "Deployment":
 			var deploymentYAML v1apps.Deployment
 
-			if err := yaml.Unmarshal(document, &deploymentYAML); err != nil {
-				return nil, fmt.Errorf("unable to read YAML as Kube Deployment: %w", err)
+			warnings, err := unmarshalKubeObject("Deployment", options.Validate, document, &deploymentYAML)
+			if err != nil {
+				return nil, err
 			}
+			report.ValidationWarnings = append(report.ValidationWarnings, warnings...)
 
 			r, proxies, err := ic.playKubeDeployment(ctx, &deploymentYAML, options, &ipIndex, configMaps, serviceContainer)
 			if err != nil {
@@ -395,14 +420,17 @@ func (ic *ContainerEngine) PlayKube(ctx context.Context, body io.Reader, options
 			notifyProxies = append(notifyProxies, proxies...)
 
 			report.Pods = append(report.Pods, r.Pods...)
+			report.ValidationWarnings = append(report.ValidationWarnings, r.ValidationWarnings...)
 			validKinds++
-			ranContainers = true
+			setRanContainers(r)
 		case "Job":
 			var jobYAML v1.Job
 
-			if err := yaml.Unmarshal(document, &jobYAML); err != nil {
-				return nil, fmt.Errorf("unable to read YAML as Kube Job: %w", err)
+			warnings, err := unmarshalKubeObject("Job", options.Validate, document, &jobYAML)
+			if err != nil {
+				return nil, err
 			}
+			report.ValidationWarnings = append(report.ValidationWarnings, warnings...)
 
 			r, proxies, err := ic.playKubeJob(ctx, &jobYAML, options, &ipIndex, configMaps, serviceContainer)
 			if err != nil {
@@ -411,14 +439,17 @@ func (ic *ContainerEngine) PlayKube(ctx context.Context, body io.Reader, options
 			notifyProxies = append(notifyProxies, proxies...)
 
 			report.Pods = append(report.Pods, r.Pods...)
+			report.ValidationWarnings = append(report.ValidationWarnings, r.ValidationWarnings...)
 			validKinds++
-			ranContainers = true
+			setRanContainers(r)
 		case "PersistentVolumeClaim":
 			var pvcYAML v1.PersistentVolumeClaim
 
-			if err := yaml.Unmarshal(document, &pvcYAML); err != nil {
-				return nil, fmt.Errorf("unable to read YAML as Kube PersistentVolumeClaim: %w", err)
+			warnings, err := unmarshalKubeObject("PersistentVolumeClaim", options.Validate, document, &pvcYAML)
+			if err != nil {
+				return nil, err
 			}
+			report.ValidationWarnings = append(report.ValidationWarnings, warnings...)
 
 			for name, val := range options.Annotations {
 				if pvcYAML.Annotations == nil {
@@ -443,16 +474,20 @@ func (ic *ContainerEngine) PlayKube(ctx context.Context, body io.Reader, options
 		case "ConfigMap":
 			var configMap v1.ConfigMap
 
-			if err := yaml.Unmarshal(document, &configMap); err != nil {
-				return nil, fmt.Errorf("unable to read YAML as Kube ConfigMap: %w", err)
+			warnings, err := unmarshalKubeObject("ConfigMap", options.Validate, document, &configMap)
+			if err != nil {
+				return nil, err
 			}
+			report.ValidationWarnings = append(report.ValidationWarnings, warnings...)
 			configMaps = append(configMaps, configMap)
 		case "Secret":
 			var secret v1.Secret
 
-			if err := yaml.Unmarshal(document, &secret); err != nil {
-				return nil, fmt.Errorf("unable to read YAML as kube secret: %w", err)
+			warnings, err := unmarshalKubeObject("Secret", options.Validate, document, &secret)
+			if err != nil {
+				return nil, err
 			}
+			report.ValidationWarnings = append(report.ValidationWarnings, warnings...)
 
 			r, err := ic.playKubeSecret(&secret)
 			if err != nil {
@@ -461,7 +496,15 @@ func (ic *ContainerEngine) PlayKube(ctx context.Context, body io.Reader, options
 			report.Secrets = append(report.Secrets, entities.PlaySecret{CreateReport: r})
 			validKinds++
 		default:
-			logrus.Infof("Kube kind %s not supported", kind)
+			msg := fmt.Sprintf("kube kind %q is not supported", kind)
+			switch options.Validate {
+			case entities.KubeValidateStrict:
+				return nil, errors.New(msg)
+			case entities.KubeValidateWarn:
+				report.ValidationWarnings = append(report.ValidationWarnings, msg)
+			default:
+				logrus.Info(msg)
+			}
 			continue
 		}
 	}
@@ -473,10 +516,14 @@ func (ic *ContainerEngine) PlayKube(ctx context.Context, body io.Reader, options
 		return nil, fmt.Errorf("YAML document does not contain any supported kube kind")
 	}
 
+	if !options.ServiceContainer {
+		return report, nil
+	}
+
 	// If we started containers along with a service container, we are
 	// running inside a systemd unit and need to set the main PID.
 
-	if options.ServiceContainer && ranContainers {
+	if ranContainers {
 		switch len(notifyProxies) {
 		case 0: // Optimization for containers/podman/issues/17345
 			// No container needs sdnotify, so we can mark the
@@ -509,9 +556,49 @@ func (ic *ContainerEngine) PlayKube(ctx context.Context, body io.Reader, options
 		}
 
 		report.ServiceContainerID = serviceContainer.ID()
+	} else if serviceContainer != nil {
+		// No containers started, make sure to stop the service container.
+		// Note because the pods still do exists and are not removed by default we cannot remove it.
+		if err := serviceContainer.StopWithTimeout(0); err != nil {
+			logrus.Errorf("Failed to stop service container: %v", err)
+		}
 	}
 
 	return report, nil
+}
+
+// unmarshalKubeObject decodes a kube YAML document into obj, honoring the
+// validation mode for unrecognized fields, and returns any non-fatal warnings.
+// In "ignore" mode the document is decoded leniently. In "strict" mode an
+// unknown field is a fatal error. In "warn" mode an unknown field is decoded
+// leniently and returned as a warning so the caller can surface it (in the
+// report and/or logs).
+func unmarshalKubeObject(kind string, mode entities.KubeValidateMode, document []byte, obj any) ([]string, error) {
+	switch mode {
+	case entities.KubeValidateStrict:
+		if err := yaml.UnmarshalStrict(document, obj); err != nil {
+			return nil, fmt.Errorf("validating kube %s: %w", kind, err)
+		}
+	case entities.KubeValidateWarn:
+		if err := yaml.UnmarshalStrict(document, obj); err != nil {
+			warning := fmt.Sprintf("kube %s: %v", kind, err)
+			if err := decodeKubeObject(kind, document, obj); err != nil {
+				return nil, err
+			}
+			return []string{warning}, nil
+		}
+	default: // ignore, plus an unset value sent by an older remote client
+		return nil, decodeKubeObject(kind, document, obj)
+	}
+	return nil, nil
+}
+
+// decodeKubeObject leniently decodes a kube YAML document into obj.
+func decodeKubeObject(kind string, document []byte, obj any) error {
+	if err := yaml.Unmarshal(document, obj); err != nil {
+		return fmt.Errorf("unable to read YAML as Kube %s: %w", kind, err)
+	}
+	return nil
 }
 
 func (ic *ContainerEngine) playKubeDaemonSet(ctx context.Context, daemonSetYAML *v1apps.DaemonSet, options entities.PlayKubeOptions, ipIndex *int, configMaps []v1.ConfigMap, serviceContainer *libpod.Container) (*entities.PlayKubeReport, []*notifyproxy.NotifyProxy, error) {
@@ -533,6 +620,7 @@ func (ic *ContainerEngine) playKubeDaemonSet(ctx context.Context, daemonSetYAML 
 		return nil, nil, fmt.Errorf("encountered while bringing up pod %s: %w", podName, err)
 	}
 	report.Pods = podReport.Pods
+	report.ValidationWarnings = podReport.ValidationWarnings
 
 	return &report, proxies, nil
 }
@@ -564,6 +652,7 @@ func (ic *ContainerEngine) playKubeDeployment(ctx context.Context, deploymentYAM
 		return nil, nil, fmt.Errorf("encountered while bringing up pod %s: %w", podName, err)
 	}
 	report.Pods = podReport.Pods
+	report.ValidationWarnings = podReport.ValidationWarnings
 
 	return &report, proxies, nil
 }
@@ -587,6 +676,7 @@ func (ic *ContainerEngine) playKubeJob(ctx context.Context, jobYAML *v1.Job, opt
 		return nil, nil, fmt.Errorf("encountered while bringing up pod %s: %w", podName, err)
 	}
 	report.Pods = podReport.Pods
+	report.ValidationWarnings = podReport.ValidationWarnings
 
 	return &report, proxies, nil
 }
@@ -625,7 +715,7 @@ func (ic *ContainerEngine) playKubePod(ctx context.Context, podName string, podY
 
 	podOpt := entities.PodCreateOptions{
 		Infra:      true,
-		Net:        &entities.NetOptions{NoHosts: options.NoHosts},
+		Net:        &entities.NetOptions{NoHosts: options.NoHosts, NoHostname: options.NoHostname},
 		ExitPolicy: string(config.PodExitPolicyStop),
 	}
 	podOpt, err = kube.ToPodOpt(ctx, podName, podOpt, options.PublishAllPorts, podYAML)
@@ -639,13 +729,14 @@ func (ic *ContainerEngine) playKubePod(ctx context.Context, podName string, podY
 	}
 
 	if len(options.Networks) > 0 {
-		ns, networks, netOpts, err := specgen.ParseNetworkFlag(options.Networks)
+		ns, networks, netOrder, netOpts, err := specgen.ParseNetworkFlag(options.Networks)
 		if err != nil {
 			return nil, nil, err
 		}
 
 		podOpt.Net.Network = ns
 		podOpt.Net.Networks = networks
+		podOpt.Net.NetworkOrder = netOrder
 		podOpt.Net.NetworkOptions = netOpts
 	}
 
@@ -715,9 +806,6 @@ func (ic *ContainerEngine) playKubePod(ctx context.Context, podName string, podY
 	}
 
 	p := specgen.NewPodSpecGenerator()
-	if err != nil {
-		return nil, nil, err
-	}
 
 	p, err = entities.ToPodSpecGen(*p, &podOpt)
 	if err != nil {
@@ -736,10 +824,11 @@ func (ic *ContainerEngine) playKubePod(ctx context.Context, podName string, podY
 		}
 		defer f.Close()
 
-		cms, err := readConfigMapFromFile(f)
+		cms, cmWarnings, err := readConfigMapFromFile(f, options.Validate)
 		if err != nil {
 			return nil, nil, fmt.Errorf("%q: %w", p, err)
 		}
+		report.ValidationWarnings = append(report.ValidationWarnings, cmWarnings...)
 
 		for _, cm := range cms {
 			if _, present := configMapIndex[cm.Name]; present {
@@ -788,8 +877,7 @@ func (ic *ContainerEngine) playKubePod(ctx context.Context, podName string, podY
 			defaultMode := v.DefaultMode
 			// Create files and add data to the volume mountpoint based on the Items in the volume
 			for k, v := range v.Items {
-				dataPath := filepath.Join(mountPoint, k)
-				f, err := os.Create(dataPath)
+				f, err := openPathSafely(mountPoint, k)
 				if err != nil {
 					return nil, nil, fmt.Errorf("cannot create file %q at volume mountpoint %q: %w", k, mountPoint, err)
 				}
@@ -799,7 +887,7 @@ func (ic *ContainerEngine) playKubePod(ctx context.Context, podName string, podY
 					return nil, nil, err
 				}
 				// Set file permissions
-				if err := os.Chmod(f.Name(), os.FileMode(defaultMode)); err != nil {
+				if err := f.Chmod(os.FileMode(defaultMode)); err != nil {
 					return nil, nil, err
 				}
 			}
@@ -821,7 +909,7 @@ func (ic *ContainerEngine) playKubePod(ctx context.Context, podName string, podY
 		}
 	}
 
-	seccompPaths, err := kube.InitializeSeccompPaths(podYAML.ObjectMeta.Annotations, options.SeccompProfileRoot)
+	seccompAnnotationPaths, err := kube.InitializeSeccompAnnotationPaths(podYAML.ObjectMeta.Annotations, options.SeccompProfileRoot)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -868,7 +956,9 @@ func (ic *ContainerEngine) playKubePod(ctx context.Context, podName string, podY
 	// the podName appended to it, but this is a breaking change and will be done in podman 5.0
 	ctrNameAliases := make([]string, 0, len(podYAML.Spec.Containers))
 	for _, container := range podYAML.Spec.Containers {
-		ctrNameAliases = append(ctrNameAliases, container.Name)
+		if container.Name != "" {
+			ctrNameAliases = append(ctrNameAliases, container.Name)
+		}
 	}
 	for k, v := range podSpec.PodSpecGen.Networks {
 		v.Aliases = append(v.Aliases, ctrNameAliases...)
@@ -933,9 +1023,8 @@ func (ic *ContainerEngine) playKubePod(ctx context.Context, podName string, podY
 			return nil, nil, err
 		}
 
-		for k, v := range podSpec.PodSpecGen.Labels { // add podYAML labels
-			labels[k] = v
-		}
+		// add podYAML labels
+		maps.Copy(labels, podSpec.PodSpecGen.Labels)
 		initCtrType := annotations[define.InitContainerType]
 		if initCtrType == "" {
 			initCtrType = define.OneShotInitContainer
@@ -954,28 +1043,29 @@ func (ic *ContainerEngine) playKubePod(ctx context.Context, podName string, podY
 		}
 
 		specgenOpts := kube.CtrSpecGenOptions{
-			Annotations:        annotations,
-			ConfigMaps:         configMaps,
-			Container:          initCtr,
-			Image:              pulledImage,
-			InitContainerType:  initCtrType,
-			Labels:             labels,
-			LogDriver:          options.LogDriver,
-			LogOptions:         options.LogOptions,
-			NetNSIsHost:        p.NetNS.IsHost(),
-			PodID:              pod.ID(),
-			PodInfraID:         podInfraID,
-			PodName:            podName,
-			PodSecurityContext: podYAML.Spec.SecurityContext,
-			ReadOnly:           readOnly,
-			RestartPolicy:      define.RestartPolicyNo,
-			SeccompPaths:       seccompPaths,
-			SecretsManager:     secretsManager,
-			UserNSIsHost:       p.Userns.IsHost(),
-			Volumes:            volumes,
-			VolumesFrom:        volumesFrom,
-			ImageVolumes:       automountImages,
-			UtsNSIsHost:        p.UtsNs.IsHost(),
+			Annotations:            annotations,
+			ConfigMaps:             configMaps,
+			Container:              initCtr,
+			Image:                  pulledImage,
+			InitContainerType:      initCtrType,
+			Labels:                 labels,
+			LogDriver:              options.LogDriver,
+			LogOptions:             options.LogOptions,
+			NetNSIsHost:            p.NetNS.IsHost(),
+			PodID:                  pod.ID(),
+			PodInfraID:             podInfraID,
+			PodName:                podName,
+			PodSecurityContext:     podYAML.Spec.SecurityContext,
+			ReadOnly:               readOnly,
+			RestartPolicy:          define.RestartPolicyNo,
+			SeccompAnnotationPaths: seccompAnnotationPaths,
+			SeccompProfileRoot:     options.SeccompProfileRoot,
+			SecretsManager:         secretsManager,
+			UserNSIsHost:           p.Userns.IsHost(),
+			Volumes:                volumes,
+			VolumesFrom:            volumesFrom,
+			ImageVolumes:           automountImages,
+			UtsNSIsHost:            p.UtsNs.IsHost(),
 		}
 		specGen, err := kube.ToSpecGen(ctx, &specgenOpts)
 		if err != nil {
@@ -1027,9 +1117,8 @@ func (ic *ContainerEngine) playKubePod(ctx context.Context, podName string, podY
 			return nil, nil, err
 		}
 
-		for k, v := range podSpec.PodSpecGen.Labels { // add podYAML labels
-			labels[k] = v
-		}
+		// add podYAML labels
+		maps.Copy(labels, podSpec.PodSpecGen.Labels)
 
 		automountImages, err := ic.prepareAutomountImages(ctx, container.Name, annotations)
 		if err != nil {
@@ -1044,29 +1133,31 @@ func (ic *ContainerEngine) playKubePod(ctx context.Context, podName string, podY
 		}
 
 		specgenOpts := kube.CtrSpecGenOptions{
-			Annotations:        annotations,
-			ConfigMaps:         configMaps,
-			Container:          container,
-			Image:              pulledImage,
-			IpcNSIsHost:        p.Ipc.IsHost(),
-			Labels:             labels,
-			LogDriver:          options.LogDriver,
-			LogOptions:         options.LogOptions,
-			NetNSIsHost:        p.NetNS.IsHost(),
-			PidNSIsHost:        p.Pid.IsHost(),
-			PodID:              pod.ID(),
-			PodInfraID:         podInfraID,
-			PodName:            podName,
-			PodSecurityContext: podYAML.Spec.SecurityContext,
-			RestartPolicy:      podSpec.PodSpecGen.RestartPolicy, // pass the restart policy to the container (https://github.com/containers/podman/issues/20903)
-			ReadOnly:           readOnly,
-			SeccompPaths:       seccompPaths,
-			SecretsManager:     secretsManager,
-			UserNSIsHost:       p.Userns.IsHost(),
-			Volumes:            volumes,
-			VolumesFrom:        volumesFrom,
-			ImageVolumes:       automountImages,
-			UtsNSIsHost:        p.UtsNs.IsHost(),
+			Annotations:            annotations,
+			ConfigMaps:             configMaps,
+			Container:              container,
+			Image:                  pulledImage,
+			IpcNSIsHost:            p.Ipc.IsHost(),
+			Labels:                 labels,
+			LogDriver:              options.LogDriver,
+			LogOptions:             options.LogOptions,
+			NetNSIsHost:            p.NetNS.IsHost(),
+			PidNSIsHost:            p.Pid.IsHost(),
+			PodID:                  pod.ID(),
+			PodInfraID:             podInfraID,
+			PodName:                podName,
+			PodSecurityContext:     podYAML.Spec.SecurityContext,
+			RestartPolicy:          podSpec.PodSpecGen.RestartPolicy, // pass the restart policy to the container (https://github.com/containers/podman/issues/20903)
+			ReadOnly:               readOnly,
+			SeccompAnnotationPaths: seccompAnnotationPaths,
+			SeccompProfileRoot:     options.SeccompProfileRoot,
+			SecretsManager:         secretsManager,
+			UserNSIsHost:           p.Userns.IsHost(),
+			Volumes:                volumes,
+			VolumesFrom:            volumesFrom,
+			ImageVolumes:           automountImages,
+			UtsNSIsHost:            p.UtsNs.IsHost(),
+			NoPodPrefix:            options.NoPodPrefix,
 		}
 
 		if podYAML.Spec.TerminationGracePeriodSeconds != nil {
@@ -1141,9 +1232,18 @@ func (ic *ContainerEngine) playKubePod(ctx context.Context, podName string, podY
 		if err != nil && !errors.Is(err, define.ErrPodPartialFail) {
 			return nil, nil, err
 		}
-		for id, err := range podStartErrors {
-			playKubePod.ContainerErrors = append(playKubePod.ContainerErrors, fmt.Errorf("starting container %s: %w", id, err).Error())
-			fmt.Println(playKubePod.ContainerErrors)
+		if len(podStartErrors) > 0 {
+			ctrNames := make(map[string]string, len(containers))
+			for _, ctr := range containers {
+				ctrNames[ctr.ID()] = ctr.Name()
+			}
+			for id, err := range podStartErrors {
+				if name, ok := ctrNames[id]; ok {
+					playKubePod.ContainerErrors = append(playKubePod.ContainerErrors, fmt.Errorf("starting container %s (%s): %w", name, stringid.TruncateID(id), err).Error())
+				} else {
+					playKubePod.ContainerErrors = append(playKubePod.ContainerErrors, fmt.Errorf("starting container %s: %w", stringid.TruncateID(id), err).Error())
+				}
+			}
 		}
 
 		// Wait for each proxy to receive a READY message. Use a wait
@@ -1286,6 +1386,10 @@ func (ic *ContainerEngine) buildOrPullImage(ctx context.Context, cwd string, wri
 func (ic *ContainerEngine) getImageAndLabelInfo(ctx context.Context, cwd string, annotations map[string]string, writer io.Writer, container v1.Container, options entities.PlayKubeOptions) (*libimage.Image, map[string]string, error) {
 	// Contains all labels obtained from kube
 	labels := make(map[string]string)
+
+	if len(container.Image) == 0 {
+		return nil, labels, nil
+	}
 
 	pulledImage, err := ic.buildOrPullImage(ctx, cwd, writer, container.Image, container.ImagePullPolicy, options)
 	if err != nil {
@@ -1477,42 +1581,45 @@ func (ic *ContainerEngine) importVolume(ctx context.Context, vol *libpod.Volume,
 	}
 
 	// dont care if volume is mounted or not we are gonna import everything to mountPoint
-	return utils.UntarToFileSystem(mountPoint, tarFile, nil)
+	return chrootarchive.Untar(tarFile, mountPoint, nil)
 }
 
 // readConfigMapFromFile returns a kubernetes configMap obtained from --configmap flag
-func readConfigMapFromFile(r io.Reader) ([]v1.ConfigMap, error) {
+func readConfigMapFromFile(r io.Reader, mode entities.KubeValidateMode) ([]v1.ConfigMap, []string, error) {
 	configMaps := make([]v1.ConfigMap, 0)
+	var warnings []string
 
 	content, err := io.ReadAll(r)
 	if err != nil {
-		return nil, fmt.Errorf("unable to read ConfigMap YAML content: %w", err)
+		return nil, nil, fmt.Errorf("unable to read ConfigMap YAML content: %w", err)
 	}
 
 	// split yaml document
 	documentList, err := splitMultiDocYAML(content)
 	if err != nil {
-		return nil, fmt.Errorf("unable to read as kube YAML: %w", err)
+		return nil, nil, fmt.Errorf("unable to read as kube YAML: %w", err)
 	}
 
 	for _, document := range documentList {
 		kind, err := getKubeKind(document)
 		if err != nil {
-			return nil, fmt.Errorf("unable to read as kube YAML: %w", err)
+			return nil, nil, fmt.Errorf("unable to read as kube YAML: %w", err)
 		}
 
 		if kind != "ConfigMap" {
-			return nil, fmt.Errorf("invalid YAML kind: %q. [ConfigMap] is the only supported by --configmap", kind)
+			return nil, nil, fmt.Errorf("invalid YAML kind: %q. [ConfigMap] is the only supported by --configmap", kind)
 		}
 
 		var configMap v1.ConfigMap
-		if err := yaml.Unmarshal(document, &configMap); err != nil {
-			return nil, fmt.Errorf("unable to read YAML as Kube ConfigMap: %w", err)
+		docWarnings, err := unmarshalKubeObject("ConfigMap", mode, document, &configMap)
+		if err != nil {
+			return nil, nil, err
 		}
+		warnings = append(warnings, docWarnings...)
 		configMaps = append(configMaps, configMap)
 	}
 
-	return configMaps, nil
+	return configMaps, warnings, nil
 }
 
 // splitMultiDocYAML reads multiple documents in a YAML file and
@@ -1522,10 +1629,10 @@ func splitMultiDocYAML(yamlContent []byte) ([][]byte, error) {
 
 	d := yamlv3.NewDecoder(bytes.NewReader(yamlContent))
 	for {
-		var o interface{}
+		var o any
 		// read individual document
 		err := d.Decode(&o)
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
@@ -1633,7 +1740,7 @@ func getBuildFile(imageName string, cwd string) (string, error) {
 	// If the error is not because the file does not exist, take
 	// a mulligan and try Dockerfile.  If that also fails, return that
 	// error
-	if err != nil && !os.IsNotExist(err) {
+	if !errors.Is(err, os.ErrNotExist) {
 		logrus.Error(err.Error())
 	}
 
@@ -1643,7 +1750,7 @@ func getBuildFile(imageName string, cwd string) (string, error) {
 		return dockerfilePath, nil
 	}
 	// Strike two
-	if os.IsNotExist(err) {
+	if errors.Is(err, os.ErrNotExist) {
 		return "", nil
 	}
 	return "", err

@@ -6,11 +6,11 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/containers/podman/v5/pkg/api/handlers"
-	"github.com/containers/podman/v5/pkg/bindings"
-	entitiesTypes "github.com/containers/podman/v5/pkg/domain/entities/types"
-	"github.com/containers/podman/v5/pkg/errorhandling"
 	jsoniter "github.com/json-iterator/go"
+	"go.podman.io/podman/v6/pkg/api/handlers"
+	"go.podman.io/podman/v6/pkg/bindings"
+	entitiesTypes "go.podman.io/podman/v6/pkg/domain/entities/types"
+	"go.podman.io/podman/v6/pkg/errorhandling"
 )
 
 func CreatePodFromSpec(ctx context.Context, spec *entitiesTypes.PodSpec) (*entitiesTypes.PodCreateReport, error) {
@@ -37,7 +37,7 @@ func CreatePodFromSpec(ctx context.Context, spec *entitiesTypes.PodSpec) (*entit
 }
 
 // Exists is a lightweight method to determine if a pod exists in local storage
-func Exists(ctx context.Context, nameOrID string, options *ExistsOptions) (bool, error) {
+func Exists(ctx context.Context, nameOrID string, _ *ExistsOptions) (bool, error) {
 	conn, err := bindings.GetClient(ctx)
 	if err != nil {
 		return false, err

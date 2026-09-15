@@ -1,4 +1,4 @@
-//go:build linux || freebsd
+//go:build linux || freebsd || windows
 
 package qemu
 
@@ -8,11 +8,11 @@ import (
 	"os/exec"
 	"time"
 
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/podman/v5/pkg/machine/define"
-	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
-	"github.com/containers/storage/pkg/fileutils"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/podman/v6/pkg/machine/define"
+	"go.podman.io/podman/v6/pkg/machine/vmconfigs"
+	"go.podman.io/storage/pkg/fileutils"
 )
 
 // VirtiofsdSpawner spawns an instance of virtiofsd
@@ -37,11 +37,14 @@ func newVirtiofsdSpawner(runtimeDir *define.VMFile) (*virtiofsdSpawner, error) {
 
 // createVirtiofsCmd returns a new command instance configured to launch virtiofsd.
 func (v *virtiofsdSpawner) createVirtiofsCmd(directory, socketPath string) *exec.Cmd {
-	args := []string{"--sandbox", "none", "--socket-path", socketPath, "--shared-dir", "."}
-	// We don't need seccomp filtering; we trust our workloads. This incidentally
-	// works around issues like https://gitlab.com/virtio-fs/virtiofsd/-/merge_requests/200.
-	args = append(args, "--seccomp=none")
-	cmd := exec.Command(v.binaryPath, args...)
+	cmd := exec.Command(v.binaryPath,
+		"--sandbox", "none",
+		"--socket-path", socketPath,
+		"--shared-dir", ".",
+		// We don't need seccomp filtering; we trust our workloads. This incidentally
+		// works around issues like https://gitlab.com/virtio-fs/virtiofsd/-/merge_requests/200.
+		"--seccomp=none",
+	)
 	// This sets things up so that the `.` we passed in the arguments is the target directory
 	cmd.Dir = directory
 	// Quiet the daemon by default
@@ -73,10 +76,10 @@ func (v *virtiofsdSpawner) spawnForMount(hostmnt *vmconfigs.Mount) ([]string, *v
 		return nil, nil, err
 	}
 
-	qemuCommand := []string{}
-
-	qemuCommand = append(qemuCommand, "-chardev", fmt.Sprintf("socket,id=%s,path=%s", virtiofsChar, virtiofsCharPath.Path))
-	qemuCommand = append(qemuCommand, "-device", fmt.Sprintf("vhost-user-fs-pci,queue-size=1024,chardev=%s,tag=%s", virtiofsChar, hostmnt.Tag))
+	qemuCommand := []string{
+		"-chardev", fmt.Sprintf("socket,id=%s,path=%s", virtiofsChar, virtiofsCharPath.Path),
+		"-device", fmt.Sprintf("vhost-user-fs-pci,queue-size=1024,chardev=%s,tag=%s", virtiofsChar, hostmnt.Tag),
+	}
 	// TODO: Honor hostmnt.readonly somehow here (add an option to virtiofsd)
 	virtiofsdCmd := v.createVirtiofsCmd(hostmnt.Source, virtiofsCharPath.Path)
 	if err := virtiofsdCmd.Start(); err != nil {

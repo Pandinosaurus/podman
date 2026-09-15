@@ -3,13 +3,12 @@
 package integration
 
 import (
-	. "github.com/containers/podman/v5/test/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	. "go.podman.io/podman/v6/test/utils"
 )
 
 var _ = Describe("Podman run exit", func() {
-
 	It("podman run -d mount cleanup test", func() {
 		SkipIfRemote("podman-remote does not support mount")
 		SkipIfRootless("rootless podman mount requires podman unshare first")
@@ -61,7 +60,7 @@ var _ = Describe("Podman run exit", func() {
 
 		// command: podman <options> unshare podman <options> image mount ALPINE
 		args := []string{"unshare", podmanTest.PodmanBinary}
-		opts := podmanTest.PodmanMakeOptions([]string{"mount", "--no-trunc"}, false, false)
+		opts := podmanTest.PodmanMakeOptions([]string{"mount", "--no-trunc"}, PodmanExecOptions{})
 		args = append(args, opts...)
 
 		pmount := podmanTest.Podman(args)

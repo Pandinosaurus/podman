@@ -10,10 +10,10 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/containers/podman/v5/pkg/machine/define"
 	"github.com/crc-org/vfkit/pkg/config"
 	rest "github.com/crc-org/vfkit/pkg/rest/define"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/podman/v6/pkg/machine/define"
 	"golang.org/x/sys/unix"
 )
 
@@ -102,7 +102,7 @@ func (vf *Helper) Stop(force, wait bool) error {
 	}
 	waitDuration := time.Millisecond * 500
 	// Wait up to 90s then hard force off
-	for i := 0; i < 180; i++ {
+	for range 180 {
 		_, err := vf.getRawState()
 		if err != nil {
 			//nolint:nilerr // error means vfkit is gone so machine is stopped

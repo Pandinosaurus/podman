@@ -1,11 +1,11 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package abi
 
 import (
 	"context"
 
-	"github.com/containers/podman/v5/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 func (ic *ContainerEngine) ContainerStat(ctx context.Context, nameOrID string, containerPath string) (*entities.ContainerStatReport, error) {

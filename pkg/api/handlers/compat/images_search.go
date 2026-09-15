@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package compat
 
@@ -6,14 +6,16 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/containers/image/v5/types"
-	"github.com/containers/podman/v5/libpod"
-	"github.com/containers/podman/v5/pkg/api/handlers/utils"
-	api "github.com/containers/podman/v5/pkg/api/types"
-	"github.com/containers/podman/v5/pkg/auth"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/domain/infra/abi"
-	"github.com/containers/storage"
+	"github.com/moby/moby/api/types/registry"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/pkg/api/handlers/utils"
+	"go.podman.io/podman/v6/pkg/api/handlers/utils/apiutil"
+	api "go.podman.io/podman/v6/pkg/api/types"
+	"go.podman.io/podman/v6/pkg/auth"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/domain/infra/abi"
+	"go.podman.io/storage"
 )
 
 func SearchImages(w http.ResponseWriter, r *http.Request) {
@@ -48,6 +50,22 @@ func SearchImages(w http.ResponseWriter, r *http.Request) {
 		password = authconf.Password
 		idToken = authconf.IdentityToken
 	}
+	// compat v1.45 deprecation: searching for is-automated=true will yield no results, while is-automated=false will be a no-op.
+	isAutomatedDeprecated := false
+	if _, err := apiutil.SupportedVersion(r, ">=1.45.0"); err == nil {
+		if !utils.IsLibpodRequest(r) {
+			isAutomatedDeprecated = true
+			if vals, ok := query.Filters["is-automated"]; ok {
+				switch vals[0] {
+				case "true":
+					utils.WriteResponse(w, http.StatusOK, []registry.SearchResult{})
+					return
+				case "false":
+					delete(query.Filters, "is-automated")
+				}
+			}
+		}
+	}
 
 	filters := []string{}
 	for key, val := range query.Filters {
@@ -77,7 +95,31 @@ func SearchImages(w http.ResponseWriter, r *http.Request) {
 			utils.ImageNotFound(w, query.Term, storage.ErrImageUnknown)
 			return
 		}
+		compatResults := make([]registry.SearchResult, len(reports))
+		for i, report := range reports {
+			result := registry.SearchResult{
+				Name:        report.Name,
+				Description: report.Description,
+				StarCount:   report.Stars,
+				IsOfficial:  toBool(report.Official),
+				IsAutomated: toBool(report.Automated), //nolint:staticcheck // we still have to support older API versions which set this
+			}
+			if isAutomatedDeprecated {
+				//nolint:staticcheck
+				result.IsAutomated = false
+			}
+			compatResults[i] = result
+		}
+		utils.WriteResponse(w, http.StatusOK, compatResults)
+		return
 	}
 
 	utils.WriteResponse(w, http.StatusOK, reports)
+}
+
+// toBool converts the string representation
+// of ImageSearchReport's Automated and Official fields
+// to bool that the Docker representation uses.
+func toBool(s string) bool {
+	return s == entities.ImageSearchTrue
 }

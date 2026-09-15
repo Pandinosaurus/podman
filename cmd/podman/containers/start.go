@@ -6,13 +6,13 @@ import (
 	"os"
 	"strings"
 
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/utils"
-	"github.com/containers/podman/v5/cmd/podman/validate"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/utils"
+	"go.podman.io/podman/v6/cmd/podman/validate"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 var (
@@ -25,7 +25,7 @@ var (
 		Args:              validateStart,
 		ValidArgsFunction: common.AutocompleteContainersStartable,
 		Example: `podman start 860a4b231279 5421ab43b45
-  podman start --interactive --attach imageID`,
+podman start --interactive --attach imageID`,
 	}
 
 	containerStartCommand = &cobra.Command{
@@ -36,15 +36,13 @@ var (
 		Args:              startCommand.Args,
 		ValidArgsFunction: startCommand.ValidArgsFunction,
 		Example: `podman container start 860a4b231279 5421ab43b45
-  podman container start --interactive --attach imageID`,
+podman container start --interactive --attach imageID`,
 	}
 )
 
-var (
-	startOptions = entities.ContainerStartOptions{
-		Filters: make(map[string][]string),
-	}
-)
+var startOptions = entities.ContainerStartOptions{
+	Filters: make(map[string][]string),
+}
 
 func startFlags(cmd *cobra.Command) {
 	flags := cmd.Flags()
@@ -52,10 +50,10 @@ func startFlags(cmd *cobra.Command) {
 	flags.BoolVarP(&startOptions.Attach, "attach", "a", false, "Attach container's STDOUT and STDERR")
 
 	detachKeysFlagName := "detach-keys"
-	flags.StringVar(&startOptions.DetachKeys, detachKeysFlagName, containerConfig.DetachKeys(), "Select the key sequence for detaching a container. Format is a single character `[a-Z]` or a comma separated sequence of `ctrl-<value>`, where `<value>` is one of: `a-z`, `@`, `^`, `[`, `\\`, `]`, `^` or `_`")
+	flags.StringVar(&startOptions.DetachKeys, detachKeysFlagName, containerConfig.DetachKeys(), "Select the key sequence for detaching a container. Format is a single character `[a-Z]` or a comma separated sequence of `ctrl-<value>`, where `<value>` is one of: `a-z`, `@`, `[`, `\\`, `]`, `^` or `_`")
 	_ = cmd.RegisterFlagCompletionFunc(detachKeysFlagName, common.AutocompleteDetachKeys)
 
-	flags.BoolVarP(&startOptions.Interactive, "interactive", "i", false, "Keep STDIN open even if not attached")
+	flags.BoolVarP(&startOptions.Interactive, "interactive", "i", false, "Make STDIN available to the contained process")
 	flags.BoolVar(&startOptions.SigProxy, "sig-proxy", false, "Proxy received signals to the process (default true if attaching, false otherwise)")
 
 	filterFlagName := "filter"
@@ -68,6 +66,7 @@ func startFlags(cmd *cobra.Command) {
 		_ = flags.MarkHidden("sig-proxy")
 	}
 }
+
 func init() {
 	registry.Commands = append(registry.Commands, registry.CliCommand{
 		Command: startCommand,
@@ -83,7 +82,7 @@ func init() {
 	validate.AddLatestFlag(containerStartCommand, &startOptions.Latest)
 }
 
-func validateStart(cmd *cobra.Command, args []string) error {
+func validateStart(_ *cobra.Command, args []string) error {
 	if len(args) == 0 && !startOptions.Latest && !startOptions.All && len(filters) < 1 {
 		return errors.New("start requires at least one argument")
 	}
@@ -131,7 +130,7 @@ func start(cmd *cobra.Command, args []string) error {
 		startOptions.Filters[fname] = append(startOptions.Filters[fname], filter)
 	}
 
-	responses, err := registry.ContainerEngine().ContainerStart(registry.GetContext(), containers, startOptions)
+	responses, err := registry.ContainerEngine().ContainerStart(registry.Context(), containers, startOptions)
 	if err != nil {
 		return err
 	}

@@ -5,14 +5,14 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/utils"
-	"github.com/containers/podman/v5/cmd/podman/validate"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/util"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/utils"
+	"go.podman.io/podman/v6/cmd/podman/validate"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/util"
 )
 
 // logsOptionsWrapper wraps entities.LogsOptions and prevents leaking
@@ -51,10 +51,10 @@ var (
 		RunE:              logs,
 		ValidArgsFunction: common.AutocompleteContainers,
 		Example: `podman logs ctrID
-  podman logs --names ctrID1 ctrID2
-  podman logs --tail 2 mywebserver
-  podman logs --follow=true --since 10m ctrID
-  podman logs mywebserver mydbserver`,
+podman logs --names ctrID1 ctrID2
+podman logs --tail 2 mywebserver
+podman logs --follow=true --since 10m ctrID
+podman logs mywebserver mydbserver`,
 	}
 
 	containerLogsCommand = &cobra.Command{
@@ -65,11 +65,11 @@ var (
 		RunE:              logsCommand.RunE,
 		ValidArgsFunction: logsCommand.ValidArgsFunction,
 		Example: `podman container logs ctrID
-		podman container logs --names ctrID1 ctrID2
-		podman container logs --color --names ctrID1 ctrID2
-		podman container logs --tail 2 mywebserver
-		podman container logs --follow=true --since 10m ctrID
-		podman container logs mywebserver mydbserver`,
+podman container logs --names ctrID1 ctrID2
+podman container logs --color --names ctrID1 ctrID2
+podman container logs --tail 2 mywebserver
+podman container logs --follow=true --since 10m ctrID
+podman container logs mywebserver mydbserver`,
 	}
 )
 
@@ -118,7 +118,6 @@ func logsFlags(cmd *cobra.Command) {
 	flags.BoolVarP(&logsOptions.Colors, "color", "", false, "Output the containers with different colors in the log.")
 	flags.BoolVarP(&logsOptions.Names, "names", "n", false, "Output the container name in the log")
 
-	flags.SetInterspersed(false)
 	_ = flags.MarkHidden("details")
 }
 
@@ -142,5 +141,5 @@ func logs(_ *cobra.Command, args []string) error {
 	}
 	logsOptions.StdoutWriter = os.Stdout
 	logsOptions.StderrWriter = os.Stderr
-	return registry.ContainerEngine().ContainerLogs(registry.GetContext(), args, logsOptions.ContainerLogsOptions)
+	return registry.ContainerEngine().ContainerLogs(registry.Context(), args, logsOptions.ContainerLogsOptions)
 }

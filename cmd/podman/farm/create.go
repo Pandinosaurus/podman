@@ -4,11 +4,11 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/validate"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/validate"
 )
 
 var (
@@ -26,7 +26,7 @@ var (
 		PersistentPostRunE: validate.NoOp,
 		ValidArgsFunction:  completion.AutocompleteNone,
 		Example: `podman farm create myfarm connection1
-  podman farm create myfarm`,
+podman farm create myfarm`,
 	}
 )
 
@@ -37,7 +37,7 @@ func init() {
 	})
 }
 
-func create(cmd *cobra.Command, args []string) error {
+func create(_ *cobra.Command, args []string) error {
 	farmName := args[0]
 	connections := args[1:]
 

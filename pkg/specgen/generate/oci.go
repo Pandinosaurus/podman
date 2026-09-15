@@ -1,15 +1,16 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package generate
 
 import (
 	"strings"
 
-	"github.com/containers/common/libimage"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/specgen"
 	"github.com/opencontainers/runtime-tools/generate"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/libimage"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/specgen"
+	"go.podman.io/podman/v6/pkg/util"
 )
 
 func addRlimits(s *specgen.SpecGenerator, g *generate.Generator) {
@@ -17,7 +18,7 @@ func addRlimits(s *specgen.SpecGenerator, g *generate.Generator) {
 
 	for _, u := range s.Rlimits {
 		name := "RLIMIT_" + strings.ToUpper(u.Type)
-		u = subNegativeOne(u)
+		u = util.ClampRlimitToHost(u)
 		g.AddProcessRlimits(name, u.Hard, u.Soft)
 	}
 }

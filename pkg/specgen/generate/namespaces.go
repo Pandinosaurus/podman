@@ -1,25 +1,43 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package generate
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
-	"github.com/containers/common/libimage"
-	"github.com/containers/common/libnetwork/types"
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/podman/v5/libpod"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/namespaces"
-	"github.com/containers/podman/v5/pkg/rootless"
-	"github.com/containers/podman/v5/pkg/specgen"
-	"github.com/containers/podman/v5/pkg/util"
 	spec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/libimage"
+	"go.podman.io/common/libnetwork/types"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/namespaces"
+	"go.podman.io/podman/v6/pkg/rootless"
+	"go.podman.io/podman/v6/pkg/specgen"
+	"go.podman.io/podman/v6/pkg/util"
 )
 
 const host = "host"
+
+// userNSConflictsWithPod returns an error if the user namespace mode
+// conflicts with pod namespace sharing requirements.
+// Containers in a pod must use the same user namespace to avoid ownership and
+// capability issues with shared resources.
+func userNSConflictsWithPod(pod *libpod.Pod, mode specgen.NamespaceMode) error {
+	if pod != nil && pod.HasInfraContainer() {
+		// Allow modes that don't create a new user namespace
+		switch mode {
+		case specgen.FromPod, specgen.Default, specgen.Host, specgen.FromContainer:
+			return nil
+		default:
+			return fmt.Errorf("cannot set user namespace mode when joining pod with infra container: %w", define.ErrInvalidArg)
+		}
+	}
+	return nil
+}
 
 // Get the default namespace mode for any given namespace type.
 func GetDefaultNamespaceMode(nsType string, cfg *config.Config, pod *libpod.Pod) (specgen.Namespace, error) {
@@ -90,7 +108,7 @@ func GetDefaultNamespaceMode(nsType string, cfg *config.Config, pod *libpod.Pod)
 	case "cgroup":
 		return specgen.ParseCgroupNamespace(cfg.Containers.CgroupNS)
 	case "net":
-		ns, _, _, err := specgen.ParseNetworkFlag(nil)
+		ns, _, _, _, err := specgen.ParseNetworkFlag(nil)
 		return ns, err
 	}
 
@@ -211,7 +229,11 @@ func namespaceOptions(s *specgen.SpecGenerator, rt *libpod.Runtime, pod *libpod.
 		}
 	}
 
-	// User
+	// Validate that user namespace mode is compatible with pod.
+	if err := userNSConflictsWithPod(pod, s.UserNS.NSMode); err != nil {
+		return nil, err
+	}
+
 	switch s.UserNS.NSMode {
 	case specgen.KeepID:
 		opts, err := namespaces.UsernsMode(s.UserNS.String()).GetKeepIDOptions()
@@ -247,6 +269,10 @@ func namespaceOptions(s *specgen.SpecGenerator, rt *libpod.Runtime, pod *libpod.
 			return nil, fmt.Errorf("looking up container to share user namespace with: %w", err)
 		}
 		toReturn = append(toReturn, libpod.WithUserNSFrom(userCtr))
+	case specgen.Private:
+	case specgen.Auto:
+	case specgen.NoMap:
+	case specgen.Path:
 	}
 
 	// This wipes the UserNS settings that get set from the infra container
@@ -255,8 +281,6 @@ func namespaceOptions(s *specgen.SpecGenerator, rt *libpod.Runtime, pod *libpod.
 	if s.IDMappings != nil {
 		if pod == nil {
 			toReturn = append(toReturn, libpod.WithIDMappings(*s.IDMappings))
-		} else if pod.HasInfraContainer() && (len(s.IDMappings.UIDMap) > 0 || len(s.IDMappings.GIDMap) > 0) {
-			return nil, fmt.Errorf("cannot specify a new uid/gid map when entering a pod with an infra container: %w", define.ErrInvalidArg)
 		}
 	}
 	if s.User != "" {
@@ -322,12 +346,6 @@ func namespaceOptions(s *specgen.SpecGenerator, rt *libpod.Runtime, pod *libpod.
 		} else {
 			toReturn = append(toReturn, libpod.WithNetNSFrom(netCtr))
 		}
-	case specgen.Slirp:
-		val := "slirp4netns"
-		if s.NetNS.Value != "" {
-			val = fmt.Sprintf("slirp4netns:%s", s.NetNS.Value)
-		}
-		toReturn = append(toReturn, libpod.WithNetNS(portMappings, postConfigureNetNS, val, nil))
 	case specgen.Pasta:
 		val := "pasta"
 		toReturn = append(toReturn, libpod.WithNetNS(portMappings, postConfigureNetNS, val, nil))
@@ -338,33 +356,68 @@ func namespaceOptions(s *specgen.SpecGenerator, rt *libpod.Runtime, pod *libpod.
 		}
 		// if no network was specified use add the default
 		if len(s.Networks) == 0 {
-			// backwards config still allow the old cni networks list and convert to new format
-			if len(s.CNINetworks) > 0 {
-				logrus.Warn(`specgen "cni_networks" option is deprecated use the "networks" map instead`)
-				networks := make(map[string]types.PerNetworkOptions, len(s.CNINetworks))
-				for _, net := range s.CNINetworks {
-					networks[net] = types.PerNetworkOptions{}
-				}
-				s.Networks = networks
-			} else {
-				// no networks given but bridge is set so use default network
-				s.Networks = map[string]types.PerNetworkOptions{
-					rtConfig.Network.DefaultNetwork: {},
-				}
+			// no networks given but bridge is set so use default network
+			s.Networks = map[string]types.PerNetworkOptions{
+				rtConfig.Network.DefaultNetwork: {},
 			}
 		}
 		// rename the "default" network to the correct default name
 		if opts, ok := s.Networks["default"]; ok {
 			s.Networks[rtConfig.Network.DefaultNetwork] = opts
 			delete(s.Networks, "default")
+
+			if s.NetworkOrder != nil {
+				newNetworkOrder := make([]string, 0, len(s.NetworkOrder))
+				for _, net := range s.NetworkOrder {
+					if net == "default" {
+						newNetworkOrder = append(newNetworkOrder, rtConfig.Network.DefaultNetwork)
+					} else {
+						newNetworkOrder = append(newNetworkOrder, net)
+					}
+				}
+				s.NetworkOrder = newNetworkOrder
+			}
 		}
-		toReturn = append(toReturn, libpod.WithNetNS(portMappings, postConfigureNetNS, "bridge", s.Networks))
+
+		finalNetworks := make([]types.NamedPerNetworkOptions, 0, len(s.Networks))
+		if s.NetworkOrder != nil {
+			if len(s.NetworkOrder) != len(s.Networks) {
+				return nil, fmt.Errorf("the NetworkOrder struct must have the same length as Networks: %d vs %d", len(s.NetworkOrder), len(s.Networks))
+			}
+			for _, n := range s.NetworkOrder {
+				network, ok := s.Networks[n]
+				if !ok {
+					return nil, fmt.Errorf("key found in NetworkOrder that is not in the Networks map: %s", n)
+				}
+				finalNetworks = append(finalNetworks, types.NamedPerNetworkOptions{
+					Name:              n,
+					PerNetworkOptions: network,
+				})
+			}
+		} else {
+			keys := make([]string, 0, len(s.Networks))
+			for key := range s.Networks {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			for _, key := range keys {
+				finalNetworks = append(finalNetworks, types.NamedPerNetworkOptions{
+					Name:              key,
+					PerNetworkOptions: s.Networks[key],
+				})
+			}
+		}
+
+		toReturn = append(toReturn, libpod.WithNetNS(portMappings, postConfigureNetNS, "bridge", finalNetworks))
 	}
 
 	if s.UseImageHosts != nil && *s.UseImageHosts {
 		toReturn = append(toReturn, libpod.WithUseImageHosts())
 	} else if len(s.HostAdd) > 0 {
 		toReturn = append(toReturn, libpod.WithHosts(s.HostAdd))
+	}
+	if s.UseImageHostname != nil && *s.UseImageHostname {
+		toReturn = append(toReturn, libpod.WithUseImageHostname())
 	}
 	if len(s.DNSSearch) > 0 {
 		toReturn = append(toReturn, libpod.WithDNSSearch(s.DNSSearch))
@@ -391,7 +444,7 @@ func namespaceOptions(s *specgen.SpecGenerator, rt *libpod.Runtime, pod *libpod.
 // GetNamespaceOptions transforms a slice of kernel namespaces
 // into a slice of pod create options. Currently, not all
 // kernel namespaces are supported, and they will be returned in an error
-func GetNamespaceOptions(ns []string, netnsIsHost bool) ([]libpod.PodCreateOption, error) {
+func GetNamespaceOptions(ns []string, _ bool) ([]libpod.PodCreateOption, error) {
 	var options []libpod.PodCreateOption
 	var erroredOptions []libpod.PodCreateOption
 	if ns == nil {

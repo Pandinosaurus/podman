@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package libpod
 
@@ -7,13 +7,13 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/containers/podman/v5/libpod"
-	"github.com/containers/podman/v5/pkg/api/handlers/utils"
-	api "github.com/containers/podman/v5/pkg/api/types"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/domain/infra/abi"
-	"github.com/containers/podman/v5/pkg/util"
 	"github.com/gorilla/schema"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/pkg/api/handlers/utils"
+	api "go.podman.io/podman/v6/pkg/api/types"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/domain/infra/abi"
+	"go.podman.io/podman/v6/pkg/util"
 )
 
 // SystemPrune removes unused data
@@ -25,6 +25,7 @@ func SystemPrune(w http.ResponseWriter, r *http.Request) {
 		All      bool `schema:"all"`
 		Volumes  bool `schema:"volumes"`
 		External bool `schema:"external"`
+		Build    bool `schema:"build"`
 	}{}
 
 	if err := decoder.Decode(&query, r.URL.Query()); err != nil {
@@ -46,6 +47,7 @@ func SystemPrune(w http.ResponseWriter, r *http.Request) {
 		Volume:   query.Volumes,
 		Filters:  *filterMap,
 		External: query.External,
+		Build:    query.Build,
 	}
 	report, err := containerEngine.SystemPrune(r.Context(), pruneOptions)
 	if err != nil {
@@ -94,6 +96,7 @@ func SystemCheck(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			utils.Error(w, http.StatusBadRequest,
 				fmt.Errorf("failed to parse unreferenced_layer_max_age parameter %q for %s: %w", query.UnreferencedLayerMaximumAge, r.URL.String(), err))
+			return
 		}
 		unreferencedLayerMaximumAge = &duration
 	}

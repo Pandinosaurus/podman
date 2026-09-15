@@ -5,11 +5,11 @@ import (
 	"os"
 	"strings"
 
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/validate"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/validate"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 var (
@@ -22,8 +22,8 @@ var (
 		Args:              validate.IDOrLatestArgs,
 		ValidArgsFunction: common.AutocompleteContainersRunning,
 		Example: `podman attach ctrID
-  podman attach 1234
-  podman attach --no-stdin foobar`,
+podman attach 1234
+podman attach --no-stdin foobar`,
 	}
 
 	containerAttachCommand = &cobra.Command{
@@ -34,20 +34,18 @@ var (
 		Args:              validate.IDOrLatestArgs,
 		ValidArgsFunction: attachCommand.ValidArgsFunction,
 		Example: `podman container attach ctrID
-	podman container attach 1234
-	podman container attach --no-stdin foobar`,
+podman container attach 1234
+podman container attach --no-stdin foobar`,
 	}
 )
 
-var (
-	attachOpts entities.AttachOptions
-)
+var attachOpts entities.AttachOptions
 
 func attachFlags(cmd *cobra.Command) {
 	flags := cmd.Flags()
 
 	detachKeysFlagName := "detach-keys"
-	flags.StringVar(&attachOpts.DetachKeys, detachKeysFlagName, containerConfig.DetachKeys(), "Select the key sequence for detaching a container. Format is a single character `[a-Z]` or a comma separated sequence of `ctrl-<value>`, where `<value>` is one of: `a-z`, `@`, `^`, `[`, `\\`, `]`, `^` or `_`")
+	flags.StringVar(&attachOpts.DetachKeys, detachKeysFlagName, containerConfig.DetachKeys(), "Select the key sequence for detaching a container. Format is a single character `[a-Z]` or a comma separated sequence of `ctrl-<value>`, where `<value>` is one of: `a-z`, `@`, `[`, `\\`, `]`, `^` or `_`")
 	_ = cmd.RegisterFlagCompletionFunc(detachKeysFlagName, common.AutocompleteDetachKeys)
 
 	flags.BoolVar(&attachOpts.NoStdin, "no-stdin", false, "Do not attach STDIN. The default is false")
@@ -69,7 +67,7 @@ func init() {
 	validate.AddLatestFlag(containerAttachCommand, &attachOpts.Latest)
 }
 
-func attach(cmd *cobra.Command, args []string) error {
+func attach(_ *cobra.Command, args []string) error {
 	if len(args) > 1 || (len(args) == 0 && !attachOpts.Latest) {
 		return errors.New("attach requires the name or id of one running container or the latest flag")
 	}
@@ -84,5 +82,5 @@ func attach(cmd *cobra.Command, args []string) error {
 	}
 	attachOpts.Stdout = os.Stdout
 	attachOpts.Stderr = os.Stderr
-	return registry.ContainerEngine().ContainerAttach(registry.GetContext(), name, attachOpts)
+	return registry.ContainerEngine().ContainerAttach(registry.Context(), name, attachOpts)
 }

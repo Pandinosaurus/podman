@@ -2,6 +2,7 @@ package bindings_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -9,13 +10,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/containers/podman/v5/libpod/define"
-	. "github.com/containers/podman/v5/pkg/bindings"
-	"github.com/containers/podman/v5/pkg/bindings/containers"
-	"github.com/containers/podman/v5/pkg/specgen"
 	"github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	. "github.com/onsi/gomega/gexec"
+	"go.podman.io/podman/v6/libpod/define"
+	. "go.podman.io/podman/v6/pkg/bindings"
+	"go.podman.io/podman/v6/pkg/bindings/containers"
+	"go.podman.io/podman/v6/pkg/specgen"
 )
 
 type testImage struct {
@@ -31,7 +32,7 @@ const (
 
 func getPodmanBinary() string {
 	_, err := os.Stat(devPodmanBinaryLocation)
-	if os.IsNotExist(err) {
+	if errors.Is(err, os.ErrNotExist) {
 		return defaultPodmanBinaryLocation
 	}
 	return devPodmanBinaryLocation
@@ -50,7 +51,7 @@ var (
 		shortName:   "busybox",
 		tarballName: "busybox.tar",
 	}
-	CACHE_IMAGES = []testImage{alpine, busybox} //nolint:revive,stylecheck
+	CACHE_IMAGES = []testImage{alpine, busybox}
 )
 
 type bindingTest struct {
@@ -82,10 +83,6 @@ func (b *bindingTest) runPodman(command []string) *Session {
 	val, ok = os.LookupEnv("CGROUP_MANAGER")
 	if ok {
 		cmd = append(cmd, "--cgroup-manager", val)
-	}
-	val, ok = os.LookupEnv("CNI_CONFIG_DIR")
-	if ok {
-		cmd = append(cmd, "--network-config-dir", val)
 	}
 	val, ok = os.LookupEnv("CONMON")
 	if ok {
@@ -154,9 +151,9 @@ func (b *bindingTest) startAPIService() *Session {
 	session := b.runPodman(cmd)
 
 	sock := strings.TrimPrefix(b.sock, "unix://")
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		if _, err := os.Stat(sock); err != nil {
-			if !os.IsNotExist(err) {
+			if !errors.Is(err, os.ErrNotExist) {
 				break
 			}
 			time.Sleep(time.Second)
@@ -193,6 +190,7 @@ func (b *bindingTest) RestoreImagesFromCache() {
 		b.restoreImageFromCache(i)
 	}
 }
+
 func (b *bindingTest) restoreImageFromCache(i testImage) {
 	p := b.runPodman([]string{"load", "-i", filepath.Join(ImageCacheDir, i.tarballName)})
 	p.Wait(45)
@@ -249,7 +247,7 @@ func (b *bindingTest) PodcreateAndExpose(name *string, port *string) {
 
 var _ = ginkgo.SynchronizedBeforeSuite(func() []byte {
 	// make cache dir
-	err := os.MkdirAll(ImageCacheDir, 0777)
+	err := os.MkdirAll(ImageCacheDir, 0o777)
 	Expect(err).ToNot(HaveOccurred())
 
 	// If running localized tests, the cache dir is created and populated. if the
@@ -267,7 +265,7 @@ func createCache() {
 	b := newBindingTest()
 	for _, i := range CACHE_IMAGES {
 		_, err := os.Stat(filepath.Join(ImageCacheDir, i.tarballName))
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			//	pull the image
 			b.Pull(i.name)
 			b.Save(i)

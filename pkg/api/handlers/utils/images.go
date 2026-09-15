@@ -1,28 +1,31 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package utils
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
-	"github.com/containers/common/libimage"
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/image/v5/docker"
-	"github.com/containers/image/v5/docker/reference"
-	storageTransport "github.com/containers/image/v5/storage"
-	"github.com/containers/image/v5/transports/alltransports"
-	"github.com/containers/image/v5/types"
-	"github.com/containers/podman/v5/libpod"
-	api "github.com/containers/podman/v5/pkg/api/types"
-	"github.com/containers/podman/v5/pkg/errorhandling"
-	"github.com/containers/storage"
 	"github.com/docker/distribution/registry/api/errcode"
-	"github.com/docker/docker/pkg/jsonmessage"
+	"github.com/docker/go-units"
+	"github.com/moby/moby/api/types/jsonstream"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/libimage"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/image/v5/docker"
+	"go.podman.io/image/v5/docker/reference"
+	storageTransport "go.podman.io/image/v5/storage"
+	"go.podman.io/image/v5/transports/alltransports"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/pkg/api/handlers"
+	"go.podman.io/podman/v6/pkg/api/handlers/utils/apiutil"
+	api "go.podman.io/podman/v6/pkg/api/types"
+	"go.podman.io/podman/v6/pkg/errorhandling"
+	"go.podman.io/storage"
 )
 
 // NormalizeToDockerHub normalizes the specified nameOrID to Docker Hub if the
@@ -44,7 +47,7 @@ func NormalizeToDockerHub(r *http.Request, nameOrID string) (string, error) {
 	img, candidate, err := runtime.LibimageRuntime().LookupImage(nameOrID, nil)
 	if err != nil {
 		if !errors.Is(err, storage.ErrImageUnknown) {
-			return "", fmt.Errorf("normalizing name for compat API: %v", err)
+			return "", fmt.Errorf("normalizing name for compat API: %w", err)
 		}
 		// If the image could not be resolved locally, set the
 		// candidate back to the input.
@@ -56,7 +59,7 @@ func NormalizeToDockerHub(r *http.Request, nameOrID string) (string, error) {
 	// No ID, so we can normalize.
 	named, err := reference.ParseNormalizedNamed(candidate)
 	if err != nil {
-		return "", fmt.Errorf("normalizing name %q (orig: %q) for compat API: %v", candidate, nameOrID, err)
+		return "", fmt.Errorf("normalizing name %q (orig: %q) for compat API: %w", candidate, nameOrID, err)
 	}
 
 	return named.String(), nil
@@ -124,7 +127,64 @@ type pullResult struct {
 	err    error
 }
 
-func CompatPull(ctx context.Context, w http.ResponseWriter, runtime *libpod.Runtime, reference string, pullPolicy config.PullPolicy, pullOptions *libimage.PullOptions) {
+// This function is inherited from moby/moby and licensed as Apache-2.0.
+// It is used to keep backward compatibility with older docker clients.
+func jsonProgressToString(p *jsonstream.Progress) string {
+	var (
+		pbBox      string
+		numbersBox string
+	)
+	if p.Current <= 0 && p.Total <= 0 {
+		return ""
+	}
+	if p.Total <= 0 {
+		switch p.Units {
+		case "":
+			return fmt.Sprintf("%8v", units.HumanSize(float64(p.Current)))
+		default:
+			return fmt.Sprintf("%d %s", p.Current, p.Units)
+		}
+	}
+
+	percentage := min(int(float64(p.Current)/float64(p.Total)*100)/2, 50)
+
+	numSpaces := max(50-percentage, 0)
+	pbBox = fmt.Sprintf("[%s>%s] ", strings.Repeat("=", percentage), strings.Repeat(" ", numSpaces))
+
+	switch {
+	case p.HideCounts:
+	case p.Units == "": // no units, use bytes
+		current := units.HumanSize(float64(p.Current))
+		total := units.HumanSize(float64(p.Total))
+
+		numbersBox = fmt.Sprintf("%8v/%v", current, total)
+
+		if p.Current > p.Total {
+			// remove total display if the reported current is wonky.
+			numbersBox = fmt.Sprintf("%8v", current)
+		}
+	default:
+		numbersBox = fmt.Sprintf("%d/%d %s", p.Current, p.Total, p.Units)
+
+		if p.Current > p.Total {
+			// remove total display if the reported current is wonky.
+			numbersBox = fmt.Sprintf("%d %s", p.Current, p.Units)
+		}
+	}
+
+	// Show approximation of remaining time if there's enough width.
+	var timeLeftBox string
+	if p.Current > 0 && p.Start > 0 && percentage < 50 {
+		fromStart := time.Now().UTC().Sub(time.Unix(p.Start, 0))
+		perEntry := fromStart / time.Duration(p.Current)
+		left := time.Duration(p.Total-p.Current) * perEntry
+		timeLeftBox = " " + left.Round(time.Second).String()
+	}
+	return pbBox + numbersBox + timeLeftBox
+}
+
+func CompatPull(r *http.Request, w http.ResponseWriter, runtime *libpod.Runtime, reference string, pullPolicy config.PullPolicy, pullOptions *libimage.PullOptions) {
+	ctx := r.Context()
 	progress := make(chan types.ProgressProperties)
 	pullOptions.Progress = progress
 
@@ -146,8 +206,8 @@ func CompatPull(ctx context.Context, w http.ResponseWriter, runtime *libpod.Runt
 	statusWritten := false
 	writeStatusCode := func(code int) {
 		if !statusWritten {
-			w.WriteHeader(code)
 			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(code)
 			flush()
 			statusWritten = true
 		}
@@ -156,8 +216,8 @@ func CompatPull(ctx context.Context, w http.ResponseWriter, runtime *libpod.Runt
 
 loop: // break out of for/select infinite loop
 	for {
-		report := jsonmessage.JSONMessage{}
-		report.Progress = &jsonmessage.JSONProgress{}
+		report := handlers.LegacyJSONMessage{} //nolint:staticcheck // LegacyJSONMessage is deprecated but kept for Docker API compat < v1.52
+		report.Progress = &jsonstream.Progress{}
 		select {
 		case e := <-progress:
 			writeStatusCode(http.StatusOK)
@@ -169,7 +229,10 @@ loop: // break out of for/select infinite loop
 				report.Status = "Downloading"
 				report.Progress.Current = int64(e.Offset)
 				report.Progress.Total = e.Artifact.Size
-				report.ProgressMessage = report.Progress.String()
+				// Deprecated field, but because consumers might still read it keep it.
+				if _, err := apiutil.SupportedVersion(r, "<1.52.0"); err == nil {
+					report.ProgressMessage = jsonProgressToString(report.Progress)
+				}
 			case types.ProgressEventSkipped:
 				report.Status = "Already exists"
 			case types.ProgressEventDone:
@@ -183,17 +246,14 @@ loop: // break out of for/select infinite loop
 		case pullRes := <-pullResChan:
 			err := pullRes.err
 			if err != nil {
-				var errcd errcode.ErrorCoder
-				if errors.As(err, &errcd) {
-					writeStatusCode(errcd.ErrorCode().Descriptor().HTTPStatusCode)
-				} else {
-					writeStatusCode(http.StatusInternalServerError)
-				}
+				writeStatusCode(HTTPStatusFromRegistryError(err))
 				msg := err.Error()
-				report.Error = &jsonmessage.JSONError{
+				report.Error = &jsonstream.Error{
 					Message: msg,
 				}
-				report.ErrorMessage = msg
+				if _, err := apiutil.SupportedVersion(r, "<1.52.0"); err == nil {
+					report.ErrorMessage = msg //nolint:staticcheck // deprecated field
+				}
 			} else {
 				pulledImages := pullRes.images
 				if len(pulledImages) > 0 {
@@ -202,10 +262,12 @@ loop: // break out of for/select infinite loop
 					report.ID = img[0:12]
 				} else {
 					msg := "internal error: no images pulled"
-					report.Error = &jsonmessage.JSONError{
+					report.Error = &jsonstream.Error{
 						Message: msg,
 					}
-					report.ErrorMessage = msg
+					if _, err := apiutil.SupportedVersion(r, "<1.52.0"); err == nil {
+						report.ErrorMessage = msg //nolint:staticcheck // deprecated field
+					}
 					writeStatusCode(http.StatusInternalServerError)
 				}
 			}
@@ -214,7 +276,7 @@ loop: // break out of for/select infinite loop
 			// This is necessary for compatibility with the Docker API.
 			if err != nil && !progressSent {
 				msg := errorhandling.Cause(err).Error()
-				message := jsonmessage.JSONError{
+				message := jsonstream.Error{
 					Message: msg,
 				}
 				if err := enc.Encode(message); err != nil {
@@ -229,4 +291,15 @@ loop: // break out of for/select infinite loop
 			break loop // break out of for/select infinite loop
 		}
 	}
+}
+
+func HTTPStatusFromRegistryError(err error) int {
+	if err == nil {
+		return http.StatusOK
+	}
+	var errcd errcode.ErrorCoder
+	if errors.As(err, &errcd) {
+		return errcd.ErrorCode().Descriptor().HTTPStatusCode
+	}
+	return http.StatusInternalServerError
 }

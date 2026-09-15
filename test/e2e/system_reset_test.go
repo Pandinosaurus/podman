@@ -5,14 +5,13 @@ package integration
 import (
 	"fmt"
 
-	. "github.com/containers/podman/v5/test/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	. "go.podman.io/podman/v6/test/utils"
 )
 
 // system reset must run serial: https://github.com/containers/podman/issues/17903
 var _ = Describe("podman system reset", Serial, func() {
-
 	It("podman system reset", func() {
 		SkipIfRemote("system reset not supported on podman --remote")
 		// system reset will not remove additional store images, so need to grab length
@@ -55,7 +54,7 @@ var _ = Describe("podman system reset", Serial, func() {
 		session = podmanTest.Podman([]string{"volume", "ls"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
-		Expect(session.OutputToStringArray()).To(BeEmpty())
+		Expect(session.OutputToStringArray()).To(HaveLen(1))
 
 		session = podmanTest.Podman([]string{"container", "ls", "-q"})
 		session.WaitWithDefaultTimeout()

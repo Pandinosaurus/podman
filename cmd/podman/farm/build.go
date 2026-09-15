@@ -6,13 +6,13 @@ import (
 	"os"
 	"strings"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/utils"
-	"github.com/containers/podman/v5/pkg/farm"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/utils"
+	"go.podman.io/podman/v6/pkg/farm"
 )
 
 type buildOptions struct {
@@ -109,6 +109,11 @@ func build(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	opts.IIDFile = iidFile
+	iidFileRaw, err := cmd.Flags().GetString("iidfile-raw")
+	if err != nil {
+		return err
+	}
+	opts.IIDFileRaw = iidFileRaw
 	// only set tls-verify if it has been changed by the user
 	// if it hasn't we will read the registries.conf on the farm
 	// nodes for further configuration

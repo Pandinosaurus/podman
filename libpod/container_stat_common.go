@@ -9,9 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/containers/buildah/copier"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/copy"
+	"go.podman.io/buildah/copier"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/copy"
 )
 
 // statOnHost stats the specified path *on the host*.  It returns the file info
@@ -21,7 +21,7 @@ import (
 func (c *Container) statOnHost(mountPoint string, containerPath string) (*copier.StatForItem, string, string, error) {
 	// Now resolve the container's path.  It may hit a volume, it may hit a
 	// bind mount, it may be relative.
-	resolvedRoot, resolvedPath, err := c.resolvePath(mountPoint, containerPath)
+	resolvedRoot, resolvedPath, _, err := c.resolvePath(mountPoint, containerPath)
 	if err != nil {
 		return nil, "", "", err
 	}
@@ -61,7 +61,7 @@ func (c *Container) stat(containerMountPoint string, containerPath string) (*def
 		// have to look into the error string.  Turning it into an
 		// ENOENT lets the API handlers return the correct status code
 		// which is crucial for the remote client.
-		if os.IsNotExist(statErr) || strings.Contains(statErr.Error(), "o such file or directory") {
+		if errors.Is(statErr, os.ErrNotExist) || strings.Contains(statErr.Error(), "o such file or directory") {
 			statErr = copy.ErrENOENT
 		}
 	}

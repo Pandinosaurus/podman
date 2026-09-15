@@ -3,10 +3,10 @@ package inspect
 import (
 	"time"
 
-	"github.com/containers/image/v5/manifest"
-	"github.com/containers/podman/v5/libpod/define"
 	"github.com/opencontainers/go-digest"
 	v1 "github.com/opencontainers/image-spec/specs-go/v1"
+	"go.podman.io/image/v5/manifest"
+	"go.podman.io/podman/v6/libpod/define"
 )
 
 // ImageData holds the inspect information of an image.
@@ -37,6 +37,8 @@ type ImageData struct {
 }
 
 // RootFS holds the root fs information of an image.
+//
+// swagger:model InspectRootFS
 type RootFS struct {
 	Type   string          `json:"Type"`
 	Layers []digest.Digest `json:"Layers"`

@@ -1,19 +1,19 @@
 package define
 
 import (
-	"github.com/containers/common/libnetwork/types"
-	"github.com/containers/storage/pkg/idtools"
+	"go.podman.io/common/libnetwork/types"
+	"go.podman.io/storage/pkg/idtools"
 )
 
 // Info is the overall struct that describes the host system
 // running libpod/podman
 // swagger:model LibpodInfo
 type Info struct {
-	Host       *HostInfo              `json:"host"`
-	Store      *StoreInfo             `json:"store"`
-	Registries map[string]interface{} `json:"registries"`
-	Plugins    Plugins                `json:"plugins"`
-	Version    Version                `json:"version"`
+	Host       *HostInfo      `json:"host"`
+	Store      *StoreInfo     `json:"store"`
+	Registries map[string]any `json:"registries"`
+	Plugins    Plugins        `json:"plugins"`
+	Version    Version        `json:"version"`
 }
 
 // SecurityInfo describes the libpod host
@@ -33,6 +33,8 @@ type HostInfo struct {
 	CgroupManager      string            `json:"cgroupManager"`
 	CgroupsVersion     string            `json:"cgroupVersion"`
 	CgroupControllers  []string          `json:"cgroupControllers"`
+	CDISpecDirs        []string          `json:"cdiSpecDirs"`
+	DiscoveredDevices  []DeviceInfo      `json:"discoveredDevices,omitempty"`
 	Conmon             *ConmonInfo       `json:"conmon"`
 	CPUs               int               `json:"cpus"`
 	CPUUtilization     *CPUUsage         `json:"cpuUtilization"`
@@ -41,10 +43,11 @@ type HostInfo struct {
 	EventLogger        string            `json:"eventLogger"`
 	FreeLocks          *uint32           `json:"freeLocks,omitempty"`
 	Hostname           string            `json:"hostname"`
-	IDMappings         IDMappings        `json:"idMappings,omitempty"`
+	IDMappings         IDMappings        `json:"idMappings"`
 	Kernel             string            `json:"kernel"`
 	LogDriver          string            `json:"logDriver"`
 	MemFree            int64             `json:"memFree"`
+	MemAvailable       int64             `json:"memAvailable"`
 	MemTotal           int64             `json:"memTotal"`
 	NetworkBackend     string            `json:"networkBackend"`
 	NetworkBackendInfo types.NetworkInfo `json:"networkBackendInfo"`
@@ -52,33 +55,36 @@ type HostInfo struct {
 	OS                 string            `json:"os"`
 	// RemoteSocket returns the UNIX domain socket the Podman service is listening on
 	RemoteSocket *RemoteSocket `json:"remoteSocket,omitempty"`
-	// RootlessNetworkCmd returns the default rootless network command (slirp4netns or pasta)
-	RootlessNetworkCmd string                 `json:"rootlessNetworkCmd"`
-	RuntimeInfo        map[string]interface{} `json:"runtimeInfo,omitempty"`
+	// RootlessNetworkCmd returns the default rootless network command (pasta)
+	RootlessNetworkCmd string `json:"rootlessNetworkCmd"`
+	// RootlessPortForwarder returns the port forwarding mechanism for rootless
+	// bridge networks: "rootlessport" (default) or "pasta" (experimental)
+	RootlessPortForwarder string         `json:"rootlessPortForwarder"`
+	RuntimeInfo           map[string]any `json:"runtimeInfo,omitempty"`
 	// ServiceIsRemote is true when the podman/libpod service is remote to the client
 	ServiceIsRemote bool         `json:"serviceIsRemote"`
 	Security        SecurityInfo `json:"security"`
-	Slirp4NetNS     SlirpInfo    `json:"slirp4netns,omitempty"`
-	Pasta           PastaInfo    `json:"pasta,omitempty"`
+	Pasta           PastaInfo    `json:"pasta"`
 
 	SwapFree  int64  `json:"swapFree"`
 	SwapTotal int64  `json:"swapTotal"`
 	Uptime    string `json:"uptime"`
 	Variant   string `json:"variant"`
 	Linkmode  string `json:"linkmode"`
+
+	EmulatedArchitectures []string `json:"emulatedArchitectures,omitempty"`
+}
+
+// DeviceInfo describes a device discovered by a device source.
+type DeviceInfo struct {
+	Source string `json:"source"`
+	ID     string `json:"id"`
 }
 
 // RemoteSocket describes information about the API socket
 type RemoteSocket struct {
 	Path   string `json:"path,omitempty"`
 	Exists bool   `json:"exists"`
-}
-
-// SlirpInfo describes the slirp executable that is being used
-type SlirpInfo struct {
-	Executable string `json:"executable"`
-	Package    string `json:"package"`
-	Version    string `json:"version"`
 }
 
 // PastaInfo describes the pasta executable that is being used
@@ -112,20 +118,20 @@ type ConmonInfo struct {
 // OCIRuntimeInfo describes the runtime (crun or runc) being
 // used with podman
 type OCIRuntimeInfo struct {
-	Name    string `json:"name"`
-	Package string `json:"package"`
-	Path    string `json:"path"`
-	Version string `json:"version"`
+	Name     string `json:"name"`
+	Package  string `json:"package"`
+	Path     string `json:"path"`
+	Version  string `json:"version"`
+	Features string `json:"features,omitempty"`
 }
 
 // StoreInfo describes the container storage and its
 // attributes
 type StoreInfo struct {
-	ConfigFile      string                 `json:"configFile"`
-	ContainerStore  ContainerStore         `json:"containerStore"`
-	GraphDriverName string                 `json:"graphDriverName"`
-	GraphOptions    map[string]interface{} `json:"graphOptions"`
-	GraphRoot       string                 `json:"graphRoot"`
+	ContainerStore  ContainerStore `json:"containerStore"`
+	GraphDriverName string         `json:"graphDriverName"`
+	GraphOptions    map[string]any `json:"graphOptions"`
+	GraphRoot       string         `json:"graphRoot"`
 	// GraphRootAllocated is how much space the graphroot has in bytes
 	GraphRootAllocated uint64 `json:"graphRootAllocated"`
 	// GraphRootUsed is how much of graphroot is used in bytes

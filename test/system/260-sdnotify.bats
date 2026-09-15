@@ -17,14 +17,14 @@ function setup() {
     # Skip if systemd is not running
     systemctl list-units &>/dev/null || skip "systemd not available"
 
+    basic_setup
+
     # sdnotify fails with runc 1.0.0-3-dev2 on Ubuntu. Let's just
     # assume that we work only with crun, nothing else.
     runtime=$(podman_runtime)
     if [[ "$runtime" != "crun" ]]; then
         skip "this test only works with crun, not $runtime"
     fi
-
-    basic_setup
 }
 
 function teardown() {
@@ -52,6 +52,16 @@ function _start_socat() {
     (exec socat unix-recvfrom:"$NOTIFY_SOCKET",fork \
           system:"(cat;echo) >> $_SOCAT_LOG" 3>&-) &
     _SOCAT_PID=$!
+
+    # Wait for socat to create the socket file. This _should_ be
+    # instantaneous, but can take a few seconds under high load
+    for try in $(seq 1 10); do
+        if [[ -e "$NOTIFY_SOCKET" ]]; then
+            return
+        fi
+        sleep 0.5
+    done
+    die "Timed out waiting for socat to create $NOTIFY_SOCKET"
 }
 
 # Stop the socat background process and clean up logs
@@ -106,7 +116,7 @@ function _assert_mainpid_is_conmon() {
     _stop_socat
 }
 
-# bats test_tags=distro-integration, ci:parallel
+# bats test_tags=ci:parallel
 @test "sdnotify : conmon" {
     export NOTIFY_SOCKET=$PODMAN_TMPDIR/conmon.sock
     _start_socat
@@ -145,7 +155,7 @@ READY=1" "sdnotify sent MAINPID and READY"
 
 # These tests can fail in dev. environment because of SELinux.
 # quick fix: chcon -t container_runtime_exec_t ./bin/podman
-# bats test_tags=distro-integration, ci:parallel
+# bats test_tags=ci:parallel
 @test "sdnotify : container" {
     _prefetch $SYSTEMD_IMAGE
 
@@ -469,7 +479,7 @@ spec:
 " > $fname
 }
 
-# bats test_tags=distro-integration, ci:parallel
+# bats test_tags=ci:parallel
 @test "podman kube play - exit-code propagation" {
     fname=$PODMAN_TMPDIR/$(random_string).yaml
 

@@ -5,11 +5,10 @@ import (
 	"fmt"
 )
 
-var (
-	// ErrInvalidPodSpecConfig describes an error given when the podspecgenerator is invalid
-	ErrInvalidPodSpecConfig = errors.New("invalid pod spec")
-	// containerConfig has the default configurations defined in containers.conf
-)
+// ErrInvalidPodSpecConfig describes an error given when the podspecgenerator is invalid
+var ErrInvalidPodSpecConfig = errors.New("invalid pod spec")
+
+// containerConfig has the default configurations defined in containers.conf
 
 func exclusivePodOptions(opt1, opt2 string) error {
 	return fmt.Errorf("%s and %s are mutually exclusive pod options: %w", opt1, opt2, ErrInvalidPodSpecConfig)
@@ -58,13 +57,16 @@ func (p *PodSpecGenerator) Validate() error {
 		if len(p.HostAdd) > 0 {
 			return exclusivePodOptions("NoInfra", "HostAdd")
 		}
+		if len(p.HostsFile) > 0 {
+			return exclusivePodOptions("NoInfra", "HostsFile")
+		}
 		if p.NoManageResolvConf {
 			return exclusivePodOptions("NoInfra", "NoManageResolvConf")
 		}
 	}
-	if p.NetNS.NSMode != "" && p.NetNS.NSMode != Bridge && p.NetNS.NSMode != Slirp && p.NetNS.NSMode != Pasta && p.NetNS.NSMode != Default {
+	if p.NetNS.NSMode != "" && p.NetNS.NSMode != Bridge && p.NetNS.NSMode != Pasta && p.NetNS.NSMode != Default {
 		if len(p.PortMappings) > 0 {
-			return errors.New("PortMappings can only be used with Bridge, slirp4netns, or pasta networking")
+			return errors.New("PortMappings can only be used with Bridge or pasta networking")
 		}
 	}
 
@@ -79,8 +81,13 @@ func (p *PodSpecGenerator) Validate() error {
 			return exclusivePodOptions("NoManageResolvConf", "DNSOption")
 		}
 	}
-	if p.NoManageHosts && len(p.HostAdd) > 0 {
-		return exclusivePodOptions("NoManageHosts", "HostAdd")
+	if p.NoManageHosts {
+		if len(p.HostAdd) > 0 {
+			return exclusivePodOptions("NoManageHosts", "HostAdd")
+		}
+		if len(p.HostsFile) > 0 {
+			return exclusivePodOptions("NoManageHosts", "HostsFile")
+		}
 	}
 
 	return nil

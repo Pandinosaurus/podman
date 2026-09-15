@@ -1,13 +1,13 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package server
 
 import (
 	"net/http"
 
-	"github.com/containers/podman/v5/pkg/api/handlers/compat"
-	"github.com/containers/podman/v5/pkg/api/handlers/libpod"
 	"github.com/gorilla/mux"
+	"go.podman.io/podman/v6/pkg/api/handlers/compat"
+	"go.podman.io/podman/v6/pkg/api/handlers/libpod"
 )
 
 func (s *APIServer) registerVolumeHandlers(r *mux.Router) error {
@@ -91,8 +91,16 @@ func (s *APIServer) registerVolumeHandlers(r *mux.Router) error {
 	//    description: |
 	//      JSON encoded value of filters (a map[string][]string) to match volumes against before pruning.
 	//      Available filters:
+	//        - `all` When true, prune all unused volumes; when false or unset, only anonymous unused volumes.
+	//        - `anonymous` When true/false, restrict to anonymous or named volumes only.
 	//        - `until=<timestamp>` Prune volumes created before this timestamp. The `<timestamp>` can be Unix timestamps, date formatted timestamps, or Go duration strings (e.g. `10m`, `1h30m`) computed relative to the daemon machine’s time.
 	//        - `label` (`label=<key>`, `label=<key>=<value>`, `label!=<key>`, or `label!=<key>=<value>`) Prune volumes with (or without, in case `label!=...` is used) the specified labels.
+	//  - in: query
+	//    name: dryrun
+	//    type: boolean
+	//    required: false
+	//    default: false
+	//    description: Show which volumes would be pruned without removing them.
 	// responses:
 	//   '200':
 	//      "$ref": "#/responses/volumePruneLibpod"
@@ -135,6 +143,10 @@ func (s *APIServer) registerVolumeHandlers(r *mux.Router) error {
 	//    name: force
 	//    type: boolean
 	//    description: force removal
+	//  - in: query
+	//    name: timeout
+	//    type: integer
+	//    description: timeout before forcibly killing any containers using the volume
 	// produces:
 	// - application/json
 	// responses:
@@ -147,6 +159,95 @@ func (s *APIServer) registerVolumeHandlers(r *mux.Router) error {
 	//   500:
 	//     $ref: "#/responses/internalError"
 	r.Handle(VersionedPath("/libpod/volumes/{name}"), s.APIHandler(libpod.RemoveVolume)).Methods(http.MethodDelete)
+
+	// swagger:operation GET /libpod/volumes/{name}/export libpod VolumeExportLibpod
+	// ---
+	// tags:
+	//  - volumes
+	// summary: Export a volume
+	// parameters:
+	//  - in: path
+	//    name: name
+	//    type: string
+	//    required: true
+	//    description: the name or ID of the volume
+	// produces:
+	// - application/x-tar
+	// responses:
+	//   200:
+	//     description: no error
+	//     schema:
+	//      type: string
+	//      format: binary
+	//   404:
+	//     $ref: "#/responses/volumeNotFound"
+	//   500:
+	//     $ref: "#/responses/internalError"
+	r.Handle(VersionedPath("/libpod/volumes/{name}/export"), s.APIHandler(libpod.ExportVolume)).Methods(http.MethodGet)
+
+	// swagger:operation POST /libpod/volumes/{name}/import libpod VolumeImportLibpod
+	// ---
+	// tags:
+	//  - volumes
+	// summary: Populate a volume by importing provided tar
+	// parameters:
+	//  - in: path
+	//    name: name
+	//    type: string
+	//    required: true
+	//    description: the name or ID of the volume
+	//  - in: body
+	//    name: inputStream
+	//    description: |
+	//      An uncompressed tar archive
+	//    schema:
+	//      type: string
+	//      format: binary
+	// produces:
+	// - application/json
+	// responses:
+	//   204:
+	//     description: Successful import
+	//   404:
+	//     $ref: "#/responses/volumeNotFound"
+	//   500:
+	//     $ref: "#/responses/internalError"
+	r.Handle(VersionedPath("/libpod/volumes/{name}/import"), s.APIHandler(libpod.ImportVolume)).Methods(http.MethodPost)
+
+	// swagger:operation POST /libpod/volumes/{name}/rename libpod VolumeRenameLibpod
+	// ---
+	// tags:
+	//  - volumes
+	// summary: Rename an existing volume
+	// description: |
+	//   Rename a volume when the source volume exists, the new name is valid and unused,
+	//   the volume is not mounted or used by any container, and the volume uses the
+	//   local driver.
+	// parameters:
+	//  - in: path
+	//    name: name
+	//    type: string
+	//    required: true
+	//    description: the name or ID of the volume
+	//  - in: query
+	//    name: newName
+	//    type: string
+	//    required: true
+	//    description: new volume name
+	// produces:
+	// - application/json
+	// responses:
+	//   204:
+	//     description: Volume successfully renamed
+	//   404:
+	//     $ref: "#/responses/volumeNotFound"
+	//   400:
+	//     $ref: "#/responses/badParamError"
+	//   409:
+	//     description: Volume is in use or new name already exists
+	//   500:
+	//     $ref: "#/responses/internalError"
+	r.Handle(VersionedPath("/libpod/volumes/{name}/rename"), s.APIHandler(libpod.RenameVolume)).Methods(http.MethodPost)
 
 	/*
 	 * Docker compatibility endpoints
@@ -245,6 +346,10 @@ func (s *APIServer) registerVolumeHandlers(r *mux.Router) error {
 	//      Force removal of the volume. This actually only causes errors due
 	//      to the names volume not being found to be suppressed, which is the
 	//      behaviour Docker implements.
+	//  - in: query
+	//    name: timeout
+	//    type: integer
+	//    description: timeout before forcibly killing any containers using the volume
 	// produces:
 	// - application/json
 	// responses:
@@ -271,8 +376,9 @@ func (s *APIServer) registerVolumeHandlers(r *mux.Router) error {
 	//    name: filters
 	//    type: string
 	//    description: |
-	//      JSON encoded value of filters (a map[string][]string) to match volumes against before pruning.
+	//      JSON encoded value of filters (a map[string][]string). Docker API 1.42+ - by default only anonymous (unnamed) unused volumes are pruned; use filter all=true to prune all unused volumes.
 	//      Available filters:
+	//        - `all` When true, prune all unused volumes (anonymous and named). When false or unset, only anonymous unused volumes are pruned.
 	//        - `until=<timestamp>` Prune volumes created before this timestamp. The `<timestamp>` can be Unix timestamps, date formatted timestamps, or Go duration strings (e.g. `10m`, `1h30m`) computed relative to the daemon machine’s time.
 	//        - `label` (`label=<key>`, `label=<key>=<value>`, `label!=<key>`, or `label!=<key>=<value>`) Prune volumes with (or without, in case `label!=...` is used) the specified labels.
 	// responses:

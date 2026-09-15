@@ -7,17 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/image/v5/types"
-	"github.com/containers/storage/pkg/fileutils"
-	"github.com/containers/storage/pkg/homedir"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/storage/pkg/fileutils"
 )
 
 // policyContent is the overall structure of a policy.json file (= c/image/v5/signature.Policy)
@@ -54,28 +49,6 @@ type genericTransportsContent map[string]genericRepoMap
 
 // genericRepoMap maps a scope name to requirements that apply to that scope (= c/image/v5/signature.PolicyTransportScopes)
 type genericRepoMap map[string]json.RawMessage
-
-// DefaultPolicyPath returns a path to the default policy of the system.
-func DefaultPolicyPath(sys *types.SystemContext) string {
-	if sys != nil && sys.SignaturePolicyPath != "" {
-		return sys.SignaturePolicyPath
-	}
-
-	userPolicyFilePath := filepath.Join(homedir.Get(), filepath.FromSlash(".config/containers/policy.json"))
-	err := fileutils.Exists(userPolicyFilePath)
-	if err == nil {
-		return userPolicyFilePath
-	}
-	if !errors.Is(err, fs.ErrNotExist) {
-		logrus.Warnf("Error trying to read local config file: %s", err.Error())
-	}
-
-	systemDefaultPolicyPath := config.DefaultSignaturePolicyPath
-	if sys != nil && sys.RootForImplicitAbsolutePaths != "" {
-		return filepath.Join(sys.RootForImplicitAbsolutePaths, systemDefaultPolicyPath)
-	}
-	return systemDefaultPolicyPath
-}
 
 // gpgIDReader returns GPG key IDs of keys stored at the provided path.
 // It exists only for tests, production code should always use getGPGIdFromKeyPath.
@@ -127,15 +100,21 @@ func parseUids(colonDelimitKeys []byte) []string {
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, "uid:") || strings.HasPrefix(line, "pub:") {
-			uid := strings.Split(line, ":")[9]
+			fields := strings.Split(line, ":")
+			// A well-formed uid/pub record has the user ID in field 10;
+			// skip malformed lines instead of panicking on a short slice.
+			if len(fields) < 10 {
+				continue
+			}
+			uid := fields[9]
 			if uid == "" {
 				continue
 			}
 			parseduid := uid
 			if ltidx := strings.Index(uid, "<"); ltidx != -1 {
 				subuid := parseduid[ltidx+1:]
-				if gtidx := strings.Index(subuid, ">"); gtidx != -1 {
-					parseduid = subuid[:gtidx]
+				if before, _, ok := strings.Cut(subuid, ">"); ok {
+					parseduid = before
 				}
 			}
 			parseduids = append(parseduids, parseduid)
@@ -220,7 +199,7 @@ func AddPolicyEntries(policyPath string, input AddPolicyEntriesInput) error {
 	}
 
 	err = fileutils.Exists(policyPath)
-	if !os.IsNotExist(err) {
+	if !errors.Is(err, os.ErrNotExist) {
 		policyContent, err := os.ReadFile(policyPath)
 		if err != nil {
 			return err
@@ -258,5 +237,5 @@ func AddPolicyEntries(policyPath string, input AddPolicyEntriesInput) error {
 	if err != nil {
 		return fmt.Errorf("setting trust policy: %w", err)
 	}
-	return os.WriteFile(policyPath, data, 0644)
+	return os.WriteFile(policyPath, data, 0o644)
 }

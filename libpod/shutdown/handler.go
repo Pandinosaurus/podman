@@ -11,9 +11,7 @@ import (
 	logrusImport "github.com/sirupsen/logrus"
 )
 
-var (
-	ErrHandlerExists = errors.New("handler with given name already exists")
-)
+var ErrHandlerExists = errors.New("handler with given name already exists")
 
 var (
 	stopped    bool
@@ -28,10 +26,18 @@ var (
 	shutdownInhibit sync.RWMutex
 	logrus          = logrusImport.WithField("PID", os.Getpid())
 	ErrNotStarted   = errors.New("shutdown signal handler has not yet been started")
+	// exitCode used to exit once we are done with all signal handlers, by default 1
+	exitCode = 1
 )
 
+// SetExitCode when we exit after we ran all shutdown handlers, it should be positive.
+func SetExitCode(i int) {
+	exitCode = i
+}
+
 // Start begins handling SIGTERM and SIGINT and will run the given on-signal
-// handlers when one is called. This can be cancelled by calling Stop().
+// handlers when one is called and then exit with the exit code of 1 if not
+// overwritten with SetExitCode(). This can be cancelled by calling Stop().
 func Start() error {
 	if sigChan != nil {
 		// Already running, do nothing.
@@ -75,6 +81,7 @@ func Start() error {
 			}
 			handlerLock.Unlock()
 			shutdownInhibit.Unlock()
+			os.Exit(exitCode)
 			return
 		}
 	}()

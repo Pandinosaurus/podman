@@ -9,19 +9,21 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/common/pkg/detach"
-	"github.com/containers/common/pkg/resize"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/errorhandling"
-	"github.com/containers/podman/v5/pkg/lookup"
 	spec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/common/pkg/detach"
+	"go.podman.io/common/pkg/resize"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/errorhandling"
+	"go.podman.io/podman/v6/pkg/lookup"
+	"go.podman.io/podman/v6/pkg/pidhandle"
 	"golang.org/x/sys/unix"
 )
 
@@ -45,10 +47,7 @@ func (r *ConmonOCIRuntime) ExecContainer(c *Container, sessionID string, options
 		attachStdin = streams.AttachInput
 	}
 
-	var ociLog string
-	if logrus.GetLevel() != logrus.DebugLevel && r.supportsJSON {
-		ociLog = c.execOCILog(sessionID)
-	}
+	ociLog := c.execOCILog(sessionID)
 
 	execCmd, pipes, err := r.startExec(c, sessionID, options, attachStdin, ociLog)
 	if err != nil {
@@ -85,7 +84,8 @@ func (r *ConmonOCIRuntime) ExecContainer(c *Container, sessionID string, options
 // ExecContainerHTTP executes a new command in an existing container and
 // forwards its standard streams over an attach
 func (r *ConmonOCIRuntime) ExecContainerHTTP(ctr *Container, sessionID string, options *ExecOptions, req *http.Request, w http.ResponseWriter,
-	streams *HTTPAttachStreams, cancel <-chan bool, hijackDone chan<- bool, holdConnOpen <-chan bool, newSize *resize.TerminalSize) (int, chan error, error) {
+	streams *HTTPAttachStreams, cancel <-chan bool, hijackDone chan<- bool, holdConnOpen <-chan bool, newSize *resize.TerminalSize,
+) (int, chan error, error) {
 	if streams != nil {
 		if !streams.Stdin && !streams.Stdout && !streams.Stderr {
 			return -1, nil, fmt.Errorf("must provide at least one stream to attach to: %w", define.ErrInvalidArg)
@@ -112,10 +112,7 @@ func (r *ConmonOCIRuntime) ExecContainerHTTP(ctr *Container, sessionID string, o
 		attachStdin = streams.Stdin
 	}
 
-	var ociLog string
-	if logrus.GetLevel() != logrus.DebugLevel && r.supportsJSON {
-		ociLog = ctr.execOCILog(sessionID)
-	}
+	ociLog := ctr.execOCILog(sessionID)
 
 	execCmd, pipes, err := r.startExec(ctr, sessionID, options, attachStdin, ociLog)
 	if err != nil {
@@ -160,10 +157,7 @@ func (r *ConmonOCIRuntime) ExecContainerDetached(ctr *Container, sessionID strin
 		return -1, fmt.Errorf("must provide exec options to ExecContainerHTTP: %w", define.ErrInvalidArg)
 	}
 
-	var ociLog string
-	if logrus.GetLevel() != logrus.DebugLevel && r.supportsJSON {
-		ociLog = ctr.execOCILog(sessionID)
-	}
+	ociLog := ctr.execOCILog(sessionID)
 
 	execCmd, pipes, err := r.startExec(ctr, sessionID, options, stdin, ociLog)
 	if err != nil {
@@ -213,27 +207,33 @@ func (r *ConmonOCIRuntime) ExecAttachResize(ctr *Container, sessionID string, ne
 
 // ExecStopContainer stops a given exec session in a running container.
 func (r *ConmonOCIRuntime) ExecStopContainer(ctr *Container, sessionID string, timeout uint) error {
-	pid, err := ctr.getExecSessionPID(sessionID)
+	pid, pidData, err := ctr.getExecSessionPID(sessionID)
 	if err != nil {
 		return err
 	}
 
 	logrus.Debugf("Going to stop container %s exec session %s", ctr.ID(), sessionID)
 
+	pidHandle, err := pidhandle.NewPIDHandleFromString(pid, pidData)
+	if err != nil {
+		return fmt.Errorf("getting the PID handle for pid %d from '%s': %w", pid, pidData, err)
+	}
+	defer pidHandle.Close()
+
 	// Is the session dead?
-	// Ping the PID with signal 0 to see if it still exists.
-	if err := unix.Kill(pid, 0); err != nil {
-		if err == unix.ESRCH {
-			return nil
-		}
-		return fmt.Errorf("pinging container %s exec session %s PID %d with signal 0: %w", ctr.ID(), sessionID, pid, err)
+	sessionAlive, err := pidHandle.IsAlive()
+	if err != nil {
+		return fmt.Errorf("getting the process status for pid %d: %w", pid, err)
+	}
+	if !sessionAlive {
+		return nil
 	}
 
 	if timeout > 0 {
 		// Use SIGTERM by default, then SIGSTOP after timeout.
 		logrus.Debugf("Killing exec session %s (PID %d) of container %s with SIGTERM", sessionID, pid, ctr.ID())
-		if err := unix.Kill(pid, unix.SIGTERM); err != nil {
-			if err == unix.ESRCH {
+		if err := pidHandle.Kill(unix.SIGTERM); err != nil {
+			if errors.Is(err, unix.ESRCH) {
 				return nil
 			}
 			return fmt.Errorf("killing container %s exec session %s PID %d with SIGTERM: %w", ctr.ID(), sessionID, pid, err)
@@ -250,8 +250,8 @@ func (r *ConmonOCIRuntime) ExecStopContainer(ctr *Container, sessionID string, t
 
 	// SIGTERM did not work. On to SIGKILL.
 	logrus.Debugf("Killing exec session %s (PID %d) of container %s with SIGKILL", sessionID, pid, ctr.ID())
-	if err := unix.Kill(pid, unix.SIGTERM); err != nil {
-		if err == unix.ESRCH {
+	if err := pidHandle.Kill(unix.SIGKILL); err != nil {
+		if errors.Is(err, unix.ESRCH) {
 			return nil
 		}
 		return fmt.Errorf("killing container %s exec session %s PID %d with SIGKILL: %w", ctr.ID(), sessionID, pid, err)
@@ -267,23 +267,26 @@ func (r *ConmonOCIRuntime) ExecStopContainer(ctr *Container, sessionID string, t
 
 // ExecUpdateStatus checks if the given exec session is still running.
 func (r *ConmonOCIRuntime) ExecUpdateStatus(ctr *Container, sessionID string) (bool, error) {
-	pid, err := ctr.getExecSessionPID(sessionID)
+	pid, pidData, err := ctr.getExecSessionPID(sessionID)
 	if err != nil {
 		return false, err
 	}
 
 	logrus.Debugf("Checking status of container %s exec session %s", ctr.ID(), sessionID)
 
+	pidHandle, err := pidhandle.NewPIDHandleFromString(pid, pidData)
+	if err != nil {
+		return false, fmt.Errorf("getting the PID handle for pid %d from '%s': %w", pid, pidData, err)
+	}
+	defer pidHandle.Close()
+
 	// Is the session dead?
-	// Ping the PID with signal 0 to see if it still exists.
-	if err := unix.Kill(pid, 0); err != nil {
-		if err == unix.ESRCH {
-			return false, nil
-		}
-		return false, fmt.Errorf("pinging container %s exec session %s PID %d with signal 0: %w", ctr.ID(), sessionID, pid, err)
+	sessionAlive, err := pidHandle.IsAlive()
+	if err != nil {
+		return false, fmt.Errorf("getting the process status for pid %d: %w", pid, err)
 	}
 
-	return true, nil
+	return sessionAlive, nil
 }
 
 // ExecAttachSocketPath is the path to a container's exec session attach socket.
@@ -387,7 +390,7 @@ func (r *ConmonOCIRuntime) startExec(c *Container, sessionID string, options *Ex
 	}
 	defer processFile.Close()
 
-	args, err := r.sharedConmonArgs(c, sessionID, c.execBundlePath(sessionID), c.execPidPath(sessionID), c.execLogPath(sessionID), c.execExitFileDir(sessionID), c.execPersistDir(sessionID), ociLog, define.NoLogging, c.config.LogTag)
+	args, err := r.sharedConmonArgs(c, sessionID, c.execBundlePath(sessionID), c.execPidPath(sessionID), c.execLogPath(sessionID), c.execExitFileDir(sessionID), c.execPersistDir(sessionID), ociLog, define.NoLogging, c.config.LogTag, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -499,6 +502,13 @@ func attachExecHTTP(c *Container, sessionID string, r *http.Request, w http.Resp
 		return err
 	}
 
+	// errCh receives deferredErr after all deferred cleanup in this function
+	// has completed. The goroutine below reads from errCh so that it never
+	// races with the deferred functions that may still be writing deferredErr
+	// when holdConnOpen is closed by the caller.
+	errCh := make(chan error, 1)
+	defer func() { errCh <- deferredErr }()
+
 	defer func() {
 		if !pipes.startClosed {
 			errorhandling.CloseQuiet(pipes.startPipe)
@@ -597,7 +607,11 @@ func attachExecHTTP(c *Container, sessionID string, r *http.Request, w http.Resp
 		// Can't be a defer, because this would block the function from
 		// returning.
 		<-holdConnOpen
-		hijackWriteErrorAndClose(deferredErr, c.ID(), isTerminal, httpCon, httpBuf)
+		// Block until all deferred cleanups in attachExecHTTP have run and
+		// the final deferredErr value has been sent to errCh. This avoids
+		// the data race that would occur if we read deferredErr directly
+		// while deferred functions in this function may still be writing it.
+		hijackWriteErrorAndClose(<-errCh, c.ID(), isTerminal, httpCon, httpBuf)
 	}()
 
 	stdoutChan := make(chan error)
@@ -681,6 +695,16 @@ func (c *Container) prepareProcessExec(options *ExecOptions, env []string, sessi
 	pspec.Terminal = false
 	if options.Terminal {
 		pspec.Terminal = true
+		// Size the exec PTY at creation so the process reads the correct
+		// window size immediately. Without this the PTY starts at 0x0 and is
+		// only corrected by an asynchronous resize, which can arrive after a
+		// one-shot process has already read its size.
+		if options.ConsoleSize != nil {
+			pspec.ConsoleSize = &spec.Box{
+				Height: uint(options.ConsoleSize.Height),
+				Width:  uint(options.ConsoleSize.Width),
+			}
+		}
 	}
 	if len(env) > 0 {
 		pspec.Env = append(pspec.Env, env...)
@@ -703,15 +727,11 @@ func (c *Container) prepareProcessExec(options *ExecOptions, env []string, sessi
 		pspec.Cwd = options.Cwd
 	}
 
-	var addGroups []string
-	var sgids []uint32
-
 	// if the user is empty, we should inherit the user that the container is currently running with
 	user := options.User
 	if user == "" {
 		logrus.Debugf("Set user to %s", c.config.User)
 		user = c.config.User
-		addGroups = c.config.Groups
 	}
 
 	overrides := c.getUserOverrides()
@@ -720,29 +740,32 @@ func (c *Container) prepareProcessExec(options *ExecOptions, env []string, sessi
 		return nil, err
 	}
 
-	if len(addGroups) > 0 {
-		sgids, err = lookup.GetContainerGroups(addGroups, c.state.Mountpoint, overrides)
+	// The additional groups must always contain the user's primary group.
+	sgids := []uint32{uint32(execUser.Gid)}
+
+	for _, sgid := range execUser.Sgids {
+		sgids = append(sgids, uint32(sgid))
+	}
+
+	// Always add the groups added through --group-add, no matter the exec UID:GID.
+	if len(c.config.Groups) > 0 {
+		additionalSgids, err := lookup.GetContainerGroups(c.config.Groups, c.state.Mountpoint, overrides)
 		if err != nil {
 			return nil, fmt.Errorf("looking up supplemental groups for container %s exec session %s: %w", c.ID(), sessionID, err)
 		}
+		sgids = append(sgids, additionalSgids...)
 	}
 
-	// If user was set, look it up in the container to get a UID to use on
-	// the host
-	if user != "" || len(sgids) > 0 {
-		if user != "" {
-			for _, sgid := range execUser.Sgids {
-				sgids = append(sgids, uint32(sgid))
-			}
-		}
-		processUser := spec.User{
-			UID:            uint32(execUser.Uid),
-			GID:            uint32(execUser.Gid),
-			AdditionalGids: sgids,
-		}
+	// Avoid duplicates
+	slices.Sort(sgids)
+	sgids = slices.Compact(sgids)
 
-		pspec.User = processUser
+	processUser := spec.User{
+		UID:            uint32(execUser.Uid),
+		GID:            uint32(execUser.Gid),
+		AdditionalGids: sgids,
 	}
+	pspec.User = processUser
 
 	if c.config.Umask != "" {
 		umask, err := c.umask()
@@ -772,7 +795,7 @@ func (c *Container) prepareProcessExec(options *ExecOptions, env []string, sessi
 		return nil, err
 	}
 
-	if err := os.WriteFile(f.Name(), processJSON, 0644); err != nil {
+	if err := os.WriteFile(f.Name(), processJSON, 0o644); err != nil {
 		return nil, err
 	}
 	return f, nil

@@ -6,14 +6,13 @@ import (
 	"fmt"
 	"path/filepath"
 
-	. "github.com/containers/podman/v5/test/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	. "github.com/onsi/gomega/gexec"
+	. "go.podman.io/podman/v6/test/utils"
 )
 
 var _ = Describe("Podman volume create", func() {
-
 	AfterEach(func() {
 		podmanTest.CleanupVolume()
 	})
@@ -65,10 +64,6 @@ var _ = Describe("Podman volume create", func() {
 	})
 
 	It("podman create and export volume", func() {
-		if podmanTest.RemoteTest {
-			Skip("Volume export check does not work with a remote client")
-		}
-
 		volName := "my_vol_" + RandomString(10)
 		session := podmanTest.Podman([]string{"volume", "create", volName})
 		session.WaitWithDefaultTimeout()
@@ -96,10 +91,6 @@ var _ = Describe("Podman volume create", func() {
 	})
 
 	It("podman create and import volume", func() {
-		if podmanTest.RemoteTest {
-			Skip("Volume export check does not work with a remote client")
-		}
-
 		volName := "my_vol_" + RandomString(10)
 		session := podmanTest.Podman([]string{"volume", "create", volName})
 		session.WaitWithDefaultTimeout()
@@ -129,6 +120,34 @@ var _ = Describe("Podman volume create", func() {
 		Expect(session.OutputToString()).To(ContainSubstring("hello"))
 	})
 
+	It("podman import volume preserves first mount permission adjustment", func() {
+		imageName := "volume-copyup-permissions:latest"
+		containerfile := fmt.Sprintf(`FROM %s
+RUN mkdir -p /vol-target && chown 70:71 /vol-target && chmod 750 /vol-target && echo hello > /vol-target/test
+`, ALPINE)
+		podmanTest.BuildImage(containerfile, imageName, "false")
+
+		volName := "my_vol_" + RandomString(10)
+		podmanTest.PodmanExitCleanly("volume", "create", volName)
+
+		session := podmanTest.PodmanExitCleanly("run", "--volume", volName+":/vol-target", imageName, "stat", "-c", "%u:%g %a", "/vol-target")
+		Expect(session.OutputToString()).To(Equal("70:71 750"))
+
+		helloTar := filepath.Join(podmanTest.TempDir, "hello.tar")
+		podmanTest.PodmanExitCleanly("volume", "export", volName, "--output", helloTar)
+
+		importedVolName := "my_vol_" + RandomString(10)
+		podmanTest.PodmanExitCleanly("volume", "create", importedVolName)
+
+		podmanTest.PodmanExitCleanly("volume", "import", importedVolName, helloTar)
+
+		session = podmanTest.PodmanExitCleanly("run", "--volume", importedVolName+":/vol-target", imageName, "stat", "-c", "%u:%g %a", "/vol-target")
+		Expect(session.OutputToString()).To(Equal("70:71 750"))
+
+		session = podmanTest.PodmanExitCleanly("run", "--volume", importedVolName+":/vol-target", imageName, "cat", "/vol-target/test")
+		Expect(session.OutputToString()).To(Equal("hello"))
+	})
+
 	It("podman import/export volume should fail", func() {
 		// try import on volume or source which does not exist
 		SkipIfRemote("Volume export check does not work with a remote client")
@@ -139,11 +158,11 @@ var _ = Describe("Podman volume create", func() {
 
 		session = podmanTest.Podman([]string{"volume", "import", "notfound", "-"})
 		session.WaitWithDefaultTimeout()
-		Expect(session).To(ExitWithError(125, "no such volume notfound"))
+		Expect(session).To(ExitWithError(125, "no volume with name \"notfound\" found"))
 
 		session = podmanTest.Podman([]string{"volume", "export", "notfound"})
 		session.WaitWithDefaultTimeout()
-		Expect(session).To(ExitWithError(125, "no such volume notfound"))
+		Expect(session).To(ExitWithError(125, "no volume with name \"notfound\" found"))
 	})
 
 	It("podman create volume with bad volume option", func() {
@@ -179,10 +198,86 @@ var _ = Describe("Podman volume create", func() {
 		Expect(inspectOpts.OutputToString()).To(Equal(optionStrFormatExpect))
 	})
 
+	It("podman create volume with --uid and --gid flags", func() {
+		volName := "testVolFlags"
+		uid := "3001"
+		gid := "4001"
+		session := podmanTest.Podman([]string{"volume", "create", "--uid", uid, "--gid", gid, volName})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+
+		inspectUID := podmanTest.Podman([]string{"volume", "inspect", "--format", "{{ .UID }}", volName})
+		inspectUID.WaitWithDefaultTimeout()
+		Expect(inspectUID).Should(ExitCleanly())
+		Expect(inspectUID.OutputToString()).To(Equal(uid))
+
+		inspectGID := podmanTest.Podman([]string{"volume", "inspect", "--format", "{{ .GID }}", volName})
+		inspectGID.WaitWithDefaultTimeout()
+		Expect(inspectGID).Should(ExitCleanly())
+		Expect(inspectGID.OutputToString()).To(Equal(gid))
+
+		// The specified values must not be passed down to the -o option.
+		fn := func(typ string) string {
+			return fmt.Sprintf("{{ if .Options.%s }}{{ .Options.%s }}{{ else }}EMPTY{{ end }}", typ, typ)
+		}
+		optionFormat := fmt.Sprintf("%s:%s:%s", fn("o"), fn("UID"), fn("GID"))
+		optionStrFormatExpected := "EMPTY:EMPTY:EMPTY"
+		inspectOpts := podmanTest.Podman([]string{"volume", "inspect", "--format", optionFormat, volName})
+		inspectOpts.WaitWithDefaultTimeout()
+		Expect(inspectOpts).Should(ExitCleanly())
+		Expect(inspectOpts.OutputToString()).To(Equal(optionStrFormatExpected))
+	})
+
+	It("podman create volume with --uid flag only", func() {
+		volName := "testVolUidOnly"
+		uid := "3002"
+		session := podmanTest.Podman([]string{"volume", "create", "--uid", uid, volName})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+
+		inspectUID := podmanTest.Podman([]string{"volume", "inspect", "--format", "{{ .UID }}", volName})
+		inspectUID.WaitWithDefaultTimeout()
+		Expect(inspectUID).Should(ExitCleanly())
+		Expect(inspectUID.OutputToString()).To(Equal(uid))
+
+		inspectGID := podmanTest.Podman([]string{"volume", "inspect", "--format", "{{ if .GID }}{{ .GID }}{{ else }} EMPTY {{ end }}", volName})
+		inspectGID.WaitWithDefaultTimeout()
+		Expect(inspectGID).Should(ExitCleanly())
+		Expect(inspectGID.OutputToString()).To(Equal("EMPTY"))
+	})
+
+	It("podman create volume with --gid flag only", func() {
+		volName := "testVolGidOnly"
+		gid := "4002"
+		session := podmanTest.Podman([]string{"volume", "create", "--gid", gid, volName})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+
+		inspectGID := podmanTest.Podman([]string{"volume", "inspect", "--format", "{{ .GID }}", volName})
+		inspectGID.WaitWithDefaultTimeout()
+		Expect(inspectGID).Should(ExitCleanly())
+		Expect(inspectGID.OutputToString()).To(Equal(gid))
+
+		inspectUID := podmanTest.Podman([]string{"volume", "inspect", "--format", "{{ if .UID }}{{ .UID }}{{ else }} EMPTY {{ end }}", volName})
+		inspectUID.WaitWithDefaultTimeout()
+		Expect(inspectUID).Should(ExitCleanly())
+		Expect(inspectUID.OutputToString()).To(Equal("EMPTY"))
+	})
+
+	It("podman create volume --uid and --gid flags with invalid values", func() {
+		session := podmanTest.Podman([]string{"volume", "create", "--uid", "invalid", "testVol"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).To(ExitWithError(125, "invalid argument \"invalid\" for \"--uid\" flag"))
+
+		session = podmanTest.Podman([]string{"volume", "create", "--gid", "invalid", "testVol"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).To(ExitWithError(125, "invalid argument \"invalid\" for \"--gid\" flag"))
+	})
+
 	It("image-backed volume basic functionality", func() {
-		podmanTest.AddImageToRWStore(fedoraMinimal)
+		podmanTest.AddImageToRWStore(FEDORA_MINIMAL)
 		volName := "testvol"
-		volCreate := podmanTest.Podman([]string{"volume", "create", "--driver", "image", "--opt", fmt.Sprintf("image=%s", fedoraMinimal), volName})
+		volCreate := podmanTest.Podman([]string{"volume", "create", "--driver", "image", "--opt", fmt.Sprintf("image=%s", FEDORA_MINIMAL), volName})
 		volCreate.WaitWithDefaultTimeout()
 		Expect(volCreate).Should(ExitCleanly())
 
@@ -191,7 +286,7 @@ var _ = Describe("Podman volume create", func() {
 		Expect(runCmd).Should(ExitCleanly())
 		Expect(runCmd.OutputToString()).To(ContainSubstring("Fedora"))
 
-		rmCmd := podmanTest.Podman([]string{"rmi", "--force", fedoraMinimal})
+		rmCmd := podmanTest.Podman([]string{"rmi", "--force", FEDORA_MINIMAL})
 		rmCmd.WaitWithDefaultTimeout()
 		Expect(rmCmd).Should(ExitCleanly())
 
@@ -207,9 +302,9 @@ var _ = Describe("Podman volume create", func() {
 	})
 
 	It("image-backed volume force removal", func() {
-		podmanTest.AddImageToRWStore(fedoraMinimal)
+		podmanTest.AddImageToRWStore(FEDORA_MINIMAL)
 		volName := "testvol"
-		volCreate := podmanTest.Podman([]string{"volume", "create", "--driver", "image", "--opt", fmt.Sprintf("image=%s", fedoraMinimal), volName})
+		volCreate := podmanTest.Podman([]string{"volume", "create", "--driver", "image", "--opt", fmt.Sprintf("image=%s", FEDORA_MINIMAL), volName})
 		volCreate.WaitWithDefaultTimeout()
 		Expect(volCreate).Should(ExitCleanly())
 

@@ -1,22 +1,43 @@
 package rootless
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
 
-	"github.com/containers/storage/pkg/fileutils"
-	"github.com/containers/storage/pkg/lockfile"
 	"github.com/moby/sys/user"
 	spec "github.com/opencontainers/runtime-spec/specs-go"
+	"go.podman.io/storage/pkg/fileutils"
+	"go.podman.io/storage/pkg/lockfile"
 )
+
+// GetNamespaceHandlesPath returns the path to the namespace handles file
+// in the given state directory.
+func GetNamespaceHandlesPath(stateDir string) string {
+	return filepath.Join(stateDir, "ns_handles")
+}
+
+// GetPausePidPath returns the path to the pause.pid file
+// in the given state directory.
+func GetPausePidPath(stateDir string) string {
+	return filepath.Join(stateDir, "pause.pid")
+}
 
 // TryJoinPauseProcess attempts to join the namespaces of the pause PID via
 // TryJoinFromFilePaths.  If joining fails, it attempts to delete the specified
 // file.
-func TryJoinPauseProcess(pausePidPath string) (bool, int, error) {
+func TryJoinPauseProcess(stateDir string) (bool, int, error) {
+	nsHandlesPath := GetNamespaceHandlesPath(stateDir)
+	if err := fileutils.Exists(nsHandlesPath); err == nil {
+		return false, -1, nil
+	}
+
+	pausePidPath := GetPausePidPath(stateDir)
 	if err := fileutils.Exists(pausePidPath); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return false, -1, nil
@@ -33,7 +54,7 @@ func TryJoinPauseProcess(pausePidPath string) (bool, int, error) {
 	pidFileLock, err := lockfile.GetLockFile(pausePidPath)
 	if err != nil {
 		// The file was deleted by another process.
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return false, -1, nil
 		}
 		return false, -1, fmt.Errorf("acquiring lock on %s: %w", pausePidPath, err)
@@ -49,7 +70,7 @@ func TryJoinPauseProcess(pausePidPath string) (bool, int, error) {
 	if err != nil {
 		// It is still failing.  We can safely remove it.
 		os.Remove(pausePidPath)
-		return false, -1, nil //nolint: nilerr
+		return false, -1, nil
 	}
 	return became, ret, err
 }
@@ -114,17 +135,6 @@ func countAvailableIDs(mappings []user.IDMap) int64 {
 	return availableUids
 }
 
-// GetAvailableUids returns how many UIDs are available in the
-// current user namespace.
-func GetAvailableUids() (int64, error) {
-	uids, err := GetAvailableUIDMap()
-	if err != nil {
-		return -1, err
-	}
-
-	return countAvailableIDs(uids), nil
-}
-
 // GetAvailableGids returns how many GIDs are available in the
 // current user namespace.
 func GetAvailableGids() (int64, error) {
@@ -159,8 +169,8 @@ func MaybeSplitMappings(mappings []spec.LinuxIDMapping, availableMappings []user
 	var overflow spec.LinuxIDMapping
 	overflow.Size = 0
 	consumed := 0
-	sort.Slice(availableMappings, func(i, j int) bool {
-		return availableMappings[i].ID > availableMappings[j].ID
+	slices.SortFunc(availableMappings, func(a, b user.IDMap) int {
+		return cmp.Compare(b.ID, a.ID)
 	})
 	for {
 		cur := overflow

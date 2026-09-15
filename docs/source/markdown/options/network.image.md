@@ -1,10 +1,20 @@
 ####> This option file is used in:
-####>   podman build, farm build
+####>   podman build, podman-build.unit.5.md.in, farm build
 ####> If file is edited, make sure the changes
 ####> are applicable to all of those.
+<< if is_quadlet >>
+### `Network=mode`
+<< else >>
 #### **--network**=*mode*, **--net**
+<< endif >>
 
 Sets the configuration for network namespaces when handling `RUN` instructions.
+
+<< if is_quadlet >>
+Special case:
+
+* If the `name` of the network ends with `.network`, Quadlet will look for the corresponding `.network` Quadlet unit. If found, Quadlet will use the name of the Network set in the Unit, otherwise, `systemd-$name` is used. The generated systemd service contains a dependency on the service unit generated for that `.network` unit, or on `$name-network.service` if the `.network` unit is not found. Note: the corresponding `.network` file must exist.
+<< endif >>
 
 Valid _mode_ values are:
 
@@ -15,15 +25,6 @@ considered insecure.
 - **ns:**_path_: path to a network namespace to join.
 - **private**: create a new namespace for the container (default)
 - **\<network name|ID\>**: Join the network with the given name or ID, e.g. use `--network mynet` to join the network with the name mynet. Only supported for rootful users.
-- **slirp4netns[:OPTIONS,...]**: use **slirp4netns**(1) to create a user network stack. It is possible to specify these additional options, they can also be set with `network_cmd_options` in containers.conf:
-  - **allow_host_loopback=true|false**: Allow slirp4netns to reach the host loopback IP (default is 10.0.2.2 or the second IP from slirp4netns cidr subnet when changed, see the cidr option below). The default is false.
-  - **mtu=MTU**: Specify the MTU to use for this network. (Default is `65520`).
-  - **cidr=CIDR**: Specify ip range to use for this network. (Default is `10.0.2.0/24`).
-  - **enable_ipv6=true|false**: Enable IPv6. Default is true. (Required for `outbound_addr6`).
-  - **outbound_addr=INTERFACE**: Specify the outbound interface slirp binds to (ipv4 traffic only).
-  - **outbound_addr=IPv4**: Specify the outbound ipv4 address slirp binds to.
-  - **outbound_addr6=INTERFACE**: Specify the outbound interface slirp binds to (ipv6 traffic only).
-  - **outbound_addr6=IPv6**: Specify the outbound ipv6 address slirp binds to.
 - **pasta[:OPTIONS,...]**: use **pasta**(1) to create a user-mode networking
     stack. \
     This is the default for rootless containers and only supported in rootless mode. \
@@ -48,14 +49,12 @@ considered insecure.
         gateway address.
     - **pasta:--mtu,1500**: Specify a 1500 bytes MTU for the _tap_ interface in
         the container.
-    - **pasta:--ipv4-only,-a,10.0.2.0,-n,24,-g,10.0.2.2,--dns-forward,10.0.2.3,-m,1500,--no-ndp,--no-dhcpv6,--no-dhcp**,
-        equivalent to default slirp4netns(1) options: disable IPv6, assign
-        `10.0.2.0/24` to the `tap0` interface in the container, with gateway
-        `10.0.2.3`, enable DNS forwarder reachable at `10.0.2.3`, set MTU to 1500
-        bytes, disable NDP, DHCPv6 and DHCP support.
-    - **pasta:-I,tap0,--ipv4-only,-a,10.0.2.0,-n,24,-g,10.0.2.2,--dns-forward,10.0.2.3,--no-ndp,--no-dhcpv6,--no-dhcp**,
-        equivalent to default slirp4netns(1) options with Podman overrides: same as
-        above, but leave the MTU to 65520 bytes
+    - **pasta:--ipv4-only,-a,10.0.2.0,-n,24,-g,10.0.2.2,--dns-forward,10.0.2.3,-m,1500,--no-ndp,--no-dhcpv6,--no-dhcp**:
+        disable IPv6, assign `10.0.2.0/24` to the `tap0` interface in the container,
+        with gateway `10.0.2.3`, enable DNS forwarder reachable at `10.0.2.3`,
+        set MTU to 1500 bytes, disable NDP, DHCPv6 and DHCP support.
+    - **pasta:-I,tap0,--ipv4-only,-a,10.0.2.0,-n,24,-g,10.0.2.2,--dns-forward,10.0.2.3,--no-ndp,--no-dhcpv6,--no-dhcp**:
+        same as above, but leave the MTU to 65520 bytes
     - **pasta:-t,auto,-u,auto,-T,auto,-U,auto**: enable automatic port forwarding
         based on observed bound ports from both host and container sides
     - **pasta:-T,5201**: enable forwarding of TCP port 5201 from container to

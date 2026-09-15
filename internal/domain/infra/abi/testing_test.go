@@ -1,7 +1,7 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package abi
 
-import "github.com/containers/podman/v5/internal/domain/entities"
+import "go.podman.io/podman/v6/internal/domain/entities"
 
 var _ entities.TestingEngine = &TestingEngine{}

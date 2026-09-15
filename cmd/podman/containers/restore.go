@@ -5,14 +5,14 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/utils"
-	"github.com/containers/podman/v5/cmd/podman/validate"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/rootless"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/utils"
+	"go.podman.io/podman/v6/cmd/podman/validate"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/rootless"
 )
 
 var (
@@ -31,8 +31,8 @@ var (
 		},
 		ValidArgsFunction: common.AutocompleteContainersAndImages,
 		Example: `podman container restore ctrID
-  podman container restore imageID
-  podman container restore --all`,
+podman container restore imageID
+podman container restore --all`,
 	}
 )
 
@@ -52,6 +52,7 @@ func init() {
 	flags.BoolVarP(&restoreOptions.All, "all", "a", false, "Restore all checkpointed containers")
 	flags.BoolVarP(&restoreOptions.Keep, "keep", "k", false, "Keep all temporary checkpoint files")
 	flags.BoolVar(&restoreOptions.TCPEstablished, "tcp-established", false, "Restore a container with established TCP connections")
+	flags.BoolVar(&restoreOptions.TCPClose, "tcp-close", false, "Restore a container and close all TCP connections")
 	flags.BoolVar(&restoreOptions.FileLocks, "file-locks", false, "Restore a container with file locks")
 
 	importFlagName := "import"
@@ -105,7 +106,7 @@ func restore(cmd *cobra.Command, args []string) error {
 	// Check if the container exists (#15055)
 	exists := &entities.BoolReport{Value: false}
 	for _, ctr := range args {
-		exists, e = registry.ContainerEngine().ContainerExists(registry.GetContext(), ctr, entities.ContainerExistsOptions{})
+		exists, e = registry.ContainerEngine().ContainerExists(registry.Context(), ctr, entities.ContainerExistsOptions{})
 		if e != nil {
 			return e
 		}
@@ -148,6 +149,10 @@ func restore(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	restoreOptions.PublishPorts = inputPorts
+
+	if notImport && len(restoreOptions.PublishPorts) > 0 {
+		return fmt.Errorf("--publish can only be used with image or --import")
+	}
 
 	argLen := len(args)
 	if restoreOptions.Import != "" {

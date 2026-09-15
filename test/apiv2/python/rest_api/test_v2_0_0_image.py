@@ -1,7 +1,5 @@
 import json
 import unittest
-from multiprocessing import Process
-
 import requests
 from dateutil.parser import parse
 from .fixtures import APITestCase
@@ -23,7 +21,6 @@ class ImageTestCase(APITestCase):
             "SharedSize",
             "VirtualSize",
             "Labels",
-            "Containers",
         )
         images = r.json()
         self.assertIsInstance(images, list)
@@ -36,7 +33,7 @@ class ImageTestCase(APITestCase):
             self.assertIn("sha256:",item['Id'])
 
     def test_inspect(self):
-        r = requests.get(self.podman_url + "/v1.40/images/alpine/json")
+        r = requests.get(self.podman_url + "/v1.40/images/quay.io/libpod/testimage:20241011/json")
         self.assertEqual(r.status_code, 200, r.text)
 
         # See https://docs.docker.com/engine/api/v1.40/#operation/ImageInspect
@@ -45,7 +42,6 @@ class ImageTestCase(APITestCase):
             "Parent",
             "Comment",
             "Created",
-            "Container",
             "DockerVersion",
             "Author",
             "Architecture",
@@ -66,56 +62,95 @@ class ImageTestCase(APITestCase):
         self.assertIn("sha256:",image['Id'])
 
     def test_delete(self):
-        r = requests.delete(self.podman_url + "/v1.40/images/alpine?force=true")
-        self.assertEqual(r.status_code, 200, r.text)
-        self.assertIsInstance(r.json(), list)
+        r = requests.delete(self.compat_uri("images/alpine?force=true"))
+        self.assertEqual(r.status_code, 409, r.text)
 
     def test_pull(self):
-        r = requests.post(self.uri("/images/pull?reference=alpine"), timeout=15)
-        self.assertEqual(r.status_code, 200, r.status_code)
-        text = r.text
-        keys = {
-            "error": False,
-            "id": False,
-            "images": False,
-            "stream": False,
-        }
-        # Read and record stanza's from pull
-        for line in str.splitlines(text):
-            obj = json.loads(line)
-            key_list = list(obj.keys())
-            for k in key_list:
-                keys[k] = True
+        def check_response_keys(r, keys_expected):
+            text = r.text
+            keys_found = set()
 
-        self.assertFalse(keys["error"], "Expected no errors")
-        self.assertTrue(keys["id"], "Expected to find id stanza")
-        self.assertTrue(keys["images"], "Expected to find images stanza")
-        self.assertTrue(keys["stream"], "Expected to find stream progress stanza's")
+            # Read and record stanza's from pull
+            for line in str.splitlines(text):
+                obj = json.loads(line)
+                key_list = list(obj.keys())
+                for k in key_list:
+                    keys_found.add(k)
 
-        r = requests.post(self.uri("/images/pull?reference=alpine&quiet=true"), timeout=15)
-        self.assertEqual(r.status_code, 200, r.status_code)
-        text = r.text
-        keys = {
-            "error": False,
-            "id": False,
-            "images": False,
-            "stream": False,
-        }
-        # Read and record stanza's from pull
-        for line in str.splitlines(text):
-            obj = json.loads(line)
-            key_list = list(obj.keys())
-            for k in key_list:
-                keys[k] = True
+            for key, expected in keys_expected.items():
+                if expected:
+                    negation = ""
+                else:
+                    negation = "not "
+                self.assertEqual(
+                    key in keys_found,
+                    expected,
+                    f'Expected {negation}to find "{key}" stanza in response',
+                )
 
-        self.assertFalse(keys["error"], "Expected no errors")
-        self.assertTrue(keys["id"], "Expected to find id stanza")
-        self.assertTrue(keys["images"], "Expected to find images stanza")
-        self.assertFalse(keys["stream"], "Expected to find stream progress stanza's")
+        existing_reference = "alpine"
+        non_existing_reference = "quay.io/f4ee35641334/f6fda4bb"
+        cases = [
+            dict(
+                quiet_postfix="&quiet=True",
+                reference=existing_reference,
+                timeout=15,
+                assert_function=self.assertEqual,
+                expected_keys={
+                    "error": False,
+                    "id": True,
+                    "images": True,
+                    "stream": False,
+                },
+            ),
+            dict(
+                quiet_postfix="",
+                reference=existing_reference,
+                timeout=15,
+                assert_function=self.assertEqual,
+                expected_keys={
+                    "error": False,
+                    "id": True,
+                    "images": True,
+                    "stream": True,
+                },
+            ),
+            dict(
+                quiet_postfix="&quiet=True",
+                reference=non_existing_reference,
+                timeout=None,
+                assert_function=self.assertNotEqual,
+                expected_keys={
+                    "cause": True,
+                    "message": True,
+                    "response": True,
+                },
+            ),
+            dict(
+                quiet_postfix="",
+                reference=non_existing_reference,
+                timeout=None,
+                assert_function=self.assertNotEqual,
+                expected_keys={
+                    "cause": True,
+                    "message": True,
+                    "response": True,
+                },
+            ),
+        ]
+
+        for case in cases:
+            with self.subTest(case=case):
+                r = requests.post(
+                    self.uri(f"/images/pull?reference={case['reference']}{case['quiet_postfix']}"),
+                    timeout=case["timeout"],
+                )
+                case["assert_function"](r.status_code, 200, r.status_code)
+                check_response_keys(r, case["expected_keys"])
 
     def test_create(self):
         r = requests.post(
-            self.podman_url + "/v1.40/images/create?fromImage=alpine&platform=linux/amd64/v8",
+            self.podman_url + "/v1.40/images/create?fromImage=quay.io/libpod/testimage:20241011&platform=linux/amd64/v8",
             timeout=15,
         )
         self.assertEqual(r.status_code, 200, r.text)
@@ -127,18 +162,33 @@ class ImageTestCase(APITestCase):
         self.assertEqual(r.status_code, 200, r.text)
 
     def test_search_compat(self):
-        url = self.podman_url + "/v1.40/images/search"
+        url = self.podman_url + "/v1.44/images/search"
 
         # Had issues with this test hanging when repositories not happy
         def do_search1():
+            required_keys = (
+                "description",
+                "is_automated",  # Deprecated: always false.
+                "is_official",
+                "name",
+                "star_count",
+            )
             payload = {"term": "alpine"}
-            r = requests.get(url, params=payload, timeout=5)
+            r = requests.get(url, params=payload, timeout=30)
             self.assertEqual(r.status_code, 200, f"#1: {r.text}")
-            self.assertIsInstance(r.json(), list)
+
+            results = r.json()
+            self.assertIsInstance(results, list)
+            for item in results:
+                for k in required_keys:
+                    self.assertIn(k, item)
 
         def do_search2():
-            payload = {"term": "alpine", "limit": 1}
-            r = requests.get(url, params=payload, timeout=5)
+            # The containers.conf uses:
+            #   compat_api_enforce_docker_hub=false
+            # and full name needs to be used here.
+            payload = {"term": "docker.io/library/alpine", "limit": 1}
+            r = requests.get(url, params=payload, timeout=30)
             self.assertEqual(r.status_code, 200, f"#2: {r.text}")
 
             results = r.json()
@@ -149,7 +199,7 @@ class ImageTestCase(APITestCase):
             # FIXME: Research if quay.io supports is-official and which image is "official"
             return
             payload = {"term": "thanos", "filters": '{"is-official":["true"]}'}
-            r = requests.get(url, params=payload, timeout=5)
+            r = requests.get(url, params=payload, timeout=30)
             self.assertEqual(r.status_code, 200, f"#3: {r.text}")
 
             results = r.json()
@@ -161,29 +211,18 @@ class ImageTestCase(APITestCase):
         def do_search4():
             headers = {"X-Registry-Auth": "null"}
             payload = {"term": "alpine"}
-            r = requests.get(url, params=payload, headers=headers, timeout=5)
+            r = requests.get(url, params=payload, headers=headers, timeout=30)
             self.assertEqual(r.status_code, 200, f"#4: {r.text}")
 
         def do_search5():
             headers = {"X-Registry-Auth": "invalid value"}
             payload = {"term": "alpine"}
-            r = requests.get(url, params=payload, headers=headers, timeout=5)
+            r = requests.get(url, params=payload, headers=headers, timeout=30)
             self.assertEqual(r.status_code, 400, f"#5: {r.text}")
 
-        i = 1
-        for fn in [do_search1, do_search2, do_search3, do_search4, do_search5]:
+        for i, t in enumerate([do_search1, do_search2, do_search3, do_search4, do_search5], start=1):
             with self.subTest(i=i):
-                search = Process(target=fn)
-                search.start()
-                search.join(timeout=10)
-                self.assertFalse(search.is_alive(), f"#{i} /images/search took too long")
-
-        # search_methods = [do_search1, do_search2, do_search3, do_search4, do_search5]
-        # for search_method in search_methods:
-        #     search = Process(target=search_method)
-        #     search.start()
-        #     search.join(timeout=10)
-        #     self.assertFalse(search.is_alive(), "/images/search took too long")
+                t()
 
     def test_history(self):
         r = requests.get(self.podman_url + "/v1.40/images/alpine/history")

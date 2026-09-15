@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/containers/common/pkg/secrets"
-	"github.com/containers/podman/v5/pkg/util"
+	"go.podman.io/common/pkg/secrets"
+	"go.podman.io/podman/v6/pkg/util"
 )
 
 func IfPassesSecretsFilter(s secrets.Secret, filters map[string][]string) (bool, error) {

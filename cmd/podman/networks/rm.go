@@ -5,14 +5,14 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/utils"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/utils"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 var (
@@ -30,12 +30,11 @@ var (
 	stopTimeout int
 )
 
-var (
-	networkRmOptions entities.NetworkRmOptions
-)
+var networkRmOptions entities.NetworkRmOptions
 
 func networkRmFlags(flags *pflag.FlagSet) {
 	flags.BoolVarP(&networkRmOptions.Force, "force", "f", false, "remove any containers using network")
+	flags.BoolVarP(&networkRmOptions.Ignore, "ignore", "i", false, "ignore if a specified network does not exist")
 	timeFlagName := "time"
 	flags.IntVarP(&stopTimeout, timeFlagName, "t", int(containerConfig.Engine.StopTimeout), "Seconds to wait for running containers to stop before killing the container")
 	_ = networkrmCommand.RegisterFlagCompletionFunc(timeFlagName, completion.AutocompleteNone)
@@ -51,9 +50,7 @@ func init() {
 }
 
 func networkRm(cmd *cobra.Command, args []string) error {
-	var (
-		errs utils.OutputErrors
-	)
+	var errs utils.OutputErrors
 
 	if cmd.Flag("time").Changed {
 		if !networkRmOptions.Force {
@@ -64,7 +61,7 @@ func networkRm(cmd *cobra.Command, args []string) error {
 	}
 	responses, err := registry.ContainerEngine().NetworkRm(registry.Context(), args, networkRmOptions)
 	if err != nil {
-		if networkRmOptions.Force && strings.Contains(err.Error(), define.ErrNoSuchNetwork.Error()) {
+		if (networkRmOptions.Force || networkRmOptions.Ignore) && strings.Contains(err.Error(), define.ErrNoSuchNetwork.Error()) {
 			return nil
 		}
 		setExitCode(err)
@@ -74,7 +71,7 @@ func networkRm(cmd *cobra.Command, args []string) error {
 		if r.Err == nil {
 			fmt.Println(r.Name)
 		} else {
-			if networkRmOptions.Force && strings.Contains(r.Err.Error(), define.ErrNoSuchNetwork.Error()) {
+			if (networkRmOptions.Force || networkRmOptions.Ignore) && strings.Contains(r.Err.Error(), define.ErrNoSuchNetwork.Error()) {
 				continue
 			}
 			setExitCode(r.Err)

@@ -41,15 +41,7 @@ Podman does not show these descriptors by default since they are not supported b
 
 @@option creds
 
-#### **--filter**, **-f**=*filter*
-
-Filter output based on conditions provided (default [])
-
-Supported filters are:
-
-* stars (int) - minimum number of stars required for images to show
-* is-automated (boolean - true | false) - is the image automated or not
-* is-official (boolean - true | false) - is the image official or not
+@@option filter.search
 
 #### **--format**=*format*
 
@@ -98,7 +90,6 @@ Do not truncate the output (default *false*).
 Search for images containing the specified name, returning the first three images from each defined registry.
 ```
 $ podman search --limit 3 fedora
-NAME                                     DESCRIPTION
 NAME                                           DESCRIPTION
 registry.fedoraproject.org/f29/fedora-toolbox
 registry.fedoraproject.org/f30/fedora-toolbox

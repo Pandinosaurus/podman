@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package generate
 
@@ -12,12 +12,12 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/containers/podman/v5/libpod"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/systemd/define"
-	"github.com/containers/podman/v5/version"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/pflag"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/systemd/define"
+	"go.podman.io/podman/v6/version"
 )
 
 // podInfo contains data required for generating a pod's systemd
@@ -339,7 +339,7 @@ func executePodTemplate(info *podInfo, options entities.GenerateSystemdOptions) 
 
 		// Presence check for certain flags/options.
 		fs := pflag.NewFlagSet("args", pflag.ContinueOnError)
-		fs.ParseErrorsWhitelist.UnknownFlags = true
+		fs.ParseErrorsAllowlist.UnknownFlags = true
 		fs.Usage = func() {}
 		fs.SetInterspersed(false)
 		fs.String("name", "", "")

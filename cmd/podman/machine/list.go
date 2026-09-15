@@ -5,24 +5,23 @@ package machine
 import (
 	"fmt"
 	"os"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/common/pkg/report"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/validate"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/machine"
-	provider2 "github.com/containers/podman/v5/pkg/machine/provider"
-	"github.com/containers/podman/v5/pkg/machine/shim"
-	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
 	"github.com/docker/go-units"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/common/pkg/report"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/validate"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/machine"
+	provider2 "go.podman.io/podman/v6/pkg/machine/provider"
+	"go.podman.io/podman/v6/pkg/machine/shim"
 )
 
 var (
@@ -37,17 +36,16 @@ var (
 		Args:              validate.NoArgs,
 		ValidArgsFunction: completion.AutocompleteNone,
 		Example: `podman machine list,
-  podman machine list --format json
-  podman machine ls`,
+podman machine list --format json
+podman machine ls`,
 	}
 	listFlag = listFlagType{}
 )
 
 type listFlagType struct {
-	format       string
-	noHeading    bool
-	quiet        bool
-	allProviders bool
+	format    string
+	noHeading bool
+	quiet     bool
 }
 
 func init() {
@@ -62,38 +60,20 @@ func init() {
 	_ = lsCmd.RegisterFlagCompletionFunc(formatFlagName, common.AutocompleteFormat(&entities.ListReporter{}))
 	flags.BoolVarP(&listFlag.noHeading, "noheading", "n", false, "Do not print headers")
 	flags.BoolVarP(&listFlag.quiet, "quiet", "q", false, "Show only machine names")
-	flags.BoolVar(&listFlag.allProviders, "all-providers", false, "Show machines from all providers")
 }
 
-func list(cmd *cobra.Command, args []string) error {
+func list(cmd *cobra.Command, _ []string) error {
 	var (
 		opts machine.ListOptions
 		err  error
 	)
-	var providers []vmconfigs.VMProvider
-	if listFlag.allProviders {
-		providers = provider2.GetAll()
-	} else {
-		provider, err = provider2.Get()
-		if err != nil {
-			return err
-		}
-		providers = []vmconfigs.VMProvider{provider}
-	}
-
+	providers := provider2.GetAll()
 	listResponse, err := shim.List(providers, opts)
 	if err != nil {
 		return err
 	}
 
-	// Sort by last run
-	sort.Slice(listResponse, func(i, j int) bool {
-		return listResponse[i].LastUp.After(listResponse[j].LastUp)
-	})
-	// Bring currently running machines to top
-	sort.Slice(listResponse, func(i, j int) bool {
-		return listResponse[i].Running
-	})
+	slices.SortFunc(listResponse, compareResponseByRunningAndLastUp)
 
 	// ignore the error here we only want to know if we have a default connection to show it in list
 	defaultCon, _ := registry.PodmanConfig().ContainersConfDefaultsRO.GetConnection("", true)
@@ -112,6 +92,18 @@ func list(cmd *cobra.Command, args []string) error {
 	return outputTemplate(cmd, machineReporter)
 }
 
+func compareResponseByRunningAndLastUp(a, b *machine.ListResponse) int {
+	// Sort running machines to the front
+	if a.Running != b.Running {
+		if a.Running {
+			return -1
+		}
+		return 1
+	}
+	// And then sort by time descending
+	return b.LastUp.Compare(a.LastUp)
+}
+
 func outputTemplate(cmd *cobra.Command, responses []*entities.ListReporter) error {
 	headers := report.Headers(entities.ListReporter{}, map[string]string{
 		"LastUp":   "LAST UP",
@@ -119,6 +111,7 @@ func outputTemplate(cmd *cobra.Command, responses []*entities.ListReporter) erro
 		"CPUs":     "CPUS",
 		"Memory":   "MEMORY",
 		"DiskSize": "DISK SIZE",
+		"Swap":     "SWAP",
 	})
 
 	rpt := report.New(os.Stdout, cmd.Name())
@@ -170,7 +163,7 @@ func toMachineFormat(vms []*machine.ListResponse, defaultCon *config.Connection)
 		isDefault := false
 		// check port, in case we somehow have machines with the same name in different providers
 		if defaultCon != nil {
-			isDefault = vm.Name == defaultCon.Name && strings.Contains(defaultCon.URI, strconv.Itoa((vm.Port)))
+			isDefault = vm.Name == defaultCon.Name && strings.Contains(defaultCon.URI, strconv.Itoa(vm.Port))
 		}
 		response := new(entities.ListReporter)
 		response.Default = isDefault
@@ -182,6 +175,7 @@ func toMachineFormat(vms []*machine.ListResponse, defaultCon *config.Connection)
 		response.VMType = vm.VMType
 		response.CPUs = vm.CPUs
 		response.Memory = strUint(uint64(vm.Memory.ToBytes()))
+		response.Swap = strUint(uint64(vm.Swap.ToBytes()))
 		response.DiskSize = strUint(uint64(vm.DiskSize.ToBytes()))
 		response.Port = vm.Port
 		response.RemoteUsername = vm.RemoteUsername
@@ -201,7 +195,7 @@ func toHumanFormat(vms []*machine.ListResponse, defaultCon *config.Connection) [
 		isDefault := false
 		// check port, in case we somehow have machines with the same name in different providers
 		if defaultCon != nil {
-			isDefault = vm.Name == defaultCon.Name && strings.Contains(defaultCon.URI, strconv.Itoa((vm.Port)))
+			isDefault = vm.Name == defaultCon.Name && strings.Contains(defaultCon.URI, strconv.Itoa(vm.Port))
 		}
 		if isDefault {
 			response.Name = vm.Name + "*"
@@ -225,6 +219,7 @@ func toHumanFormat(vms []*machine.ListResponse, defaultCon *config.Connection) [
 		response.VMType = vm.VMType
 		response.CPUs = vm.CPUs
 		response.Memory = units.BytesSize(float64(vm.Memory.ToBytes()))
+		response.Swap = units.BytesSize(float64(vm.Swap.ToBytes()))
 		response.DiskSize = units.BytesSize(float64(vm.DiskSize.ToBytes()))
 
 		humanResponses = append(humanResponses, response)

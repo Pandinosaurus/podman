@@ -1,4 +1,4 @@
-//go:build amd64 || arm64
+//go:build (amd64 && !darwin) || arm64
 
 package machine
 
@@ -7,20 +7,22 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/validate"
-	"github.com/containers/podman/v5/libpod/events"
-	"github.com/containers/podman/v5/pkg/machine/env"
-	provider2 "github.com/containers/podman/v5/pkg/machine/provider"
-	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
-	"github.com/containers/podman/v5/pkg/util"
+	"go.podman.io/storage/pkg/regexp"
+
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/validate"
+	"go.podman.io/podman/v6/libpod/events"
+	"go.podman.io/podman/v6/pkg/machine/env"
+	provider2 "go.podman.io/podman/v6/pkg/machine/provider"
+	"go.podman.io/podman/v6/pkg/machine/vmconfigs"
+	"go.podman.io/podman/v6/pkg/util"
 )
 
 var (
@@ -41,9 +43,7 @@ var (
 	}
 )
 
-var (
-	provider vmconfigs.VMProvider
-)
+var machineProvider vmconfigs.VMProvider
 
 func init() {
 	registry.Commands = append(registry.Commands, registry.CliCommand{
@@ -53,7 +53,7 @@ func init() {
 
 func machinePreRunE(c *cobra.Command, args []string) error {
 	var err error
-	provider, err = provider2.Get()
+	machineProvider, err = provider2.Get()
 	if err != nil {
 		return err
 	}
@@ -61,19 +61,55 @@ func machinePreRunE(c *cobra.Command, args []string) error {
 }
 
 // autocompleteMachineSSH - Autocomplete machine ssh command.
-func autocompleteMachineSSH(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+func autocompleteMachineSSH(_ *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 	if len(args) == 0 {
 		return getMachines(toComplete)
 	}
 	return nil, cobra.ShellCompDirectiveDefault
 }
 
-// autocompleteMachine - Autocomplete machines.
-func autocompleteMachine(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-	if len(args) == 0 {
+// autocompleteMachineCp - Autocomplete machine cp command.
+func autocompleteMachineCp(_ *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	if len(args) < 2 {
+		if found := strings.Contains(toComplete, ":"); found {
+			// TODO: offer virtual machine path completion
+
+			// the user already set the machine name, so don't use the host file autocompletion
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+
+		// suggest machine when they match the input otherwise normal shell completion is used
+		machines, _ := getMachines(toComplete)
+		for _, machine := range machines {
+			if strings.HasPrefix(machine, toComplete) {
+				for i := range machines {
+					machines[i] += ":"
+				}
+				return machines, cobra.ShellCompDirectiveNoSpace
+			}
+		}
+
+		return nil, cobra.ShellCompDirectiveNoSpace
+	}
+	// don't complete more than 2 args
+	return nil, cobra.ShellCompDirectiveNoFileComp
+}
+
+// AutocompleteMachine - Autocomplete machines.
+func AutocompleteMachine(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	if common.ValidCurrentCmdLine(cmd, args, toComplete) {
 		return getMachines(toComplete)
 	}
 	return nil, cobra.ShellCompDirectiveNoFileComp
+}
+
+func autocompleteMachineProvider(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
+	providers := provider2.GetAll()
+	suggestions := make([]string, 0, len(providers))
+	for _, p := range providers {
+		suggestions = append(suggestions, p.VMType().String())
+	}
+	return suggestions, cobra.ShellCompDirectiveNoFileComp
 }
 
 func getMachines(toComplete string) ([]string, cobra.ShellCompDirective) {
@@ -116,13 +152,14 @@ func initMachineEvents() {
 	}
 }
 
+var eventsSockRegex = regexp.Delayed(`machine_events.*\.sock`)
+
 func resolveEventSock() ([]string, error) {
 	// Used mostly for testing
 	if sock, found := os.LookupEnv("PODMAN_MACHINE_EVENTS_SOCK"); found {
 		return []string{sock}, nil
 	}
 
-	re := regexp.MustCompile(`machine_events.*\.sock`)
 	sockPaths := make([]string, 0)
 	fn := func(path string, info os.DirEntry, err error) error {
 		switch {
@@ -132,7 +169,7 @@ func resolveEventSock() ([]string, error) {
 			return nil
 		case !isUnixSocket(info):
 			return nil
-		case !re.MatchString(info.Name()):
+		case !eventsSockRegex.MatchString(info.Name()):
 			return nil
 		}
 

@@ -23,12 +23,12 @@ Podman是由libpod库提供一个实用的程序，可以被用于创建和管�
 这个示例容器会运行一个简单的只有主页的 httpd 服务器。
 
 ```console
-podman run --name basic_httpd -dt -p 8080:80/tcp docker.io/nginx
+podman run --name basic_httpd -d -p 8080:80/tcp docker.io/nginx
 ```
 
 因为命令中的 *-d* 参数表明容器以 "detached" 模式运行，所以 Podman 会在容器运行后打印容器的 ID。
 
-注意为了访问这个 HTTP 服务器，我们将使用端口转发。成功运行需要 slirp4netns 的 v0.3.0+ 版本。
+注意为了访问这个 HTTP 服务器，我们将使用端口转发。
 
 Podman 的 *ps* 命令用于列出正在创建和运行的容器。
 
@@ -40,16 +40,19 @@ podman ps
 
 ### 查看正在运行的容器
 
-你可以 "inspect" (查看)一个正在运行的容器的元数据以及其他详细信息。我们甚至可以使用 inspect 的子命令查看分配给容器的 IP 地址。由于容器以非 root 模式运行，没有分配 IP 地址，inspect 的输出会是 "
-none" 。
+你可以 "inspect" (查看)一个正在运行的容器的元数据以及其他详细信息。我们甚至可以使用 inspect 的子命令查看分配给容器的 IP 地址。由于容器以非 root 模式运行，通常不会分配 IP 地址，该字段可能为空。
 
 ```console
-podman inspect -l | grep IPAddress\":
-            "SecondaryIPAddresses": null,
-            "IPAddress": "",
+podman inspect basic_httpd --format 'IP address: {{.NetworkSettings.IPAddress}}'
 ```
 
-**注意**：*-l* 参数是**最近的容器**的指代，你也可以使用容器的ID 代替 *-l*
+示例输出（非 root 模式）：
+
+```text
+IP address:
+```
+
+**注意**：你也可以使用 *-l* 查看**最近的容器**，或使用容器 ID 代替容器名称。
 
 ### 测试httpd服务器
 
@@ -65,6 +68,11 @@ curl http://localhost:8080
 
 ```console
 podman logs --latest
+```
+
+示例输出：
+
+```text
 10.88.0.1 - - [07/Feb/2018:15:22:11 +0000] "GET / HTTP/1.1" 200 612 "-" "curl/7.55.1" "-"
 10.88.0.1 - - [07/Feb/2018:15:22:30 +0000] "GET / HTTP/1.1" 200 612 "-" "curl/7.55.1" "-"
 10.88.0.1 - - [07/Feb/2018:15:22:30 +0000] "GET / HTTP/1.1" 200 612 "-" "curl/7.55.1" "-"
@@ -78,6 +86,11 @@ podman logs --latest
 
 ```console
 podman top <container_id>
+```
+
+示例输出：
+
+```text
   UID   PID  PPID  C STIME TTY          TIME CMD
     0 31873 31863  0 09:21 ?        00:00:00 nginx: master process nginx -g daemon off;
   101 31889 31873  0 09:21 ?        00:00:00 nginx: worker process

@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package compat
 
@@ -9,16 +9,19 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/containers/image/v5/types"
-	"github.com/containers/podman/v5/libpod"
-	"github.com/containers/podman/v5/pkg/api/handlers/utils"
-	api "github.com/containers/podman/v5/pkg/api/types"
-	"github.com/containers/podman/v5/pkg/auth"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/domain/infra/abi"
-	"github.com/containers/storage"
-	"github.com/docker/docker/pkg/jsonmessage"
+	"github.com/moby/moby/api/types/jsonstream"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/libimage"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/podman/v6/libpod"
+	handlers "go.podman.io/podman/v6/pkg/api/handlers"
+	"go.podman.io/podman/v6/pkg/api/handlers/utils"
+	"go.podman.io/podman/v6/pkg/api/handlers/utils/apiutil"
+	api "go.podman.io/podman/v6/pkg/api/types"
+	"go.podman.io/podman/v6/pkg/auth"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/domain/infra/abi"
+	"go.podman.io/storage"
 )
 
 // PushImage is the handler for the compat http endpoint for pushing images.
@@ -37,6 +40,7 @@ func PushImage(w http.ResponseWriter, r *http.Request) {
 		Format      string `schema:"format"`
 		TLSVerify   bool   `schema:"tlsVerify"`
 		Tag         string `schema:"tag"`
+		Platform    string `schema:"platform"`
 	}{
 		// This is where you can override the golang default value for one of fields
 		TLSVerify: true,
@@ -45,6 +49,22 @@ func PushImage(w http.ResponseWriter, r *http.Request) {
 	if err := decoder.Decode(&query, r.URL.Query()); err != nil {
 		utils.Error(w, http.StatusBadRequest, fmt.Errorf("failed to parse parameters for %s: %w", r.URL.String(), err))
 		return
+	}
+
+	var platformOS, platformArch, platformVariant string
+	if query.Platform != "" {
+		var platform struct {
+			OS           string `json:"os"`
+			Architecture string `json:"architecture"`
+			Variant      string `json:"variant,omitempty"`
+		}
+		if err := json.Unmarshal([]byte(query.Platform), &platform); err != nil {
+			utils.Error(w, http.StatusBadRequest, fmt.Errorf("invalid platform JSON: %w", err))
+			return
+		}
+		platformOS = platform.OS
+		platformArch = platform.Architecture
+		platformVariant = platform.Variant
 	}
 
 	// Note that Docker's docs state "Image name or ID" to be in the path
@@ -66,7 +86,12 @@ func PushImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	imageName = possiblyNormalizedName
-	localImage, _, err := runtime.LibimageRuntime().LookupImage(possiblyNormalizedName, nil)
+	lookupOptions := &libimage.LookupImageOptions{
+		OS:           platformOS,
+		Architecture: platformArch,
+		Variant:      platformVariant,
+	}
+	localImage, _, err := runtime.LibimageRuntime().LookupImage(possiblyNormalizedName, lookupOptions)
 	if err != nil {
 		utils.ImageNotFound(w, imageName, fmt.Errorf("failed to find image %s: %w", imageName, err))
 		return
@@ -97,6 +122,9 @@ func PushImage(w http.ResponseWriter, r *http.Request) {
 		Username: username,
 		Quiet:    true,
 		Progress: make(chan types.ProgressProperties),
+		OS:       platformOS,
+		Arch:     platformArch,
+		Variant:  platformVariant,
 	}
 	if _, found := r.URL.Query()["tlsVerify"]; found {
 		options.SkipTLSVerify = types.NewOptionalBool(!query.TLSVerify)
@@ -120,8 +148,8 @@ func PushImage(w http.ResponseWriter, r *http.Request) {
 	statusWritten := false
 	writeStatusCode := func(code int) {
 		if !statusWritten {
-			w.WriteHeader(code)
 			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(code)
 			flush()
 			statusWritten = true
 		}
@@ -130,7 +158,7 @@ func PushImage(w http.ResponseWriter, r *http.Request) {
 	referenceWritten := false
 	writeReference := func() {
 		if !referenceWritten {
-			var report jsonmessage.JSONMessage
+			var report jsonstream.Message
 			report.Status = fmt.Sprintf("The push refers to repository [%s]", imageName)
 			if err := enc.Encode(report); err != nil {
 				logrus.Warnf("Failed to json encode error %q", err.Error())
@@ -150,7 +178,7 @@ func PushImage(w http.ResponseWriter, r *http.Request) {
 
 loop: // break out of for/select infinite loop
 	for {
-		var report jsonmessage.JSONMessage
+		var report handlers.LegacyJSONMessage //nolint:staticcheck // LegacyJSONMessage is deprecated but kept for Docker API compat < v1.52
 
 		select {
 		case e := <-options.Progress:
@@ -161,11 +189,20 @@ loop: // break out of for/select infinite loop
 				report.Status = "Preparing"
 			case types.ProgressEventRead:
 				report.Status = "Pushing"
-				report.Progress = &jsonmessage.JSONProgress{
+				report.Progress = &jsonstream.Progress{
 					Current: int64(e.Offset),
 					Total:   e.Artifact.Size,
 				}
-				report.ProgressMessage = report.Progress.String()
+				if _, err := apiutil.SupportedVersion(r, "<1.52.0"); err == nil {
+					b, err := json.Marshal(&jsonstream.Message{
+						Status:   report.Status,
+						Progress: report.Progress,
+						ID:       report.ID,
+					})
+					if err == nil {
+						report.ProgressMessage = string(b)
+					}
+				}
 			case types.ProgressEventSkipped:
 				report.Status = "Layer already exists"
 			case types.ProgressEventDone:
@@ -178,19 +215,24 @@ loop: // break out of for/select infinite loop
 			flush()
 		case err := <-pushErrChan:
 			if err != nil {
-				var msg string
+				code := http.StatusInternalServerError
 				if errors.Is(err, storage.ErrImageUnknown) {
 					// Image may have been removed in the meantime.
-					writeStatusCode(http.StatusNotFound)
-					msg = "An image does not exist locally with the tag: " + imageName
-				} else {
-					writeStatusCode(http.StatusInternalServerError)
-					msg = err.Error()
+					code = http.StatusNotFound
+					err = errors.New("An image does not exist locally with the tag: " + imageName)
 				}
-				report.Error = &jsonmessage.JSONError{
+				if !statusWritten {
+					utils.Error(w, code, err)
+					flush()
+					break loop
+				}
+				msg := err.Error()
+				report.Error = &jsonstream.Error{
 					Message: msg,
 				}
-				report.ErrorMessage = msg
+				if _, err := apiutil.SupportedVersion(r, "<1.52.0"); err == nil {
+					report.ErrorMessage = msg //nolint:staticcheck // deprecated field
+				}
 				if err := enc.Encode(report); err != nil {
 					logrus.Warnf("Failed to json encode error %q", err.Error())
 				}
@@ -209,6 +251,22 @@ loop: // break out of for/select infinite loop
 			var digestStr string
 			if pushReport != nil {
 				digestStr = pushReport.ManifestDigest
+			}
+			// Match Docker's behaviour: emit the manifest digest as an
+			// `aux` JSON trailer at the end of the push stream so clients
+			// can recover it without round-tripping the registry.
+			auxPayload, auxErr := json.Marshal(struct {
+				Tag    string `json:"Tag"`
+				Digest string `json:"Digest"`
+				Size   int    `json:"Size"`
+			}{
+				Tag:    tag,
+				Digest: digestStr,
+				Size:   len(rawManifest),
+			})
+			if auxErr == nil {
+				raw := json.RawMessage(auxPayload)
+				report.Aux = &raw
 			}
 			report.Status = fmt.Sprintf("%s: digest: %s size: %d", tag, digestStr, len(rawManifest))
 			if err := enc.Encode(report); err != nil {

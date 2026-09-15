@@ -1,11 +1,11 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package abi
 
 import (
 	"sync"
 
-	"github.com/containers/podman/v5/libpod"
+	"go.podman.io/podman/v6/libpod"
 )
 
 // Image-related runtime linked against libpod library

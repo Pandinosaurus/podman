@@ -6,17 +6,16 @@ import (
 	"os"
 	"strconv"
 
-	tm "github.com/buger/goterm"
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/common/pkg/report"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	putils "github.com/containers/podman/v5/cmd/podman/utils"
-	"github.com/containers/podman/v5/cmd/podman/validate"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/docker/go-units"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/common/pkg/report"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	putils "go.podman.io/podman/v6/cmd/podman/utils"
+	"go.podman.io/podman/v6/cmd/podman/validate"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 var (
@@ -29,8 +28,8 @@ var (
 		Args:              checkStatOptions,
 		ValidArgsFunction: common.AutocompleteContainersRunning,
 		Example: `podman stats --all --no-stream
-  podman stats ctrID
-  podman stats --no-stream --format "table {{.ID}} {{.Name}} {{.MemUsage}}" ctrID`,
+podman stats ctrID
+podman stats --no-stream --format "table {{.ID}} {{.Name}} {{.MemUsage}}" ctrID`,
 	}
 
 	containerStatsCommand = &cobra.Command{
@@ -41,8 +40,8 @@ var (
 		Args:              checkStatOptions,
 		ValidArgsFunction: statsCommand.ValidArgsFunction,
 		Example: `podman container stats --all --no-stream
-  podman container stats ctrID
-  podman container stats --no-stream --format "table {{.ID}} {{.Name}} {{.MemUsage}}" ctrID`,
+podman container stats ctrID
+podman container stats --no-stream --format "table {{.ID}} {{.Name}} {{.MemUsage}}" ctrID`,
 	}
 )
 
@@ -96,7 +95,7 @@ func init() {
 
 // stats is different in that it will assume running containers if
 // no input is given, so we need to validate differently
-func checkStatOptions(cmd *cobra.Command, args []string) error {
+func checkStatOptions(_ *cobra.Command, args []string) error {
 	opts := 0
 	if statsOptions.All {
 		opts++
@@ -152,9 +151,7 @@ func outputStats(cmd *cobra.Command, reports []define.ContainerStats) error {
 		"PIDS":          "PIDS",
 	})
 	if !statsOptions.NoReset {
-		tm.Clear()
-		tm.MoveCursor(1, 1)
-		tm.Flush()
+		common.ClearScreen()
 	}
 	stats := make([]containerStats, 0, len(reports))
 	for _, r := range reports {
@@ -255,10 +252,10 @@ func combineBytesValues(a, b uint64) string {
 
 func outputJSON(stats []containerStats) error {
 	type jstat struct {
-		Id         string `json:"id"` //nolint:revive,stylecheck
+		Id         string `json:"id"`
 		Name       string `json:"name"`
 		CPUTime    string `json:"cpu_time"`
-		CpuPercent string `json:"cpu_percent"` //nolint:revive,stylecheck
+		CpuPercent string `json:"cpu_percent"`
 		AverageCPU string `json:"avg_cpu"`
 		MemUsage   string `json:"mem_usage"`
 		MemPerc    string `json:"mem_percent"`

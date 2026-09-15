@@ -5,12 +5,16 @@ package cpu
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strconv"
 	"strings"
+	"unsafe"
 
-	"github.com/shoenig/go-m1cpu"
 	"github.com/tklauser/go-sysconf"
 	"golang.org/x/sys/unix"
+
+	"github.com/shirou/gopsutil/v4/internal/common"
 )
 
 // sys/resource.h
@@ -22,6 +26,24 @@ const (
 	cpIdle    = 4
 	cpUStates = 5
 )
+
+// mach/machine.h
+const (
+	cpuStateUser   = 0
+	cpuStateSystem = 1
+	cpuStateIdle   = 2
+	cpuStateNice   = 3
+	cpuStateMax    = 4
+)
+
+// mach/processor_info.h
+const (
+	processorCpuLoadInfo = 2 //nolint:revive //FIXME
+)
+
+type hostCpuLoadInfoData struct { //nolint:revive //FIXME
+	cpuTicks [cpuStateMax]uint32
+}
 
 // default value. from time.h
 var ClocksPerSec = float64(128)
@@ -38,12 +60,18 @@ func Times(percpu bool) ([]TimesStat, error) {
 	return TimesWithContext(context.Background(), percpu)
 }
 
-func TimesWithContext(ctx context.Context, percpu bool) ([]TimesStat, error) {
+func TimesWithContext(_ context.Context, percpu bool) ([]TimesStat, error) {
+	sys, err := common.NewSystemLib()
+	if err != nil {
+		return nil, err
+	}
+	defer sys.Close()
+
 	if percpu {
-		return perCPUTimes()
+		return perCPUTimes(sys)
 	}
 
-	return allCPUTimes()
+	return allCPUTimes(sys)
 }
 
 // Returns only one CPUInfoStat on FreeBSD
@@ -51,7 +79,7 @@ func Info() ([]InfoStat, error) {
 	return InfoWithContext(context.Background())
 }
 
-func InfoWithContext(ctx context.Context) ([]InfoStat, error) {
+func InfoWithContext(_ context.Context) ([]InfoStat, error) {
 	var ret []InfoStat
 
 	c := InfoStat{}
@@ -86,21 +114,15 @@ func InfoWithContext(ctx context.Context) ([]InfoStat, error) {
 	c.CacheSize = int32(cacheSize)
 	c.VendorID, _ = unix.Sysctl("machdep.cpu.vendor")
 
-	if m1cpu.IsAppleSilicon() {
-		c.Mhz = float64(m1cpu.PCoreHz() / 1_000_000)
-	} else {
-		// Use the rated frequency of the CPU. This is a static value and does not
-		// account for low power or Turbo Boost modes.
-		cpuFrequency, err := unix.SysctlUint64("hw.cpufrequency")
-		if err == nil {
-			c.Mhz = float64(cpuFrequency) / 1000000.0
-		}
+	v, err := getFrequency()
+	if err == nil {
+		c.Mhz = v
 	}
 
 	return append(ret, c), nil
 }
 
-func CountsWithContext(ctx context.Context, logical bool) (int, error) {
+func CountsWithContext(_ context.Context, logical bool) (int, error) {
 	var cpuArgument string
 	if logical {
 		cpuArgument = "hw.logicalcpu"
@@ -114,4 +136,60 @@ func CountsWithContext(ctx context.Context, logical bool) (int, error) {
 	}
 
 	return int(count), nil
+}
+
+func perCPUTimes(sys *common.SystemLib) ([]TimesStat, error) {
+	var count, ncpu uint32
+	var cpuload *hostCpuLoadInfoData
+
+	status := sys.HostProcessorInfo(sys.MachHostSelf(), processorCpuLoadInfo,
+		&ncpu, unsafe.Pointer(&cpuload), &count)
+
+	if status != common.KERN_SUCCESS {
+		return nil, fmt.Errorf("host_processor_info error=%d", status)
+	}
+
+	if cpuload == nil {
+		return nil, errors.New("host_processor_info returned nil cpuload")
+	}
+
+	defer sys.VMDeallocate(sys.MachTaskSelf(), uintptr(unsafe.Pointer(cpuload)), uintptr(ncpu))
+
+	ret := []TimesStat{}
+	loads := unsafe.Slice(cpuload, ncpu)
+
+	for i := 0; i < int(ncpu); i++ {
+		c := TimesStat{
+			CPU:    fmt.Sprintf("cpu%d", i),
+			User:   float64(loads[i].cpuTicks[cpuStateUser]) / ClocksPerSec,
+			System: float64(loads[i].cpuTicks[cpuStateSystem]) / ClocksPerSec,
+			Nice:   float64(loads[i].cpuTicks[cpuStateNice]) / ClocksPerSec,
+			Idle:   float64(loads[i].cpuTicks[cpuStateIdle]) / ClocksPerSec,
+		}
+		ret = append(ret, c)
+	}
+
+	return ret, nil
+}
+
+func allCPUTimes(sys *common.SystemLib) ([]TimesStat, error) {
+	var cpuload hostCpuLoadInfoData
+	count := uint32(cpuStateMax)
+
+	status := sys.HostStatistics(sys.MachHostSelf(), common.HOST_CPU_LOAD_INFO,
+		unsafe.Pointer(&cpuload), &count)
+
+	if status != common.KERN_SUCCESS {
+		return nil, fmt.Errorf("host_statistics error=%d", status)
+	}
+
+	c := TimesStat{
+		CPU:    "cpu-total",
+		User:   float64(cpuload.cpuTicks[cpuStateUser]) / ClocksPerSec,
+		System: float64(cpuload.cpuTicks[cpuStateSystem]) / ClocksPerSec,
+		Nice:   float64(cpuload.cpuTicks[cpuStateNice]) / ClocksPerSec,
+		Idle:   float64(cpuload.cpuTicks[cpuStateIdle]) / ClocksPerSec,
+	}
+
+	return []TimesStat{c}, nil
 }

@@ -6,11 +6,11 @@ import (
 	"os"
 	"strings"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 var (
@@ -24,9 +24,9 @@ var (
 		Args:              cobra.RangeArgs(1, 2),
 		ValidArgsFunction: common.AutocompleteCommitCommand,
 		Example: `podman commit -q --message "committing container to image" reverent_golick image-committed
-  podman commit -q --author "firstName lastName" reverent_golick image-committed
-  podman commit -q --pause=false containerID image-committed
-  podman commit containerID`,
+podman commit -q --author "firstName lastName" reverent_golick image-committed
+podman commit -q --pause=false containerID image-committed
+podman commit containerID`,
 	}
 
 	containerCommitCommand = &cobra.Command{
@@ -37,9 +37,9 @@ var (
 		RunE:              commitCommand.RunE,
 		ValidArgsFunction: commitCommand.ValidArgsFunction,
 		Example: `podman container commit -q --message "committing container to image" reverent_golick image-committed
-  podman container commit -q --author "firstName lastName" reverent_golick image-committed
-  podman container commit -q --pause=false containerID image-committed
-  podman container commit containerID`,
+podman container commit -q --author "firstName lastName" reverent_golick image-committed
+podman container commit -q --pause=false containerID image-committed
+podman container commit containerID`,
 	}
 )
 
@@ -77,7 +77,7 @@ func commitFlags(cmd *cobra.Command) {
 	flags.StringVarP(&commitOptions.Author, authorFlagName, "a", "", "Set the author for the image committed")
 	_ = cmd.RegisterFlagCompletionFunc(authorFlagName, completion.AutocompleteNone)
 
-	flags.BoolVarP(&commitOptions.Pause, "pause", "p", false, "Pause container during commit")
+	flags.BoolVarP(&commitOptions.Pause, "pause", "p", true, "Pause container during commit")
 	flags.BoolVarP(&commitOptions.Quiet, "quiet", "q", false, "Suppress output")
 	flags.BoolVarP(&commitOptions.Squash, "squash", "s", false, "squash newly built layers into a single new layer")
 	flags.BoolVar(&commitOptions.IncludeVolumes, "include-volumes", false, "Include container volumes as image volumes")
@@ -96,7 +96,7 @@ func init() {
 	commitFlags(containerCommitCommand)
 }
 
-func commit(cmd *cobra.Command, args []string) error {
+func commit(_ *cobra.Command, args []string) error {
 	container := strings.TrimPrefix(args[0], "/")
 	if len(args) == 2 {
 		commitOptions.ImageName = args[1]
@@ -116,7 +116,7 @@ func commit(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if len(iidFile) > 0 {
-		if err = os.WriteFile(iidFile, []byte(response.Id), 0644); err != nil {
+		if err = os.WriteFile(iidFile, []byte(response.Id), 0o644); err != nil {
 			return fmt.Errorf("failed to write image ID: %w", err)
 		}
 	}

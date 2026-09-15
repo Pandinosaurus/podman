@@ -1,12 +1,12 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package abi
 
 import (
 	"context"
 
-	"github.com/containers/podman/v5/libpod/events"
-	"github.com/containers/podman/v5/pkg/domain/entities"
+	"go.podman.io/podman/v6/libpod/events"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 func (ic *ContainerEngine) Events(ctx context.Context, opts entities.EventsOptions) error {

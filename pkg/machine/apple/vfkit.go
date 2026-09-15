@@ -5,11 +5,10 @@ package apple
 import (
 	"errors"
 
-	"github.com/containers/podman/v5/pkg/machine/define"
-	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
 	vfConfig "github.com/crc-org/vfkit/pkg/config"
-	"github.com/crc-org/vfkit/pkg/rest"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/podman/v6/pkg/machine/define"
+	"go.podman.io/podman/v6/pkg/machine/vmconfigs"
 )
 
 func GetDefaultDevices(mc *vmconfigs.MachineConfig) ([]vfConfig.VirtioDevice, *define.VMFile, error) {
@@ -63,7 +62,6 @@ func GetDefaultDevices(mc *vmconfigs.MachineConfig) ([]vfConfig.VirtioDevice, *d
 }
 
 func GetDebugDevices() ([]vfConfig.VirtioDevice, error) {
-	var devices []vfConfig.VirtioDevice
 	gpu, err := vfConfig.VirtioGPUNew()
 	if err != nil {
 		return nil, err
@@ -76,7 +74,7 @@ func GetDebugDevices() ([]vfConfig.VirtioDevice, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append(devices, gpu, mouse, kb), nil
+	return []vfConfig.VirtioDevice{gpu, mouse, kb}, nil
 }
 
 func GetIgnitionVsockDevice(path string) (vfConfig.VirtioDevice, error) {
@@ -100,11 +98,7 @@ func GetVfKitEndpointCMDArgs(endpoint string) ([]string, error) {
 	if len(endpoint) == 0 {
 		return nil, errors.New("endpoint cannot be empty")
 	}
-	restEndpoint, err := rest.NewEndpoint(endpoint)
-	if err != nil {
-		return nil, err
-	}
-	return restEndpoint.ToCmdLine()
+	return restNewEndpointToCmdLine(endpoint)
 }
 
 // GetIgnitionVsockDeviceAsCLI retrieves the ignition vsock device and converts

@@ -3,15 +3,20 @@ package util
 import (
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
+	"runtime"
 	"sort"
 	"testing"
 	"time"
 
-	"github.com/containers/storage/pkg/idtools"
-	stypes "github.com/containers/storage/types"
 	ruser "github.com/moby/sys/user"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/storage/pkg/idtools"
+	stypes "go.podman.io/storage/types"
 )
 
 func BreakInsert(mapping []idtools.IDMap, extension idtools.IDMap) (result []idtools.IDMap) {
@@ -595,6 +600,7 @@ func TestGetRootlessKeepIDMapping(t *testing.T) {
 	tests := []struct {
 		uid, gid                 int
 		uids, gids               []idtools.IDMap
+		size                     int
 		expectedOptions          *stypes.IDMappingOptions
 		expectedUID, expectedGID int
 		expectedError            error
@@ -627,36 +633,97 @@ func TestGetRootlessKeepIDMapping(t *testing.T) {
 			expectedUID: 0,
 			expectedGID: 0,
 		},
+		{
+			uid:  0,
+			gid:  0,
+			uids: []idtools.IDMap{{ContainerID: 0, HostID: 100000, Size: 65536}},
+			gids: []idtools.IDMap{{ContainerID: 0, HostID: 100000, Size: 65536}},
+			expectedOptions: &stypes.IDMappingOptions{
+				HostUIDMapping: false,
+				HostGIDMapping: false,
+				UIDMap:         []idtools.IDMap{{ContainerID: 0, HostID: 0, Size: 1}, {ContainerID: 1, HostID: 1, Size: 1023}},
+				GIDMap:         []idtools.IDMap{{ContainerID: 0, HostID: 0, Size: 1}, {ContainerID: 1, HostID: 1, Size: 1023}},
+			},
+			expectedUID: 0,
+			expectedGID: 0,
+			size:        1024,
+		},
+		{
+			uid:  0,
+			gid:  0,
+			uids: []idtools.IDMap{{ContainerID: 0, HostID: 100000, Size: 65536}},
+			gids: []idtools.IDMap{{ContainerID: 0, HostID: 100000, Size: 65536}},
+			expectedOptions: &stypes.IDMappingOptions{
+				HostUIDMapping: false,
+				HostGIDMapping: false,
+				UIDMap:         []idtools.IDMap{{ContainerID: 0, HostID: 0, Size: 1}},
+				GIDMap:         []idtools.IDMap{{ContainerID: 0, HostID: 0, Size: 1}},
+			},
+			expectedUID: 0,
+			expectedGID: 0,
+			size:        1,
+		},
+		{
+			uid:  0,
+			gid:  0,
+			uids: []idtools.IDMap{{ContainerID: 0, HostID: 100000, Size: 65536}},
+			gids: []idtools.IDMap{{ContainerID: 0, HostID: 100000, Size: 65536}},
+			expectedOptions: &stypes.IDMappingOptions{
+				HostUIDMapping: false,
+				HostGIDMapping: false,
+				UIDMap:         []idtools.IDMap{{ContainerID: 0, HostID: 0, Size: 1}, {ContainerID: 1, HostID: 1, Size: 1}},
+				GIDMap:         []idtools.IDMap{{ContainerID: 0, HostID: 0, Size: 1}, {ContainerID: 1, HostID: 1, Size: 1}},
+			},
+			expectedUID: 0,
+			expectedGID: 0,
+			size:        2,
+		},
+		{
+			uid:  1000,
+			gid:  1000,
+			uids: []idtools.IDMap{},
+			gids: []idtools.IDMap{},
+			expectedOptions: &stypes.IDMappingOptions{
+				HostUIDMapping: false,
+				HostGIDMapping: false,
+				UIDMap:         []idtools.IDMap{{ContainerID: 1000, HostID: 0, Size: 1}},
+				GIDMap:         []idtools.IDMap{{ContainerID: 1000, HostID: 0, Size: 1}},
+			},
+			expectedUID: 1000,
+			expectedGID: 1000,
+			size:        1000000,
+		},
 	}
 
 	for _, test := range tests {
-		options, uid, gid, err := getRootlessKeepIDMapping(test.uid, test.gid, test.uids, test.gids)
-		assert.Nil(t, err)
+		options, uid, gid, err := getRootlessKeepIDMapping(test.uid, test.gid, test.uids, test.gids, test.size)
+		assert.NoError(t, err)
 		assert.Equal(t, test.expectedOptions, options)
 		assert.Equal(t, test.expectedUID, uid)
 		assert.Equal(t, test.expectedGID, gid)
 	}
 }
 
-func getDefaultMountOptionsNoStat(path string) (defaultMountOptions, error) {
+func getDefaultMountOptionsNoStat(_ string) (defaultMountOptions, error) {
 	return defaultMountOptions{false, true, true}, nil
 }
 
 func TestProcessOptions(t *testing.T) {
 	tests := []struct {
-		name       string
-		options    []string
-		isTmpfs    bool
-		sourcePath string
-		expected   []string
-		expectErr  bool
+		name             string
+		options          []string
+		isTmpfs          bool
+		sourcePath       string
+		expected         []string
+		expectedNoCreate bool
+		expectErr        bool
 	}{
 		{
 			name:       "tmpfs",
-			options:    []string{"rw", "size=512m"},
+			options:    []string{"rw", "size=512m", "noatime"},
 			isTmpfs:    true,
 			sourcePath: "",
-			expected:   []string{"nodev", "nosuid", "rprivate", "rw", "size=512m", "tmpcopyup"},
+			expected:   []string{"nodev", "nosuid", "rprivate", "rw", "size=512m", "tmpcopyup", "noatime"},
 		},
 		{
 			name:       "duplicate idmap option",
@@ -740,33 +807,133 @@ func TestProcessOptions(t *testing.T) {
 		{
 			name:       "default bind mount",
 			sourcePath: "/path/to/source",
-			expected:   []string{"nodev", "nosuid", "rbind", "rprivate", "rw"},
+			expected:   []string{"nodev", "nosuid", "rbind", "rprivate"},
 		},
 		{
 			name:       "default bind mount with bind",
 			sourcePath: "/path/to/source",
 			options:    []string{"bind"},
-			expected:   []string{"nodev", "nosuid", "bind", "private", "rw"},
+			expected:   []string{"nodev", "nosuid", "bind", "private"},
+		},
+		{
+			name:       "noatime allowed only with tmpfs",
+			sourcePath: "/path/to/source",
+			options:    []string{"noatime"},
+			expectErr:  true,
+		},
+		{
+			name:             "nocreate option is parsed and filtered",
+			sourcePath:       "/path/to/source",
+			options:          []string{"nocreate", "ro"},
+			expected:         []string{"nodev", "nosuid", "rbind", "ro", "rprivate"},
+			expectedNoCreate: true,
+		},
+		{
+			name:             "nocreate with other options",
+			sourcePath:       "/path/to/source",
+			options:          []string{"rw", "nocreate", "z"},
+			expected:         []string{"nodev", "nosuid", "rbind", "rprivate", "rw", "z"},
+			expectedNoCreate: true,
+		},
+		{
+			name:             "no nocreate option",
+			sourcePath:       "/path/to/source",
+			options:          []string{"ro"},
+			expected:         []string{"nodev", "nosuid", "rbind", "ro", "rprivate"},
+			expectedNoCreate: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			opts, err := processOptionsInternal(tt.options, tt.isTmpfs, tt.sourcePath, getDefaultMountOptionsNoStat)
+			opts, noCreate, err := processOptionsInternal(tt.options, tt.isTmpfs, tt.sourcePath, getDefaultMountOptionsNoStat)
 			if tt.expectErr {
 				assert.NotNil(t, err)
 			} else {
-				assert.Nil(t, err)
+				assert.NoError(t, err)
 				sort.Strings(opts)
 				sort.Strings(tt.expected)
 				assert.Equal(t, opts, tt.expected)
+				assert.Equal(t, noCreate, tt.expectedNoCreate)
 			}
 		})
 	}
 }
 
-func TestGetRootlessPauseProcessPidPath(t *testing.T) {
-	dir, err := GetRootlessPauseProcessPidPath()
+func TestGetRootlessStateDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Not implemented on Windows")
+	}
+	dir, err := GetRootlessStateDir()
 	assert.NoError(t, err)
-	assert.NotEqual(t, dir, "libpod/tmp/pause.pid")
+	assert.NotEqual(t, dir, "libpod/tmp")
+}
+
+// https://github.com/containers/podman/issues/25458
+func TestParseDockerignoreLeadingTrailingSlashes(t *testing.T) {
+	contextDir := t.TempDir()
+
+	for _, tt := range []struct {
+		name     string
+		ignore   string
+		expected []string
+	}{
+		{"leading slash", "/.git/\n", []string{".git"}},
+		{"trailing slash", "target/\n", []string{"target"}},
+		{"both slashes", "/build/\n", []string{"build"}},
+		{"no slashes", "vendor\n", []string{"vendor"}},
+		{"slash only line", "/\n", []string{}},
+		{"multiple patterns", "/.git/\n/target/\nvendor\n", []string{".git", "target", "vendor"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ignorePath := filepath.Join(contextDir, ".containerignore")
+			err := os.WriteFile(ignorePath, []byte(tt.ignore), 0o644)
+			assert.NoError(t, err)
+
+			excludes, _, err := ParseDockerignore(nil, contextDir)
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expected, excludes)
+		})
+	}
+}
+
+func TestParseRestartPolicy(t *testing.T) {
+	tests := []struct {
+		name        string
+		policy      string
+		wantPolicy  string
+		wantRetries uint
+		wantErr     string // substring to match; empty means no error expected
+	}{
+		{"empty policy", "", "", 0, ""},
+		{"no", "no", "no", 0, ""},
+		{"always", "always", "always", 0, ""},
+		{"unless-stopped", "unless-stopped", "unless-stopped", 0, ""},
+		{"on-failure without retries", "on-failure", "on-failure", 0, ""},
+		{"never is normalized to no", "never", define.RestartPolicyNo, 0, ""},
+		{"never is case-insensitive", "Never", define.RestartPolicyNo, 0, ""},
+		{"on-failure with retries", "on-failure:5", "on-failure", 5, ""},
+		{"on-failure with zero retries", "on-failure:0", "on-failure", 0, ""},
+		{"on-failure preserves original case", "ON-FAILURE:3", "ON-FAILURE", 3, ""},
+		{"retries with non on-failure policy", "always:5", "", 0, "can only be specified with on-failure"},
+		{"non-numeric retries", "on-failure:abc", "", 0, "parsing restart policy retry count"},
+		{"empty retries", "on-failure:", "", 0, "parsing restart policy retry count"},
+		{"negative retries", "on-failure:-1", "", 0, "greater than 0"},
+		{"too many fields", "on-failure:5:3", "", 0, "may specify retries at most once"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			policy, retries, err := ParseRestartPolicy(tt.policy)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				assert.Empty(t, policy)
+				assert.Zero(t, retries)
+				return
+			}
+			assert.NoError(t, err)
+			assert.Equal(t, tt.wantPolicy, policy)
+			assert.Equal(t, tt.wantRetries, retries)
+		})
+	}
 }

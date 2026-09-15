@@ -59,6 +59,10 @@ Remove built images from farm nodes on success (Default: false).
 
 @@option compat-volumes
 
+@@option compression-format
+
+@@option compression-level
+
 @@option cpp-flag
 
 @@option cpu-period
@@ -70,6 +74,8 @@ Remove built images from farm nodes on success (Default: false).
 @@option cpuset-cpus
 
 @@option cpuset-mems
+
+@@option created-annotation
 
 @@option creds
 
@@ -103,6 +109,8 @@ This option specifies the name of the farm to be used in the build process.
 
 @@option file
 
+@@option force-compression
+
 @@option force-rm
 
 @@option format
@@ -123,6 +131,12 @@ This option specifies the name of the farm to be used in the build process.
 
 @@option iidfile
 
+@@option iidfile-raw
+
+@@option inherit-annotations
+
+@@option inherit-labels
+
 @@option ipc.image
 
 @@option isolation
@@ -137,13 +151,27 @@ This option specifies the name of the farm to be used in the build process.
 
 #### **--local**, **-l**
 
-Build image on local machine as well as on farm nodes.
+Build image on local machine as well as on farm nodes (Default: true).
 
 @@option logfile
 
 @@option memory
 
 @@option memory-swap
+
+#### **--mount**=*mount-specification*
+
+Adds this mount to each `RUN` command in a Containerfile before executing.  For example:
+
+`podman build --mount=type=secret,id=mysecret …`
+
+and a Containerfile entry of:
+
+`RUN cat /run/secrets/mysecret`
+
+Has the same effect as:
+
+`RUN --mount=type=secret,id=mysecret cat /run/secrets/mysecret`
 
 @@option network.image
 
@@ -175,11 +203,15 @@ Build only on farm nodes that match the given platforms.
 
 @@option retry-delay
 
+@@option rewrite-timestamp
+
 @@option rm
 
 @@option runtime
 
 @@option runtime-flag
+
+@@option save-stages
 
 @@option sbom
 
@@ -205,11 +237,17 @@ Build only on farm nodes that match the given platforms.
 
 @@option skip-unused-stages
 
+@@option source-date-epoch
+
+@@option source-policy-file
+
 @@option squash
 
 @@option squash-all
 
 @@option ssh
+
+@@option stage-labels
 
 @@option tag
 
@@ -220,6 +258,8 @@ Build only on farm nodes that match the given platforms.
 @@option tls-verify
 
 @@option ulimit.image
+
+@@option unsetannotation
 
 @@option unsetenv.image
 
@@ -262,7 +302,7 @@ $ podman farm build --platforms arm64,amd64 -t name .
 ```
 
 ## SEE ALSO
-**[podman(1)](podman.1.md)**, **[podman-farm(1)](podman-farm.1.md)**, **[buildah(1)](https://github.com/containers/buildah/blob/main/docs/buildah.1.md)**, **[containers-certs.d(5)](https://github.com/containers/image/blob/main/docs/containers-certs.d.5.md)**, **[containers-registries.conf(5)](https://github.com/containers/image/blob/main/docs/containers-registries.conf.5.md)**, **[crun(1)](https://github.com/containers/crun/blob/main/crun.1.md)**, **[runc(8)](https://github.com/opencontainers/runc/blob/main/man/runc.8.md)**, **[useradd(8)](https://www.unix.com/man-page/redhat/8/useradd)**, **[Containerfile(5)](https://github.com/containers/common/blob/main/docs/Containerfile.5.md)**, **[containerignore(5)](https://github.com/containers/common/blob/main/docs/containerignore.5.md)**
+**[podman(1)](podman.1.md)**, **[podman-farm(1)](podman-farm.1.md)**, **[buildah(1)](https://github.com/containers/buildah/blob/main/docs/buildah.1.md)**, **[containers-certs.d(5)](https://github.com/containers/image/blob/main/docs/containers-certs.d.5.md)**, **[containers-registries.conf(5)](https://github.com/containers/image/blob/main/docs/containers-registries.conf.5.md)**, **[crun(1)](https://github.com/containers/crun/blob/main/crun.1.md)**, **[runc(8)](https://github.com/opencontainers/runc/blob/main/man/runc.8.md)**, **[useradd(8)](https://www.unix.com/man-page/redhat/8/useradd)**, **[Containerfile(5)](https://github.com/containers/container-libs/blob/main/common/docs/Containerfile.5.md)**, **[containerignore(5)](https://github.com/containers/container-libs/blob/main/common/docs/containerignore.5.md)**
 
 ## HISTORY
 

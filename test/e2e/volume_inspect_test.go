@@ -3,14 +3,13 @@
 package integration
 
 import (
-	"github.com/containers/podman/v5/libpod/define"
-	. "github.com/containers/podman/v5/test/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.podman.io/podman/v6/libpod/define"
+	. "go.podman.io/podman/v6/test/utils"
 )
 
 var _ = Describe("Podman volume inspect", func() {
-
 	AfterEach(func() {
 		podmanTest.CleanupVolume()
 	})

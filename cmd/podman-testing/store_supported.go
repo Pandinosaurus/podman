@@ -1,4 +1,4 @@
-//go:build linux && !remote
+//go:build (linux || freebsd) && !remote
 
 package main
 
@@ -6,25 +6,22 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/storage"
-	"github.com/containers/storage/types"
+	ientities "go.podman.io/podman/v6/internal/domain/entities"
+	"go.podman.io/podman/v6/internal/domain/infra"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/storage"
 )
 
 var (
-	globalStore storage.Store
-	engineMode  = entities.ABIMode
+	globalStorageOptions storage.StoreOptions
+	globalStore          storage.Store
+	engineMode           = entities.ABIMode
+	testingEngine        ientities.TestingEngine
 )
 
 func init() {
 	if defaultStoreOptions, err := storage.DefaultStoreOptions(); err == nil {
 		globalStorageOptions = defaultStoreOptions
-	}
-	if storageConf, ok := os.LookupEnv("CONTAINERS_STORAGE_CONF"); ok {
-		options := globalStorageOptions
-		if types.ReloadConfigurationFileIfNeeded(storageConf, &options) == nil {
-			globalStorageOptions = options
-		}
 	}
 	fl := mainCmd.PersistentFlags()
 	fl.StringVar(&globalStorageOptions.GraphDriverName, "storage-driver", "", "storage driver used to manage images and containers")
@@ -38,7 +35,7 @@ func init() {
 func storeBefore() error {
 	defaultStoreOptions, err := storage.DefaultStoreOptions()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "selecting storage options: %v", err)
+		fmt.Fprintf(os.Stderr, "selecting storage options: %v\n", err)
 		return nil
 	}
 	globalStorageOptions = defaultStoreOptions
@@ -52,6 +49,7 @@ func storeBefore() error {
 	} else {
 		engineMode = entities.ABIMode
 	}
+	podmanConfig.EngineMode = engineMode
 	return nil
 }
 
@@ -61,4 +59,15 @@ func storeAfter() error {
 		return err
 	}
 	return nil
+}
+
+func testingEngineBefore(podmanConfig *entities.PodmanConfig) (err error) {
+	podmanConfig.StorageDriver = globalStorageOptions.GraphDriverName
+	podmanConfig.GraphRoot = globalStorageOptions.GraphRoot
+	podmanConfig.Runroot = globalStorageOptions.RunRoot
+	podmanConfig.ImageStore = globalStorageOptions.ImageStore
+	podmanConfig.StorageOpts = globalStorageOptions.GraphDriverOptions
+	podmanConfig.TransientStore = globalStorageOptions.TransientStore
+	testingEngine, err = infra.NewTestingEngine(podmanConfig)
+	return err
 }

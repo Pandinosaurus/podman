@@ -28,11 +28,12 @@ Currently, the supported Kubernetes kinds are:
 
 `Kubernetes Pods or Deployments`
 
-Only four volume types are supported by kube play, the *hostPath*, *emptyDir*, *persistentVolumeClaim*, and *image* volume types.
+Only five volume types are supported by kube play, the *hostPath*, *emptyDir*, *configMap*, *persistentVolumeClaim*, and *image* volume types.
 
 - When using the *hostPath* volume type, only the  *default (empty)*, *DirectoryOrCreate*, *Directory*, *FileOrCreate*, *File*, *Socket*, *CharDevice* and *BlockDevice* subtypes are supported. Podman interprets the value of *hostPath* *path* as a file path when it contains at least one forward slash, otherwise Podman treats the value as the name of a named volume.
 - When using a *persistentVolumeClaim*, the value for *claimName* is the name for the Podman named volume.
 - When using an *emptyDir* volume, Podman creates an anonymous volume that is attached the containers running inside the pod and is deleted once the pod is removed.
+- When using an *configMap* volume, Podman creates an anonymous volume that is attached the containers running inside the pod and is deleted once the pod is removed.
 - When using an *image* volume, Podman creates a read-only image volume with an empty subpath (the whole image is mounted). The image must already exist locally. It is supported in rootful mode only.
 
 Note: The default restart policy for containers is `always`.  You can change the default by setting the `restartPolicy` field in the spec.
@@ -54,6 +55,12 @@ by `podman kube play` to create them.
 
 Note: To customize the name of the infra container created during `podman kube play`, use the **io.podman.annotations.infra.name** annotation in the pod definition. This annotation is automatically set when generating a kube yaml from a pod that was created with the `--infra-name` flag set.
 
+Note: Use the **io.podman.annotations.pids-limit/$ctrname** annotation to configure the pod's pids limit.
+
+Note: Use the **io.podman.annotations.cpuset/$ctrname** annotation to restrict a container's execution to a specific set of CPU cores. This is equivalent to the `--cpuset-cpus=number` option in podman-run(1).
+
+Note: Use the **io.podman.annotations.memory-nodes/$ctrname** annotation to restrict a container's memory allocations to a specific set of memory nodes on NUMA systems. This is equivalent to the `--cpuset-mems=nodes` option in podman-run(1).
+
 `Kubernetes PersistentVolumeClaims`
 
 A Kubernetes PersistentVolumeClaim represents a Podman named volume. Only the PersistentVolumeClaim name is required by Podman to create a volume. Kubernetes annotations can be used to make use of the available options for Podman volumes.
@@ -67,7 +74,7 @@ A Kubernetes PersistentVolumeClaim represents a Podman named volume. Only the Pe
 - volume.podman.io/import-source
 - volume.podman.io/image
 
-Use `volume.podman.io/import-source` to import the contents of the tarball (.tar, .tar.gz, .tgz, .bzip, .tar.xz, .txz) specified in the annotation's value into the created Podman volume
+Use `volume.podman.io/import-source` to import the contents of the tarball (.tar, .tar.gz, .tgz, .bzip, .tar.xz, .txz, .tar.zst) specified in the annotation's value into the created Podman volume
 
 Kube play is capable of building images on the fly given the correct directory layout and Containerfiles. This
 option is not available for remote clients, including Mac and Windows (excluding WSL2) machines, yet. Consider the following excerpt from a YAML file:
@@ -96,6 +103,23 @@ like:
 The build considers `foobar` to be the context directory for the build. If there is an image in local storage
 called `foobar`, the image is not built unless the `--build` flag is used. Use `--build=false` to completely
 disable builds.
+
+Kube play supports CDI (Container Device Interface) device selectors to share
+host devices (e.g. GPUs) with containers. The configuration format follows
+Kubernetes extended resource management:
+```
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+  - name: container
+    resources:
+      limits:
+        nvidia.com/gpu=all: 1
+```
+
+To enable sharing host devices, analogous to using the `--device` flag Podman
+kube supports a custom CDI selector: `podman.io/device=<host device path>`.
 
 `Kubernetes ConfigMap`
 
@@ -177,6 +201,8 @@ An image can be automatically mounted into a container if the annotation `io.pod
 
 @@option annotation.container
 
+Note: For `podman kube play`, the `--annotation` flag adds Podman-specific annotations to the containers and pods created by Podman, not to the Kubernetes YAML itself. These annotations can be used to configure Podman-specific features like user namespaces (`io.podman.annotations.userns`), volumes-from (`io.podman.annotations.volumes-from`), and other container behaviors.
+
 @@option authfile
 
 #### **--build**
@@ -187,12 +213,7 @@ Note:  You  can also override the default isolation type by setting the BUILDAH_
 
 @@option cert-dir
 
-#### **--configmap**=*path*
-
-Use Kubernetes configmap YAML at path to provide a source for environment variable values within the containers of the pod.  (This option is not available with the remote Podman client)
-
-Note: The *--configmap* option can be used multiple times or a comma-separated list of paths can be used to pass multiple Kubernetes configmap YAMLs.
-The YAML file may be in a multi-doc YAML format. But, it must container only configmaps
+@@option configmap
 
 #### **--context-dir**=*path*
 
@@ -228,9 +249,15 @@ Note: When joining multiple networks use the **--network name:mac=\<mac\>** synt
 
 When no network option is specified and *host* network mode is not configured in the YAML file, a new network stack is created and pods are attached to it making possible pod to pod communication.
 
+@@option no-hostname
+
 @@option no-hosts
 
 This option conflicts with host added in the Kubernetes YAML.
+
+#### **--no-pod-prefix**
+
+Do not prefix container name with pod name.
 
 #### **--publish**=*[[ip:][hostPort]:]containerPort[/protocol]*
 
@@ -268,6 +295,19 @@ Start the pod after creating it, set to false to only create it.
 @@option tls-verify
 
 @@option userns.container
+
+#### **--validate**=*mode*
+
+Control how unrecognized YAML fields and unsupported objects are handled. Supported modes are:
+
+- **ignore**: silently skip them (default).
+- **warn**: report a warning and continue. Warnings are printed to stderr and, when using the API, returned in the play report.
+- **strict**: fail with an error.
+
+When **strict** is used, any object that fails validation halts the processing of
+further objects, but prior objects will still exist and will not be rolled back.
+For example, in a YAML file containing a Pod followed by an unsupported object, the
+Pod is created and then the command fails.
 
 #### **--wait**, **-w**
 

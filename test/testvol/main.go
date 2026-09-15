@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"sync"
@@ -24,7 +25,7 @@ var serveCmd = &cobra.Command{
 	Short: "serve the volume plugin on the unix socket",
 	Long:  `Creates simple directory volumes using the Volume Plugin API for testing volume plugin functionality`,
 	Args:  cobra.NoArgs,
-	RunE: func(cmd *cobra.Command, args []string) error {
+	RunE: func(_ *cobra.Command, _ []string) error {
 		return startServer(config.sockName)
 	},
 }
@@ -51,7 +52,7 @@ func init() {
 	rootCmd.AddCommand(serveCmd, createCmd, removeCmd, listCmd)
 }
 
-func before(cmd *cobra.Command, args []string) error {
+func before(_ *cobra.Command, _ []string) error {
 	if config.logLevel == "" {
 		config.logLevel = "error"
 	}
@@ -154,12 +155,10 @@ func (d *DirDriver) Create(opts *volume.CreateRequest) error {
 	newVol.mounts = make(map[string]bool)
 	newVol.options = make(map[string]string)
 	newVol.createTime = time.Now()
-	for k, v := range opts.Options {
-		newVol.options[k] = v
-	}
+	maps.Copy(newVol.options, opts.Options)
 
 	volPath := filepath.Join(d.volumesPath, opts.Name)
-	if err := os.Mkdir(volPath, 0755); err != nil {
+	if err := os.Mkdir(volPath, 0o755); err != nil {
 		return fmt.Errorf("making volume directory: %w", err)
 	}
 	newVol.path = volPath
@@ -254,12 +253,15 @@ func (d *DirDriver) Path(req *volume.PathRequest) (*volume.PathResponse, error) 
 
 	logrus.Infof("Hit Path() endpoint")
 
-	// TODO: Should we return error if not mounted?
-
 	vol, exists := d.volumes[req.Name]
 	if !exists {
 		logrus.Debugf("Cannot locate volume %s", req.Name)
 		return nil, fmt.Errorf("no volume with name %s found", req.Name)
+	}
+
+	if len(vol.mounts) == 0 {
+		logrus.Debugf("Volume %s is not mounted", req.Name)
+		return nil, fmt.Errorf("volume %s is not mounted", req.Name)
 	}
 
 	return &volume.PathResponse{

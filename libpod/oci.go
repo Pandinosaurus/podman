@@ -1,13 +1,13 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package libpod
 
 import (
 	"net/http"
 
-	"github.com/containers/common/pkg/resize"
-	"github.com/containers/podman/v5/libpod/define"
 	"github.com/opencontainers/runtime-spec/specs-go"
+	"go.podman.io/common/pkg/resize"
+	"go.podman.io/podman/v6/libpod/define"
 )
 
 // OCIRuntime is an implementation of an OCI runtime.
@@ -153,8 +153,20 @@ type OCIRuntime interface { //nolint:interfacebloat
 	// This is the path to that file for a given container.
 	OOMFilePath(ctr *Container) (string, error)
 
+	// PersistDirectoryPath is the path to a container's persist directory.
+	// Not all OCI runtime implementations will have a persist directory.
+	// If they do, it may contain files such as the exit file and the OOM
+	// file.
+	// If the directory does not exist, the empty string and no error should
+	// be returned.
+	PersistDirectoryPath(ctr *Container) (string, error)
+
 	// RuntimeInfo returns verbose information about the runtime.
 	RuntimeInfo() (*define.ConmonInfo, *define.OCIRuntimeInfo, error)
+
+	// RuntimeFeatures returns the raw output of the runtime's "features"
+	// command. It returns an empty string if not supported.
+	RuntimeFeatures() string
 
 	// UpdateContainer updates the given container's cgroup configuration.
 	UpdateContainer(ctr *Container, res *specs.LinuxResources) error
@@ -193,6 +205,9 @@ type ExecOptions struct {
 	Env map[string]string
 	// Terminal is whether to create a new TTY for the exec session.
 	Terminal bool
+	// ConsoleSize is an optional initial size for the exec session's TTY,
+	// applied at creation when Terminal is true.
+	ConsoleSize *resize.TerminalSize
 	// Cwd is the working directory for the executed command. If unset, the
 	// working directory of the container will be used.
 	Cwd string

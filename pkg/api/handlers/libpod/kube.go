@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package libpod
 
@@ -12,17 +12,16 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/containers/storage/pkg/archive"
-
-	"github.com/containers/image/v5/types"
-	"github.com/containers/podman/v5/libpod"
-	"github.com/containers/podman/v5/pkg/api/handlers/utils"
-	api "github.com/containers/podman/v5/pkg/api/types"
-	"github.com/containers/podman/v5/pkg/auth"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/domain/infra/abi"
 	"github.com/gorilla/schema"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/pkg/api/handlers/utils"
+	api "go.podman.io/podman/v6/pkg/api/types"
+	"go.podman.io/podman/v6/pkg/auth"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/domain/infra/abi"
+	"go.podman.io/storage/pkg/chrootarchive"
 )
 
 // ExtractPlayReader provide an io.Reader given a http.Request object
@@ -52,7 +51,7 @@ func extractPlayReader(anchorDir string, r *http.Request) (io.Reader, error) {
 		reader = r.Body
 	case "application/x-tar":
 		// un-tar the content
-		err := archive.Untar(r.Body, anchorDir, nil)
+		err := chrootarchive.Untar(r.Body, anchorDir, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -109,6 +108,7 @@ func KubePlay(w http.ResponseWriter, r *http.Request) {
 		LogDriver        string            `schema:"logDriver"`
 		LogOptions       []string          `schema:"logOptions"`
 		Network          []string          `schema:"network"`
+		NoHostname       bool              `schema:"noHostname"`
 		NoHosts          bool              `schema:"noHosts"`
 		NoTrunc          bool              `schema:"noTrunc"`
 		Replace          bool              `schema:"replace"`
@@ -120,8 +120,10 @@ func KubePlay(w http.ResponseWriter, r *http.Request) {
 		StaticMACs       []string          `schema:"staticMACs"`
 		TLSVerify        bool              `schema:"tlsVerify"`
 		Userns           string            `schema:"userns"`
+		Validate         string            `schema:"validate"`
 		Wait             bool              `schema:"wait"`
 		Build            bool              `schema:"build"`
+		NoPodPrefix      bool              `schema:"noPodPrefix"`
 	}{
 		TLSVerify: true,
 		Start:     true,
@@ -129,6 +131,13 @@ func KubePlay(w http.ResponseWriter, r *http.Request) {
 
 	if err := decoder.Decode(&query, r.URL.Query()); err != nil {
 		utils.Error(w, http.StatusBadRequest, fmt.Errorf("failed to parse parameters for %s: %w", r.URL.String(), err))
+		return
+	}
+
+	// An empty value is allowed for backward compatibility with older clients
+	// that do not send the parameter; it is treated as the default (ignore).
+	if query.Validate != "" && !entities.KubeValidateMode(query.Validate).IsValid() {
+		utils.Error(w, http.StatusBadRequest, fmt.Errorf("invalid validate value %q", query.Validate))
 		return
 	}
 
@@ -182,6 +191,7 @@ func KubePlay(w http.ResponseWriter, r *http.Request) {
 		LogDriver:          logDriver,
 		LogOptions:         query.LogOptions,
 		Networks:           query.Network,
+		NoHostname:         query.NoHostname,
 		NoHosts:            query.NoHosts,
 		Password:           password,
 		PublishPorts:       query.PublishPorts,
@@ -194,8 +204,10 @@ func KubePlay(w http.ResponseWriter, r *http.Request) {
 		UseLongAnnotations: query.NoTrunc,
 		Username:           username,
 		Userns:             query.Userns,
+		Validate:           entities.KubeValidateMode(query.Validate),
 		Wait:               query.Wait,
 		ContextDir:         contextDirectory,
+		NoPodPrefix:        query.NoPodPrefix,
 	}
 	if _, found := r.URL.Query()["build"]; found {
 		options.Build = types.NewOptionalBool(query.Build)

@@ -10,12 +10,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/libpod/events"
-	"github.com/containers/podman/v5/libpod/logs"
-	"github.com/containers/podman/v5/pkg/rootless"
 	"github.com/coreos/go-systemd/v22/sdjournal"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/libpod/events"
+	"go.podman.io/podman/v6/libpod/logs"
+	"go.podman.io/podman/v6/pkg/rootless"
 )
 
 const (
@@ -31,7 +31,8 @@ func init() {
 }
 
 func (c *Container) readFromJournal(ctx context.Context, options *logs.LogOptions,
-	logChannel chan *logs.LogLine, colorID int64, passthroughUnit string) error {
+	logChannel chan *logs.LogLine, colorID int64, passthroughUnit string,
+) error {
 	// We need the container's events in the same journal to guarantee
 	// consistency, see #10323.
 	if options.Follow && c.runtime.config.Engine.EventsLogger != "journald" {

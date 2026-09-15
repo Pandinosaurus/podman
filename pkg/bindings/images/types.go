@@ -3,7 +3,7 @@ package images
 import (
 	"io"
 
-	"github.com/containers/podman/v5/pkg/domain/entities/types"
+	"go.podman.io/podman/v6/pkg/domain/entities/types"
 )
 
 // RemoveOptions are optional options for image removal
@@ -62,8 +62,7 @@ type TreeOptions struct {
 // HistoryOptions are optional options image history
 //
 //go:generate go run ../generator/generator.go HistoryOptions
-type HistoryOptions struct {
-}
+type HistoryOptions struct{}
 
 // LoadOptions are optional options for loading an image
 //
@@ -102,14 +101,12 @@ type PruneOptions struct {
 // TagOptions are optional options for tagging images
 //
 //go:generate go run ../generator/generator.go TagOptions
-type TagOptions struct {
-}
+type TagOptions struct{}
 
 // UntagOptions are optional options for untagging images
 //
 //go:generate go run ../generator/generator.go UntagOptions
-type UntagOptions struct {
-}
+type UntagOptions struct{}
 
 // ImportOptions are optional options for importing images
 //
@@ -139,7 +136,7 @@ type PushOptions struct {
 	All *bool
 	// Authfile is the path to the authentication file. Ignored for remote
 	// calls.
-	Authfile *string
+	Authfile *string `schema:"-"`
 	// Compress tarball image layers when pushing to a directory using the 'dir' transport.
 	Compress *bool
 	// CompressionFormat is the format to use for the compression of the blobs
@@ -173,6 +170,13 @@ type PushOptions struct {
 	// Quiet can be specified to suppress progress when pushing.
 	Quiet *bool
 
+	// OS to select a platform-specific image from a manifest list.
+	OS *string
+	// Arch to select a platform-specific image from a manifest list.
+	Arch *string
+	// Variant to select a platform-specific image from a manifest list.
+	Variant *string
+
 	// Manifest of the pushed image.  Set by images.Push.
 	ManifestDigest *string
 }
@@ -183,7 +187,7 @@ type PushOptions struct {
 type SearchOptions struct {
 	// Authfile is the path to the authentication file. Ignored for remote
 	// calls.
-	Authfile *string
+	Authfile *string `schema:"-"`
 	// Filters for the search results.
 	Filters map[string][]string
 	// Limit the number of results.
@@ -209,7 +213,7 @@ type PullOptions struct {
 	Arch *string
 	// Authfile is the path to the authentication file. Ignored for remote
 	// calls.
-	Authfile *string
+	Authfile *string `schema:"-"`
 	// OS will overwrite the local operating system (OS) for image
 	// pulls.
 	OS *string
@@ -241,8 +245,7 @@ type BuildOptions = types.BuildOptions
 // ExistsOptions are optional options for checking if an image exists
 //
 //go:generate go run ../generator/generator.go ExistsOptions
-type ExistsOptions struct {
-}
+type ExistsOptions struct{}
 
 type ScpOptions struct {
 	Quiet       *bool

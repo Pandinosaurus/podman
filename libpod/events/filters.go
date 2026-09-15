@@ -1,3 +1,5 @@
+//go:build linux || freebsd
+
 package events
 
 import (
@@ -5,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/containers/podman/v5/pkg/util"
+	"go.podman.io/podman/v6/pkg/util"
 )
 
 func generateEventFilter(filter, filterValue string) (func(e *Event) bool, error) {
@@ -37,6 +39,16 @@ func generateEventFilter(filter, filterValue string) (func(e *Event) bool, error
 			}
 			return strings.HasPrefix(e.ID, filterValue)
 		}, nil
+	case "ARTIFACT":
+		return func(e *Event) bool {
+			if e.Type != Artifact {
+				return false
+			}
+			if e.Name == filterValue {
+				return true
+			}
+			return strings.HasPrefix(e.ID, filterValue)
+		}, nil
 	case "POD":
 		return func(e *Event) bool {
 			if e.Type != Pod {
@@ -44,6 +56,23 @@ func generateEventFilter(filter, filterValue string) (func(e *Event) bool, error
 			}
 			if e.Name == filterValue {
 				return true
+			}
+			return strings.HasPrefix(e.ID, filterValue)
+		}, nil
+	case "NETWORK":
+		return func(e *Event) bool {
+			if e.Type != Network {
+				return false
+			}
+			if e.Network == filterValue {
+				return true
+			}
+			// For connect/disconnect events e.ID is the container ID, not
+			// the network ID, so ID-prefix matching would produce false
+			// positives.  Only fall back to HasPrefix for create/remove
+			// events where e.ID genuinely holds the network ID.
+			if e.Status == NetworkConnect || e.Status == NetworkDisconnect {
+				return false
 			}
 			return strings.HasPrefix(e.ID, filterValue)
 		}, nil
@@ -65,14 +94,20 @@ func generateEventFilter(filter, filterValue string) (func(e *Event) bool, error
 			var found bool
 			// iterate labels and see if we match a key and value
 			for eventKey, eventValue := range e.Attributes {
-				filterValueSplit := strings.SplitN(filterValue, "=", 2)
-				// if the filter isn't right, just return false
-				if len(filterValueSplit) < 2 {
-					return false
-				}
-				if eventKey == filterValueSplit[0] && eventValue == filterValueSplit[1] {
-					found = true
-					break
+				filterKey, filterVal, hasValue := strings.Cut(filterValue, "=")
+				// match "key=value" or "key"
+				if !hasValue {
+					// match by key only
+					if eventKey == filterKey {
+						found = true
+						break
+					}
+				} else {
+					// match by key and value
+					if eventKey == filterKey && eventValue == filterVal {
+						found = true
+						break
+					}
 				}
 			}
 			return found
@@ -119,7 +154,7 @@ func applyFilters(event *Event, filterMap map[string][]EventFilter) bool {
 	return true
 }
 
-// generateEventFilter parses the specified filters into a filter map that can
+// generateEventFilters parses the specified filters into a filter map that can
 // later on be used to filter events.  Keys are conjunctive, values are
 // disjunctive.
 func generateEventFilters(filters []string, since, until string) (map[string][]EventFilter, error) {

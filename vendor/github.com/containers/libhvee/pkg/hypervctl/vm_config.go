@@ -1,5 +1,4 @@
 //go:build windows
-// +build windows
 
 package hypervctl
 
@@ -101,6 +100,9 @@ type HardwareConfig struct {
 	// Network is bool to add a Network Connection to the
 	// default network switch in Microsoft HyperV
 	Network bool
+	// DVDDiskPath is the path to the disk image
+	// that will be used as a DVD drive in the VM (e.g. for cloud-init)
+	DVDDiskPath string
 }
 
 type Statuses struct {

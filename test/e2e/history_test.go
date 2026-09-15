@@ -3,13 +3,14 @@
 package integration
 
 import (
-	. "github.com/containers/podman/v5/test/utils"
+	"runtime"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	. "go.podman.io/podman/v6/test/utils"
 )
 
 var _ = Describe("Podman history", func() {
-
 	It("podman history output flag", func() {
 		session := podmanTest.Podman([]string{"history", ALPINE})
 		session.WaitWithDefaultTimeout()
@@ -66,10 +67,13 @@ var _ = Describe("Podman history", func() {
 		// the second line in the alpine history contains a command longer than 45 chars
 		Expect(len(lines[1])).To(BeNumerically(">", 45))
 
-		session = podmanTest.Podman([]string{"history", "--no-trunc", "--format", "{{.Size}}", ALPINE})
-		session.WaitWithDefaultTimeout()
-		Expect(session).Should(ExitCleanly())
-		Expect(session.OutputToStringArray()).To(Equal([]string{"0B", "5.84MB"}))
+		// Size is different on other architectures
+		if runtime.GOARCH == "amd64" {
+			session = podmanTest.Podman([]string{"history", "--no-trunc", "--format", "{{.Size}}", ALPINE})
+			session.WaitWithDefaultTimeout()
+			Expect(session).Should(ExitCleanly())
+			Expect(session.OutputToStringArray()).To(Equal([]string{"0B", "5.84MB"}))
+		}
 	})
 
 	It("podman history with json flag", func() {

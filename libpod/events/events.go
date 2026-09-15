@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/containers/storage/pkg/stringid"
+	"go.podman.io/storage/pkg/stringid"
 )
 
 // ErrNoJournaldLogging indicates that there is no journald logging
@@ -15,30 +15,13 @@ var ErrNoJournaldLogging = errors.New("no support for journald logging")
 
 // String returns a string representation of EventerType
 func (et EventerType) String() string {
-	switch et {
-	case LogFile:
-		return "file"
-	case Journald:
-		return "journald"
-	case Memory:
-		return "memory"
-	case Null:
-		return "none"
-	default:
-		return "invalid"
-	}
+	return string(et)
 }
 
 // IsValidEventer checks if the given string is a valid eventer type.
 func IsValidEventer(eventer string) bool {
-	switch eventer {
-	case LogFile.String():
-		return true
-	case Journald.String():
-		return true
-	case Memory.String():
-		return true
-	case Null.String():
+	switch EventerType(eventer) {
+	case LogFile, Journald, Null:
 		return true
 	default:
 		return false
@@ -89,8 +72,14 @@ func (e *Event) ToHumanReadable(truncate bool) string {
 		}
 		humanFormat += ")"
 	case Network:
-		humanFormat = fmt.Sprintf("%s %s %s %s (container=%s, name=%s)", e.Time, e.Type, e.Status, id, id, e.Network)
-	case Image:
+		if e.Status == Create || e.Status == Remove {
+			if netdriver, exists := e.Attributes["driver"]; exists {
+				humanFormat = fmt.Sprintf("%s %s %s %s (name=%s, type=%s)", e.Time, e.Type, e.Status, e.ID, e.Network, netdriver)
+			}
+		} else {
+			humanFormat = fmt.Sprintf("%s %s %s %s (container=%s, name=%s)", e.Time, e.Type, e.Status, id, id, e.Network)
+		}
+	case Image, Artifact:
 		humanFormat = fmt.Sprintf("%s %s %s %s %s", e.Time, e.Type, e.Status, id, e.Name)
 		if e.Error != "" {
 			humanFormat += " " + e.Error
@@ -101,20 +90,12 @@ func (e *Event) ToHumanReadable(truncate bool) string {
 		} else {
 			humanFormat = fmt.Sprintf("%s %s %s", e.Time, e.Type, e.Status)
 		}
-	case Volume, Machine:
+	case Machine, Volume:
 		humanFormat = fmt.Sprintf("%s %s %s %s", e.Time, e.Type, e.Status, e.Name)
+	case Secret:
+		humanFormat = fmt.Sprintf("%s %s %s %s", e.Time, e.Type, e.Status, id)
 	}
 	return humanFormat
-}
-
-// newEventFromJSONString takes stringified json and converts
-// it to an event
-func newEventFromJSONString(event string) (*Event, error) {
-	e := new(Event)
-	if err := json.Unmarshal([]byte(event), e); err != nil {
-		return nil, err
-	}
-	return e, nil
 }
 
 // String converts a Type to a string
@@ -130,6 +111,8 @@ func (s Status) String() string {
 // StringToType converts string to an EventType
 func StringToType(name string) (Type, error) {
 	switch name {
+	case Artifact.String():
+		return Artifact, nil
 	case Container.String():
 		return Container, nil
 	case Image.String():
@@ -144,6 +127,8 @@ func StringToType(name string) (Type, error) {
 		return System, nil
 	case Volume.String():
 		return Volume, nil
+	case Secret.String():
+		return Secret, nil
 	case "":
 		return "", ErrEventTypeBlank
 	}
@@ -165,6 +150,8 @@ func StringToStatus(name string) (Status, error) {
 		return Cleanup, nil
 	case Commit.String():
 		return Commit, nil
+	case Copy.String():
+		return Copy, nil
 	case Create.String():
 		return Create, nil
 	case Exec.String():

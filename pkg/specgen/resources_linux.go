@@ -1,8 +1,8 @@
 package specgen
 
 import (
-	"github.com/containers/common/pkg/config"
 	spec "github.com/opencontainers/runtime-spec/specs-go"
+	"go.podman.io/common/pkg/config"
 )
 
 func (s *SpecGenerator) InitResourceLimits(rtc *config.Config) {
@@ -14,7 +14,7 @@ func (s *SpecGenerator) InitResourceLimits(rtc *config.Config) {
 					s.ResourceLimits = &spec.LinuxResources{}
 				}
 				s.ResourceLimits.Pids = &spec.LinuxPids{
-					Limit: limit,
+					Limit: &limit,
 				}
 			}
 		}

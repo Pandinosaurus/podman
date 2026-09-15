@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package libpod
 
@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/storage/pkg/stringid"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/storage/pkg/stringid"
 )
 
 // Creates a new, empty pod

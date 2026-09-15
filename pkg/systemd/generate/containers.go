@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package generate
 
@@ -12,13 +12,13 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/containers/podman/v5/libpod"
-	libpodDefine "github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/systemd/define"
-	"github.com/containers/podman/v5/version"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/pflag"
+	"go.podman.io/podman/v6/libpod"
+	libpodDefine "go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/systemd/define"
+	"go.podman.io/podman/v6/version"
 )
 
 // containerInfo contains data required for generating a container's systemd
@@ -238,8 +238,8 @@ func setContainerNameForTemplate(startCommand []string, info *containerInfo) ([]
 			break
 		}
 	}
-	switch {
-	case nameIx == -1:
+	switch nameIx {
+	case -1:
 		// if not found, add --name argument in the command slice before the "run" argument.
 		// it's assumed that the command slice contains this argument.
 		runIx := -1
@@ -358,7 +358,7 @@ func executeContainerTemplate(info *containerInfo, options entities.GenerateSyst
 		remainingCmd := info.CreateCommand[index:]
 		// Presence check for certain flags/options.
 		fs := pflag.NewFlagSet("args", pflag.ContinueOnError)
-		fs.ParseErrorsWhitelist.UnknownFlags = true
+		fs.ParseErrorsAllowlist.UnknownFlags = true
 		fs.Usage = func() {}
 		fs.SetInterspersed(false)
 		fs.BoolP("detach", "d", false, "")

@@ -1,12 +1,12 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package server
 
 import (
 	"net/http"
 
-	"github.com/containers/podman/v5/pkg/api/handlers/libpod"
 	"github.com/gorilla/mux"
+	"go.podman.io/podman/v6/pkg/api/handlers/libpod"
 )
 
 func (s *APIServer) registerGenerateHandlers(r *mux.Router) error {
@@ -102,6 +102,11 @@ func (s *APIServer) registerGenerateHandlers(r *mux.Router) error {
 	//        type: string
 	//    default: []
 	//    description: Set environment variables to the systemd unit files.
+	//  - in: query
+	//    name: templateUnitFile
+	//    type: boolean
+	//    default: false
+	//    description: Add template specifier for the systemd unit file names.
 	// produces:
 	// - application/json
 	// responses:
@@ -114,38 +119,5 @@ func (s *APIServer) registerGenerateHandlers(r *mux.Router) error {
 	//   500:
 	//     $ref: "#/responses/internalError"
 	r.HandleFunc(VersionedPath("/libpod/generate/{name:.*}/systemd"), s.APIHandler(libpod.GenerateSystemd)).Methods(http.MethodGet)
-
-	// swagger:operation GET /libpod/generate/kube libpod GenerateKubeLibpod
-	// ---
-	// tags:
-	//  - containers
-	//  - pods
-	// summary: Generate a Kubernetes YAML file.
-	// description: Generate Kubernetes YAML based on a pod or container.
-	// parameters:
-	//  - in: query
-	//    name: names
-	//    type: array
-	//    items:
-	//       type: string
-	//    required: true
-	//    description: Name or ID of the container or pod.
-	//  - in: query
-	//    name: service
-	//    type: boolean
-	//    default: false
-	//    description: Generate YAML for a Kubernetes service object.
-	// produces:
-	// - text/vnd.yaml
-	// - application/json
-	// responses:
-	//   200:
-	//     description: Kubernetes YAML file describing pod
-	//     schema:
-	//      type: string
-	//      format: binary
-	//   500:
-	//     $ref: "#/responses/internalError"
-	r.HandleFunc(VersionedPath("/libpod/generate/kube"), s.APIHandler(libpod.GenerateKube)).Methods(http.MethodGet)
 	return nil
 }

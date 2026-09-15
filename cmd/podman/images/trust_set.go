@@ -3,14 +3,15 @@ package images
 import (
 	"fmt"
 	"net/url"
-	"regexp"
 	"slices"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/pkg/domain/entities"
+	"go.podman.io/storage/pkg/regexp"
+
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 var (
@@ -27,9 +28,7 @@ var (
 	}
 )
 
-var (
-	setOptions entities.SetTrustOptions
-)
+var setOptions entities.SetTrustOptions
 
 func init() {
 	registry.Commands = append(registry.Commands, registry.CliCommand{
@@ -37,8 +36,9 @@ func init() {
 		Parent:  trustCmd,
 	})
 	setFlags := setTrustCommand.Flags()
-	setFlags.StringVar(&setOptions.PolicyPath, "policypath", "", "")
-	_ = setFlags.MarkHidden("policypath")
+	signaturePolicyFlagName := "signature-policy"
+	setFlags.StringVar(&setOptions.PolicyPath, signaturePolicyFlagName, "", "Path to a signature-policy file")
+	_ = setTrustCommand.RegisterFlagCompletionFunc(signaturePolicyFlagName, completion.AutocompleteDefault)
 
 	pubkeysfileFlagName := "pubkeysfile"
 	setFlags.StringArrayVarP(&setOptions.PubKeysFile, pubkeysfileFlagName, "f", []string{}, `Path of installed public key(s) to trust for TARGET.
@@ -52,7 +52,7 @@ File(s) must exist before using this command`)
 	_ = setTrustCommand.RegisterFlagCompletionFunc(typeFlagName, common.AutocompleteTrustType)
 }
 
-func setTrust(cmd *cobra.Command, args []string) error {
+func setTrust(_ *cobra.Command, args []string) error {
 	validTrustTypes := []string{"accept", "insecureAcceptAnything", "reject", "signedBy", "sigstoreSigned"}
 
 	valid, err := isValidImageURI(args[0])
@@ -66,6 +66,11 @@ func setTrust(cmd *cobra.Command, args []string) error {
 	return registry.ImageEngine().SetTrust(registry.Context(), args, setOptions)
 }
 
+var (
+	imageURIRegexHost     = regexp.Delayed(`^[a-zA-Z0-9-_\.]+\/?:?[0-9]*[a-z0-9-\/:]*$`)
+	imageURIRegexFragment = regexp.Delayed(`^[a-z0-9-:\./]*$`)
+)
+
 // isValidImageURI checks if image name has valid format
 func isValidImageURI(imguri string) (bool, error) {
 	uri := "http://" + imguri
@@ -73,13 +78,11 @@ func isValidImageURI(imguri string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("invalid image uri: %s: %w", imguri, err)
 	}
-	reg := regexp.MustCompile(`^[a-zA-Z0-9-_\.]+\/?:?[0-9]*[a-z0-9-\/:]*$`)
-	ret := reg.FindAllString(u.Host, -1)
+	ret := imageURIRegexHost.FindAllString(u.Host, -1)
 	if len(ret) == 0 {
 		return false, fmt.Errorf("invalid image uri: %s: %w", imguri, err)
 	}
-	reg = regexp.MustCompile(`^[a-z0-9-:\./]*$`)
-	ret = reg.FindAllString(u.Fragment, -1)
+	ret = imageURIRegexFragment.FindAllString(u.Fragment, -1)
 	if len(ret) == 0 {
 		return false, fmt.Errorf("invalid image uri: %s: %w", imguri, err)
 	}

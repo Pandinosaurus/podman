@@ -1,15 +1,16 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package filters
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
-	"github.com/containers/common/pkg/filters"
-	"github.com/containers/podman/v5/libpod"
-	"github.com/containers/podman/v5/pkg/util"
+	"go.podman.io/common/pkg/filters"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/pkg/util"
 )
 
 func GenerateVolumeFilters(filter string, filterValues []string, runtime *libpod.Runtime) (libpod.VolumeFilter, error) {
@@ -22,21 +23,11 @@ func GenerateVolumeFilters(filter string, filterValues []string, runtime *libpod
 		}, nil
 	case "driver":
 		return func(v *libpod.Volume) bool {
-			for _, val := range filterValues {
-				if v.Driver() == val {
-					return true
-				}
-			}
-			return false
+			return slices.Contains(filterValues, v.Driver())
 		}, nil
 	case "scope":
 		return func(v *libpod.Volume) bool {
-			for _, val := range filterValues {
-				if v.Scope() == val {
-					return true
-				}
-			}
-			return false
+			return slices.Contains(filterValues, v.Scope())
 		}, nil
 	case "label":
 		return func(v *libpod.Volume) bool {
@@ -44,7 +35,7 @@ func GenerateVolumeFilters(filter string, filterValues []string, runtime *libpod
 		}, nil
 	case "label!":
 		return func(v *libpod.Volume) bool {
-			return !filters.MatchLabelFilters(filterValues, v.Labels())
+			return filters.MatchNegatedLabelFilters(filterValues, v.Labels())
 		}, nil
 	case "opt":
 		return func(v *libpod.Volume) bool {
@@ -92,6 +83,8 @@ func GenerateVolumeFilters(filter string, filterValues []string, runtime *libpod
 			}
 			return false
 		}, nil
+	case "anonymous":
+		return createAnonymousFilterVolumeFunction(filterValues)
 	}
 	return nil, fmt.Errorf("%q is an invalid volume filter", filter)
 }
@@ -100,18 +93,43 @@ func GeneratePruneVolumeFilters(filter string, filterValues []string, runtime *l
 	switch filter {
 	case "after", "since":
 		return createAfterFilterVolumeFunction(filterValues, runtime)
+	case "anonymous":
+		return createAnonymousFilterVolumeFunction(filterValues)
 	case "label":
 		return func(v *libpod.Volume) bool {
 			return filters.MatchLabelFilters(filterValues, v.Labels())
 		}, nil
 	case "label!":
 		return func(v *libpod.Volume) bool {
-			return !filters.MatchLabelFilters(filterValues, v.Labels())
+			return filters.MatchNegatedLabelFilters(filterValues, v.Labels())
 		}, nil
 	case "until":
 		return createUntilFilterVolumeFunction(filterValues)
 	}
 	return nil, fmt.Errorf("%q is an invalid volume filter", filter)
+}
+
+func createAnonymousFilterVolumeFunction(filterValues []string) (libpod.VolumeFilter, error) {
+	for _, val := range filterValues {
+		switch strings.ToLower(val) {
+		case "true", "1", "false", "0":
+		default:
+			return nil, fmt.Errorf("%q is not a valid value for the \"anonymous\" filter - must be true or false", val)
+		}
+	}
+	return func(v *libpod.Volume) bool {
+		for _, val := range filterValues {
+			anon := v.Anonymous()
+			invert := strings.EqualFold(val, "false") || val == "0"
+			if invert {
+				anon = !anon
+			}
+			if anon {
+				return true
+			}
+		}
+		return false
+	}, nil
 }
 
 func createUntilFilterVolumeFunction(filterValues []string) (libpod.VolumeFilter, error) {

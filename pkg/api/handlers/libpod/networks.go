@@ -1,23 +1,21 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package libpod
 
 import (
-	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 
-	"errors"
-
-	"github.com/containers/common/libnetwork/types"
-	"github.com/containers/podman/v5/libpod"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/api/handlers/utils"
-	api "github.com/containers/podman/v5/pkg/api/types"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/domain/infra/abi"
-	"github.com/containers/podman/v5/pkg/util"
 	"github.com/gorilla/schema"
+	"go.podman.io/common/libnetwork/types"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/api/handlers/utils"
+	api "go.podman.io/podman/v6/pkg/api/types"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/domain/infra/abi"
+	"go.podman.io/podman/v6/pkg/util"
 )
 
 func CreateNetwork(w http.ResponseWriter, r *http.Request) {
@@ -28,8 +26,8 @@ func CreateNetwork(w http.ResponseWriter, r *http.Request) {
 
 	runtime := r.Context().Value(api.RuntimeKey).(*libpod.Runtime)
 	network := types.Network{}
-	if err := json.NewDecoder(r.Body).Decode(&network); err != nil {
-		utils.Error(w, http.StatusInternalServerError, fmt.Errorf("failed to decode request JSON payload: %w", err))
+	if err := utils.ReadJSONFromBody(r, &network); err != nil {
+		utils.Error(w, http.StatusBadRequest, err)
 		return
 	}
 
@@ -60,8 +58,8 @@ func UpdateNetwork(w http.ResponseWriter, r *http.Request) {
 	ic := abi.ContainerEngine{Libpod: runtime}
 
 	networkUpdateOptions := entities.NetworkUpdateOptions{}
-	if err := json.NewDecoder(r.Body).Decode(&networkUpdateOptions); err != nil {
-		utils.Error(w, http.StatusBadRequest, fmt.Errorf("failed to decode request JSON payload: %w", err))
+	if err := utils.ReadJSONFromBody(r, &networkUpdateOptions); err != nil {
+		utils.Error(w, http.StatusBadRequest, err)
 		return
 	}
 
@@ -111,7 +109,8 @@ func RemoveNetwork(w http.ResponseWriter, r *http.Request) {
 	runtime := r.Context().Value(api.RuntimeKey).(*libpod.Runtime)
 	decoder := r.Context().Value(api.DecoderKey).(*schema.Decoder)
 	query := struct {
-		Force bool `schema:"force"`
+		Force  bool `schema:"force"`
+		Ignore bool `schema:"ignore"`
 	}{
 		// override any golang type defaults
 	}
@@ -123,12 +122,17 @@ func RemoveNetwork(w http.ResponseWriter, r *http.Request) {
 	name := utils.GetName(r)
 
 	options := entities.NetworkRmOptions{
-		Force: query.Force,
+		Force:  query.Force,
+		Ignore: query.Ignore,
 	}
 	ic := abi.ContainerEngine{Libpod: runtime}
 	reports, err := ic.NetworkRm(r.Context(), []string{name}, options)
 	if err != nil {
 		utils.InternalServerError(w, err)
+		return
+	}
+	if len(reports) == 0 {
+		utils.WriteResponse(w, http.StatusOK, []*entities.NetworkRmReport{})
 		return
 	}
 	if reports[0].Err != nil {
@@ -175,8 +179,8 @@ func Connect(w http.ResponseWriter, r *http.Request) {
 
 	runtime := r.Context().Value(api.RuntimeKey).(*libpod.Runtime)
 	var netConnect entities.NetworkConnectOptions
-	if err := json.NewDecoder(r.Body).Decode(&netConnect); err != nil {
-		utils.Error(w, http.StatusInternalServerError, fmt.Errorf("failed to decode request JSON payload: %w", err))
+	if err := utils.ReadJSONFromBody(r, &netConnect); err != nil {
+		utils.Error(w, http.StatusBadRequest, err)
 		return
 	}
 	name := utils.GetName(r)

@@ -8,22 +8,13 @@ const (
 	currentMachineVersion       = 3
 )
 
-const containersConf = `[containers]
-
-[engine]
-cgroup_manager = "cgroupfs"
-`
-
-const registriesConf = `unqualified-search-registries=["docker.io"]
-`
-
 const appendPort = `grep -q Port\ %d /etc/ssh/sshd_config || echo Port %d >> /etc/ssh/sshd_config`
 
-//nolint:unused
 const changePort = `sed -E -i 's/^Port[[:space:]]+[0-9]+/Port %d/' /etc/ssh/sshd_config`
 
 const configServices = `ln -fs /usr/lib/systemd/system/sshd.service /etc/systemd/system/multi-user.target.wants/sshd.service
 ln -fs /usr/lib/systemd/system/podman.socket /etc/systemd/system/sockets.target.wants/podman.socket
+ln -fs /usr/lib/systemd/user/podman.socket /etc/systemd/user/sockets.target.wants/podman.socket
 rm -f /etc/systemd/system/getty.target.wants/console-getty.service
 rm -f /etc/systemd/system/getty.target.wants/getty@tty1.service
 rm -f /etc/systemd/system/multi-user.target.wants/systemd-resolved.service
@@ -34,6 +25,8 @@ ln -fs /dev/null /etc/systemd/system/systemd-oomd.socket
 mkdir -p /etc/systemd/system/systemd-sysusers.service.d/
 echo CREATE_MAIL_SPOOL=no >> /etc/default/useradd
 adduser -m [USER] -G wheel
+sed -ir 's/65536/1000000/' /etc/subuid
+sed -ir 's/65536/1000000/' /etc/subgid
 mkdir -p /home/[USER]/.config/systemd/[USER]/
 chown [USER]:[USER] /home/[USER]/.config
 `
@@ -102,17 +95,17 @@ const overrideSysusers = `[Service]
 LoadCredential=
 `
 
-const lingerService = `[Unit]
-Description=A systemd user unit demo
-After=network-online.target
-Wants=network-online.target podman.socket
-[Service]
-ExecStart=/usr/bin/sleep infinity
-`
+const bindMountConfigDirSystemService = `
+[Unit]
+Description=Bind mount for config directory
+Before=multi-user.target
+After=local-fs.target
 
-const lingerSetup = `mkdir -p /home/[USER]/.config/systemd/user/default.target.wants
-ln -fs /home/[USER]/.config/systemd/user/linger-example.service \
-       /home/[USER]/.config/systemd/user/default.target.wants/linger-example.service
+[Service]
+RemainAfterExit=true
+Type=oneshot
+ExecStart=mount --bind %[1]s /etc/containers
+ExecStop=umount /etc/containers
 `
 
 const bindMountSystemService = `
@@ -150,6 +143,7 @@ ExecStop=umount /mnt/wsl/podman-sockets/%[1]s/podman-user.sock
 
 const bindMountFsTab = `/run/user/1000/podman/podman.sock /mnt/wsl/podman-sockets/%s/podman-user.sock none noauto,user,bind,defaults 0 0
 `
+
 const (
 	defaultTargetWants     = "default.target.wants"
 	userSystemdPath        = "/home/%[1]s/.config/systemd/user"
@@ -163,11 +157,17 @@ const (
 	bindSysUnitWant        = sysSystemdWants + "/" + bindUnitFileName
 	podmanSocketDropin     = "podman.socket.d"
 	podmanSocketDropinPath = sysSystemdPath + "/" + podmanSocketDropin
+
+	configBindSysUnitName           = "podman-mnt-config.service"
+	configBindSysUnitPath           = sysSystemdPath + "/" + configBindSysUnitName
+	configBindSysUnitWantsDirectory = sysSystemdPath + "/local-fs.target.wants"
+	configBindSysUnitWant           = configBindSysUnitWantsDirectory + "/" + configBindSysUnitName
 )
 
-const configBindServices = "mkdir -p " + userSystemdWants + " " + sysSystemdWants + " " + podmanSocketDropinPath + "\n" +
+const configBindServices = "mkdir -p " + userSystemdWants + " " + sysSystemdWants + " " + podmanSocketDropinPath + " " + configBindSysUnitWantsDirectory + "\n" +
 	"ln -fs " + bindUserUnitPath + " " + bindUserUnitWant + "\n" +
-	"ln -fs " + bindSysUnitPath + " " + bindSysUnitWant + "\n"
+	"ln -fs " + bindSysUnitPath + " " + bindSysUnitWant + "\n" +
+	"ln -fs " + configBindSysUnitPath + " " + configBindSysUnitWant + "\n"
 
 const overrideSocketGroup = `
 [Socket]
@@ -182,17 +182,6 @@ outlined in the following article:
 http://docs.microsoft.com/en-us/windows/wsl/install
 
 `
-
-const wslKernelError = `Could not %s. See previous output for any potential failure details.
-If you can not resolve the issue, try rerunning the "podman machine init command". If that fails
-try the "wsl --update" command and then rerun "podman machine init". Finally, if all else fails,
-try following the steps outlined in the following article:
-
-http://docs.microsoft.com/en-us/windows/wsl/install
-
-`
-
-const wslInstallKernel = "install the WSL Kernel"
 
 const wslOldVersion = `Automatic installation of WSL can not be performed on this version of Windows
 Either update to Build 19041 (or later), or perform the manual installation steps

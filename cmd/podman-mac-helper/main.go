@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"regexp"
 	"strconv"
 	"strings"
 
@@ -114,8 +113,8 @@ func runDetectErr(name string, args ...string) error {
 	if err == nil {
 		errString := readCapped(errReader)
 		if len(errString) > 0 {
-			re := regexp.MustCompile(`\r?\n`)
-			err = errors.New(re.ReplaceAllString(errString, ": "))
+			errString = strings.ReplaceAll(errString, "\r\n", ": ")
+			err = errors.New(strings.ReplaceAll(errString, "\n", ": "))
 		}
 	}
 
@@ -142,7 +141,7 @@ func addPrefixFlag(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&installPrefix, "prefix", defaultPrefix, "Sets the install location prefix")
 }
 
-func silentUsage(cmd *cobra.Command, args []string) {
+func silentUsage(cmd *cobra.Command, _ []string) {
 	cmd.SilenceUsage = true
 	cmd.SilenceErrors = true
 }

@@ -4,12 +4,12 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/errorhandling"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/errorhandling"
 )
 
 var (
@@ -21,8 +21,8 @@ var (
 		RunE:              rm,
 		ValidArgsFunction: common.AutocompleteImages,
 		Example: `podman image rm imageID
-  podman image rm --force alpine
-  podman image rm c4dfb1609ee2 93fd78260bd1 c0ed59d05ff7`,
+podman image rm --force alpine
+podman image rm c4dfb1609ee2 93fd78260bd1 c0ed59d05ff7`,
 	}
 
 	rmiCmd = &cobra.Command{
@@ -33,8 +33,8 @@ var (
 		RunE:              rmCmd.RunE,
 		ValidArgsFunction: rmCmd.ValidArgsFunction,
 		Example: `podman rmi imageID
-  podman rmi --force alpine
-  podman rmi c4dfb1609ee2 93fd78260bd1 c0ed59d05ff7`,
+podman rmi --force alpine
+podman rmi c4dfb1609ee2 93fd78260bd1 c0ed59d05ff7`,
 	}
 
 	imageOpts = entities.ImageRemoveOptions{}
@@ -61,7 +61,7 @@ func imageRemoveFlagSet(flags *pflag.FlagSet) {
 	flags.BoolVar(&imageOpts.NoPrune, "no-prune", false, "Do not remove dangling images")
 }
 
-func rm(cmd *cobra.Command, args []string) error {
+func rm(_ *cobra.Command, args []string) error {
 	if len(args) < 1 && !imageOpts.All {
 		return errors.New("image name or ID must be specified")
 	}
@@ -75,7 +75,7 @@ func rm(cmd *cobra.Command, args []string) error {
 
 	// Note: certain image-removal errors are non-fatal.  Hence, the report
 	// might be set even if err != nil.
-	report, rmErrors := registry.ImageEngine().Remove(registry.GetContext(), args, imageOpts)
+	report, rmErrors := registry.ImageEngine().Remove(registry.Context(), args, imageOpts)
 	if report != nil {
 		for _, u := range report.Untagged {
 			fmt.Println("Untagged: " + u)
@@ -87,7 +87,7 @@ func rm(cmd *cobra.Command, args []string) error {
 			}
 		}
 	}
-	if len(rmErrors) > 0 {
+	if len(rmErrors) > 0 && report != nil {
 		registry.SetExitCode(report.ExitCode)
 	}
 

@@ -5,15 +5,15 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/containers/common/libnetwork/types"
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v5/cmd/podman/parse"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/specgen"
-	"github.com/containers/podman/v5/pkg/specgenutil"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"go.podman.io/common/libnetwork/types"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/podman/v6/cmd/podman/parse"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/specgen"
+	"go.podman.io/podman/v6/pkg/specgenutil"
 )
 
 func DefineNetFlags(cmd *cobra.Command) {
@@ -25,6 +25,13 @@ func DefineNetFlags(cmd *cobra.Command) {
 		"Add a custom host-to-IP mapping (host:ip) (default [])",
 	)
 	_ = cmd.RegisterFlagCompletionFunc(addHostFlagName, completion.AutocompleteNone)
+
+	hostsFileFlagName := "hosts-file"
+	netFlags.String(
+		hostsFileFlagName, "",
+		`Base file to create the /etc/hosts file inside the container, or one of the special values. ("image"|"none")`,
+	)
+	_ = cmd.RegisterFlagCompletionFunc(hostsFileFlagName, AutocompleteHostsFile)
 
 	dnsFlagName := "dns"
 	netFlags.StringSlice(
@@ -89,6 +96,10 @@ func DefineNetFlags(cmd *cobra.Command) {
 	_ = cmd.RegisterFlagCompletionFunc(publishFlagName, completion.AutocompleteNone)
 
 	netFlags.Bool(
+		"no-hostname", false, "Do not create /etc/hostname within the container, instead use the version from the image",
+	)
+
+	netFlags.Bool(
 		"no-hosts", podmanConfig.ContainersConfDefaultsRO.Containers.NoHosts,
 		"Do not create /etc/hosts within the container, instead use the version from the image",
 	)
@@ -96,9 +107,7 @@ func DefineNetFlags(cmd *cobra.Command) {
 
 // NetFlagsToNetOptions parses the network flags for the given cmd.
 func NetFlagsToNetOptions(opts *entities.NetOptions, flags pflag.FlagSet) (*entities.NetOptions, error) {
-	var (
-		err error
-	)
+	var err error
 	if opts == nil {
 		opts = &entities.NetOptions{}
 	}
@@ -113,6 +122,13 @@ func NetFlagsToNetOptions(opts *entities.NetOptions, flags pflag.FlagSet) (*enti
 			if _, err := parse.ValidateExtraHost(host); err != nil {
 				return nil, err
 			}
+		}
+	}
+
+	if flags.Changed("hosts-file") {
+		opts.HostsFile, err = flags.GetString("hosts-file")
+		if err != nil {
+			return nil, err
 		}
 	}
 
@@ -178,6 +194,11 @@ func NetFlagsToNetOptions(opts *entities.NetOptions, flags pflag.FlagSet) (*enti
 		}
 	}
 
+	opts.NoHostname, err = flags.GetBool("no-hostname")
+	if err != nil {
+		return nil, err
+	}
+
 	opts.NoHosts, err = flags.GetBool("no-hosts")
 	if err != nil {
 		return nil, err
@@ -192,7 +213,7 @@ func NetFlagsToNetOptions(opts *entities.NetOptions, flags pflag.FlagSet) (*enti
 			return nil, err
 		}
 
-		ns, networks, options, err := specgen.ParseNetworkFlag(network)
+		ns, networks, networkOrder, options, err := specgen.ParseNetworkFlag(network)
 		if err != nil {
 			return nil, err
 		}
@@ -200,6 +221,7 @@ func NetFlagsToNetOptions(opts *entities.NetOptions, flags pflag.FlagSet) (*enti
 		opts.NetworkOptions = options
 		opts.Network = ns
 		opts.Networks = networks
+		opts.NetworkOrder = networkOrder
 	}
 
 	if flags.Changed("ip") || flags.Changed("ip6") || flags.Changed("mac-address") || flags.Changed("network-alias") {

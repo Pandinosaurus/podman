@@ -1,10 +1,10 @@
 package images
 
 import (
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 var (
@@ -17,8 +17,8 @@ var (
 		Args:              cobra.MinimumNArgs(2),
 		ValidArgsFunction: common.AutocompleteImages,
 		Example: `podman tag 0e3bbc2 fedora:latest
-  podman tag imageID:latest myNewImage:newTag
-  podman tag httpd myregistryhost:5000/fedora/httpd:v2`,
+podman tag imageID:latest myNewImage:newTag
+podman tag httpd myregistryhost:5000/fedora/httpd:v2`,
 	}
 
 	imageTagCommand = &cobra.Command{
@@ -29,8 +29,8 @@ var (
 		RunE:              tagCommand.RunE,
 		ValidArgsFunction: tagCommand.ValidArgsFunction,
 		Example: `podman image tag 0e3bbc2 fedora:latest
-  podman image tag imageID:latest myNewImage:newTag
-  podman image tag httpd myregistryhost:5000/fedora/httpd:v2`,
+podman image tag imageID:latest myNewImage:newTag
+podman image tag httpd myregistryhost:5000/fedora/httpd:v2`,
 	}
 )
 
@@ -44,6 +44,6 @@ func init() {
 	})
 }
 
-func tag(cmd *cobra.Command, args []string) error {
-	return registry.ImageEngine().Tag(registry.GetContext(), args[0], args[1:], entities.ImageTagOptions{})
+func tag(_ *cobra.Command, args []string) error {
+	return registry.ImageEngine().Tag(registry.Context(), args[0], args[1:], entities.ImageTagOptions{})
 }

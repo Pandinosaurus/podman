@@ -6,9 +6,9 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/rootless"
 	"github.com/containers/psgo"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/rootless"
 )
 
 // GetPodPidInformation returns process-related data of all processes in
@@ -45,7 +45,7 @@ func (p *Pod) GetPodPidInformation(descriptors []string) ([]string, error) {
 	// Also support comma-separated input.
 	psgoDescriptors := []string{}
 	for _, d := range descriptors {
-		for _, s := range strings.Split(d, ",") {
+		for s := range strings.SplitSeq(d, ",") {
 			if s != "" {
 				psgoDescriptors = append(psgoDescriptors, s)
 			}

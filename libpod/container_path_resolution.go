@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package libpod
 
@@ -7,10 +7,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/containers/podman/v5/libpod/define"
 	securejoin "github.com/cyphar/filepath-securejoin"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/podman/v6/libpod/define"
 )
 
 // pathAbs returns an absolute path.  If the specified path is
@@ -33,8 +33,8 @@ func (c *Container) pathAbs(path string) string {
 // It returns a bool, indicating whether containerPath resolves outside of
 // mountPoint (e.g., via a mount or volume), the resolved root (e.g., container
 // mount, bind mount or volume) and the resolved path on the root (absolute to
-// the host).
-func (c *Container) resolvePath(mountPoint string, containerPath string) (string, string, error) {
+// the host). If the path is on a named volume, the volume is returned.
+func (c *Container) resolvePath(mountPoint string, containerPath string) (string, string, *Volume, error) {
 	// Let's first make sure we have a path relative to the mount point.
 	pathRelativeToContainerMountPoint := c.pathAbs(containerPath)
 	resolvedPathOnTheContainerMountPoint := filepath.Join(mountPoint, pathRelativeToContainerMountPoint)
@@ -54,21 +54,17 @@ func (c *Container) resolvePath(mountPoint string, containerPath string) (string
 	for {
 		volume, err := findVolume(c, searchPath)
 		if err != nil {
-			return "", "", err
+			return "", "", nil, err
 		}
 		if volume != nil {
 			logrus.Debugf("Container path %q resolved to volume %q on path %q", containerPath, volume.Name(), searchPath)
 
-			// TODO: We really need to force the volume to mount
-			// before doing this, but that API is not exposed
-			// externally right now and doing so is beyond the scope
-			// of this commit.
 			mountPoint, err := volume.MountPoint()
 			if err != nil {
-				return "", "", err
+				return "", "", nil, err
 			}
 			if mountPoint == "" {
-				return "", "", fmt.Errorf("volume %s is not mounted, cannot copy into it", volume.Name())
+				return "", "", nil, fmt.Errorf("volume %s is not mounted, cannot copy into it", volume.Name())
 			}
 
 			// We found a matching volume for searchPath.  We now
@@ -78,9 +74,9 @@ func (c *Container) resolvePath(mountPoint string, containerPath string) (string
 			pathRelativeToVolume := strings.TrimPrefix(pathRelativeToContainerMountPoint, searchPath)
 			absolutePathOnTheVolumeMount, err := securejoin.SecureJoin(mountPoint, pathRelativeToVolume)
 			if err != nil {
-				return "", "", err
+				return "", "", nil, err
 			}
-			return mountPoint, absolutePathOnTheVolumeMount, nil
+			return mountPoint, absolutePathOnTheVolumeMount, volume, nil
 		}
 
 		if mount := findBindMount(c, searchPath); mount != nil {
@@ -92,9 +88,9 @@ func (c *Container) resolvePath(mountPoint string, containerPath string) (string
 			pathRelativeToBindMount := strings.TrimPrefix(pathRelativeToContainerMountPoint, searchPath)
 			absolutePathOnTheBindMount, err := securejoin.SecureJoin(mount.Source, pathRelativeToBindMount)
 			if err != nil {
-				return "", "", err
+				return "", "", nil, err
 			}
-			return mount.Source, absolutePathOnTheBindMount, nil
+			return mount.Source, absolutePathOnTheBindMount, nil, nil
 		}
 
 		if searchPath == "/" {
@@ -106,7 +102,7 @@ func (c *Container) resolvePath(mountPoint string, containerPath string) (string
 	}
 
 	// No volume, no bind mount but just a normal path on the container.
-	return mountPoint, resolvedPathOnTheContainerMountPoint, nil
+	return mountPoint, resolvedPathOnTheContainerMountPoint, nil, nil
 }
 
 // findVolume checks if the specified containerPath matches the destination
@@ -169,7 +165,7 @@ func findBindMount(c *Container, containerPath string) *specs.Mount {
 	return nil
 }
 
-// / isPathOnMount returns true if the specified containerPath is a subdir of any
+// isPathOnMount returns true if the specified containerPath is a subdir of any
 // Mount's destination.
 func isPathOnMount(c *Container, containerPath string) bool {
 	cleanedContainerPath := filepath.Clean(containerPath)

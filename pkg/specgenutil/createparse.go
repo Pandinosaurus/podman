@@ -3,8 +3,8 @@ package specgenutil
 import (
 	"errors"
 
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/podman/v5/pkg/domain/entities"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 // validate determines if the flags and values given by the user are valid. things checked

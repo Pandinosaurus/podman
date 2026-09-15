@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package abi
 
@@ -7,18 +7,55 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/trust"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/trust"
+	"go.podman.io/storage/pkg/configfile"
 )
 
-func (ir *ImageEngine) ShowTrust(ctx context.Context, args []string, options entities.ShowTrustOptions) (*entities.ShowTrustReport, error) {
+// policyPathFromConfigfile resolves policy.json the same way as [signature.DefaultPolicy]
+// (via [configfile.Read]); overridePath, if non-empty, wins.
+func policyPathFromConfigfile(sys *types.SystemContext, overridePath string) (string, error) {
+	if overridePath != "" {
+		return overridePath, nil
+	}
+	if sys != nil && sys.SignaturePolicyPath != "" {
+		return sys.SignaturePolicyPath, nil
+	}
+
+	root := ""
+	if sys != nil {
+		root = sys.RootForImplicitAbsolutePaths
+	}
+
+	policyFiles := configfile.File{
+		Name:                         "policy",
+		Extension:                    "json",
+		DoNotLoadDropInFiles:         true,
+		EnvironmentName:              "CONTAINERS_POLICY_JSON",
+		RootForImplicitAbsolutePaths: root,
+		ErrorIfNotFound:              true,
+	}
+
+	for item, err := range configfile.Read(&policyFiles) {
+		if err != nil {
+			return "", err
+		}
+		if item != nil {
+			return item.Name, nil
+		}
+	}
+	return "", fmt.Errorf("internal error: empty result from configfile.Read while resolving policy path")
+}
+
+func (ir *ImageEngine) ShowTrust(_ context.Context, _ []string, options entities.ShowTrustOptions) (*entities.ShowTrustReport, error) {
 	var (
 		err    error
 		report entities.ShowTrustReport
 	)
-	policyPath := trust.DefaultPolicyPath(ir.Libpod.SystemContext())
-	if len(options.PolicyPath) > 0 {
-		policyPath = options.PolicyPath
+	policyPath, err := policyPathFromConfigfile(ir.Libpod.SystemContext(), options.PolicyPath)
+	if err != nil {
+		return nil, err
 	}
 	report.Raw, err = os.ReadFile(policyPath)
 	if err != nil {
@@ -38,18 +75,16 @@ func (ir *ImageEngine) ShowTrust(ctx context.Context, args []string, options ent
 	return &report, nil
 }
 
-func (ir *ImageEngine) SetTrust(ctx context.Context, args []string, options entities.SetTrustOptions) error {
+func (ir *ImageEngine) SetTrust(_ context.Context, args []string, options entities.SetTrustOptions) error {
 	if len(args) != 1 {
 		return fmt.Errorf("SetTrust called with unexpected %d args", len(args))
 	}
+	if options.PolicyPath == "" {
+		return fmt.Errorf("signature-policy path must be provided")
+	}
 	scope := args[0]
 
-	policyPath := trust.DefaultPolicyPath(ir.Libpod.SystemContext())
-	if len(options.PolicyPath) > 0 {
-		policyPath = options.PolicyPath
-	}
-
-	return trust.AddPolicyEntries(policyPath, trust.AddPolicyEntriesInput{
+	return trust.AddPolicyEntries(options.PolicyPath, trust.AddPolicyEntriesInput{
 		Scope:       scope,
 		Type:        options.Type,
 		PubKeyFiles: options.PubKeysFile,

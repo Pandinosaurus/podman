@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package abi
 
@@ -6,7 +6,7 @@ import (
 	"context"
 	"io"
 
-	"github.com/containers/podman/v5/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 func (ic *ContainerEngine) ContainerCopyFromArchive(ctx context.Context, nameOrID, containerPath string, reader io.Reader, options entities.CopyOptions) (entities.ContainerCopyFunc, error) {

@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package compat
 
@@ -7,31 +7,33 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
-	"github.com/containers/podman/v5/libpod"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/api/handlers"
-	"github.com/containers/podman/v5/pkg/api/handlers/utils"
-	api "github.com/containers/podman/v5/pkg/api/types"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/domain/filters"
-	"github.com/containers/podman/v5/pkg/domain/infra/abi"
-	"github.com/containers/podman/v5/pkg/ps"
-	"github.com/containers/podman/v5/pkg/signal"
-	"github.com/containers/podman/v5/pkg/util"
-	"github.com/docker/docker/api/types"
-	dockerBackend "github.com/docker/docker/api/types/backend"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/network"
 	"github.com/docker/go-connections/nat"
 	"github.com/docker/go-units"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/network"
+	"github.com/moby/moby/api/types/storage"
 	spec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/api/handlers"
+	"go.podman.io/podman/v6/pkg/api/handlers/utils"
+	"go.podman.io/podman/v6/pkg/api/handlers/utils/apiutil"
+	api "go.podman.io/podman/v6/pkg/api/types"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/domain/filters"
+	"go.podman.io/podman/v6/pkg/domain/infra/abi"
+	"go.podman.io/podman/v6/pkg/ps"
+	"go.podman.io/podman/v6/pkg/signal"
+	"go.podman.io/podman/v6/pkg/specgenutil"
+	"go.podman.io/podman/v6/pkg/util"
 )
 
 func RemoveContainer(w http.ResponseWriter, r *http.Request) {
@@ -164,8 +166,13 @@ func ListContainers(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	list := make([]*handlers.Container, 0, len(containers))
+	// only include health if API version is >= 1.52 or no version is given (latest)
+	includeHealth := false
+	if _, err := utils.SupportedVersion(r, ">= 1.52.0"); err == nil || errors.Is(err, apiutil.ErrVersionNotGiven) {
+		includeHealth = true
+	}
 	for _, ctnr := range containers {
-		api, err := LibpodToContainer(ctnr, query.Size)
+		api, err := LibpodToContainer(ctnr, query.Size, includeHealth)
 		if err != nil {
 			if errors.Is(err, define.ErrNoSuchCtr) {
 				// container was removed between the initial fetch of the list and conversion
@@ -204,6 +211,12 @@ func GetContainer(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		utils.InternalServerError(w, err)
 		return
+	}
+	if _, err := utils.SupportedVersion(r, ">=1.52.0"); err == nil || errors.Is(err, apiutil.ErrVersionNotGiven) {
+		if api.NetworkSettings != nil {
+			api.NetworkSettings.SecondaryIPAddresses = nil
+			api.NetworkSettings.SecondaryIPv6Addresses = nil
+		}
 	}
 	utils.WriteResponse(w, http.StatusOK, api)
 }
@@ -282,7 +295,17 @@ func WaitContainer(w http.ResponseWriter, r *http.Request) {
 	utils.WaitContainerDocker(w, r)
 }
 
-func LibpodToContainer(l *libpod.Container, sz bool) (*handlers.Container, error) {
+//nolint:staticcheck // LegacyNetworkSettings is deprecated but kept for Docker API compat < v1.52
+func convertSecondaryIPPrefixLen(input *define.InspectNetworkSettings, output *handlers.LegacyNetworkSettings) {
+	for index, ip := range input.SecondaryIPAddresses {
+		output.SecondaryIPAddresses[index].PrefixLen = ip.PrefixLength
+	}
+	for index, ip := range input.SecondaryIPv6Addresses {
+		output.SecondaryIPv6Addresses[index].PrefixLen = ip.PrefixLength
+	}
+}
+
+func LibpodToContainer(l *libpod.Container, sz bool, includeHealth bool) (*handlers.Container, error) {
 	imageID, imageName := l.Image()
 
 	var (
@@ -291,6 +314,10 @@ func LibpodToContainer(l *libpod.Container, sz bool) (*handlers.Container, error
 		sizeRW     int64
 		state      define.ContainerStatus
 		status     string
+		hostConfig = struct {
+			NetworkMode string            `json:",omitempty"`
+			Annotations map[string]string `json:",omitempty"`
+		}{}
 	)
 
 	if state, err = l.State(); err != nil {
@@ -298,9 +325,16 @@ func LibpodToContainer(l *libpod.Container, sz bool) (*handlers.Container, error
 	}
 	stateStr := state.String()
 
-	// Some docker states are not the same as ours. This makes sure the state string stays true to the Docker API
-	if state == define.ContainerStateCreated {
+	// Some docker states are not the same as ours. This makes sure the state string stays true to the Docker API.
+	// "stopped" and "stopping" are podman-internal states with no Docker equivalent;
+	// map them to the nearest Docker state so the compat API never leaks internal states.
+	switch state {
+	case define.ContainerStateCreated:
 		stateStr = define.ContainerStateConfigured.String()
+	case define.ContainerStateStopped:
+		stateStr = define.ContainerStateExited.String()
+	case define.ContainerStateStopping:
+		stateStr = define.ContainerStateRunning.String()
 	}
 
 	switch state {
@@ -342,30 +376,58 @@ func LibpodToContainer(l *libpod.Container, sz bool) (*handlers.Container, error
 		}
 	}
 
-	portMappings, err := l.PortMappings()
+	inspect, err := l.Inspect(false)
 	if err != nil {
 		return nil, err
 	}
 
-	ports := make([]types.Port, len(portMappings))
-	for idx, portMapping := range portMappings {
-		ports[idx] = types.Port{
-			IP:          portMapping.HostIP,
-			PrivatePort: portMapping.ContainerPort,
-			PublicPort:  portMapping.HostPort,
-			Type:        portMapping.Protocol,
+	ports := []container.PortSummary{}
+	for portKey, bindings := range inspect.NetworkSettings.Ports {
+		portNum, proto, ok := strings.Cut(portKey, "/")
+		if !ok {
+			return nil, fmt.Errorf("PORT/PROTOCOL format required for %q", portKey)
 		}
-	}
-	inspect, err := l.Inspect(false)
-	if err != nil {
-		return nil, err
+
+		containerPort, err := strconv.Atoi(portNum)
+		if err != nil {
+			return nil, err
+		}
+
+		if len(bindings) == 0 {
+			// Exposed but not published
+			ports = append(ports, container.PortSummary{
+				PrivatePort: uint16(containerPort),
+				Type:        proto,
+			})
+		} else {
+			for _, b := range bindings {
+				hostPortInt, err := strconv.Atoi(b.HostPort)
+				if err != nil {
+					return nil, fmt.Errorf("invalid HostPort: %w", err)
+				}
+				addr := netip.Addr{}
+				if b.HostIP != "" {
+					addr, err = netip.ParseAddr(b.HostIP)
+					if err != nil {
+						return nil, fmt.Errorf("invalid HostIP: %w", err)
+					}
+				}
+
+				ports = append(ports, container.PortSummary{
+					IP:          addr,
+					PrivatePort: uint16(containerPort),
+					PublicPort:  uint16(hostPortInt),
+					Type:        proto,
+				})
+			}
+		}
 	}
 
 	n, err := json.Marshal(inspect.NetworkSettings)
 	if err != nil {
 		return nil, err
 	}
-	networkSettings := types.SummaryNetworkSettings{}
+	networkSettings := container.NetworkSettingsSummary{}
 	if err := json.Unmarshal(n, &networkSettings); err != nil {
 		return nil, err
 	}
@@ -374,50 +436,63 @@ func LibpodToContainer(l *libpod.Container, sz bool) (*handlers.Container, error
 	if err != nil {
 		return nil, err
 	}
-	mounts := []types.MountPoint{}
+	mounts := []container.MountPoint{}
 	if err := json.Unmarshal(m, &mounts); err != nil {
 		return nil, err
 	}
 
+	var healthSummary *container.HealthSummary
+	if includeHealth {
+		healthSummary = &container.HealthSummary{
+			Status: container.NoHealthcheck,
+		}
+		if l.HasHealthCheck() {
+			switch state {
+			case define.ContainerStateRunning, define.ContainerStatePaused,
+				define.ContainerStateConfigured, define.ContainerStateCreated,
+				define.ContainerStateStopping:
+				if inspect.State.Health != nil && inspect.State.Health.Status != "" {
+					healthSummary.Status = container.HealthStatus(inspect.State.Health.Status)
+					healthSummary.FailingStreak = inspect.State.Health.FailingStreak
+				} else {
+					healthSummary.Status = container.Starting
+				}
+			default:
+				healthSummary.Status = container.NoHealthcheck
+			}
+		}
+	}
+
+	hc := inspect.HostConfig
+	if hc != nil {
+		hostConfig.NetworkMode = inspect.HostConfig.NetworkMode
+		hostConfig.Annotations = inspect.HostConfig.Annotations
+	}
+
 	return &handlers.Container{
-		Container: types.Container{
-			ID:         l.ID(),
-			Names:      []string{fmt.Sprintf("/%s", l.Name())},
-			Image:      imageName,
-			ImageID:    "sha256:" + imageID,
-			Command:    strings.Join(l.Command(), " "),
-			Created:    l.CreatedTime().Unix(),
-			Ports:      ports,
-			SizeRw:     sizeRW,
-			SizeRootFs: sizeRootFs,
-			Labels:     l.Labels(),
-			State:      stateStr,
-			Status:     status,
-			// FIXME: this seems broken, the field is never shown in the API output.
-			HostConfig: struct {
-				NetworkMode string            `json:",omitempty"`
-				Annotations map[string]string `json:",omitempty"`
-			}{
-				NetworkMode: "host",
-				// TODO: add annotations here for >= v1.46
-			},
+		Summary: container.Summary{
+			ID:              l.ID(),
+			Names:           []string{fmt.Sprintf("/%s", l.Name())},
+			Image:           imageName,
+			ImageID:         "sha256:" + imageID,
+			Command:         strings.Join(l.Command(), " "),
+			Created:         l.CreatedTime().Unix(),
+			Ports:           ports,
+			SizeRw:          sizeRW,
+			SizeRootFs:      sizeRootFs,
+			Labels:          l.Labels(),
+			State:           container.ContainerState(stateStr),
+			Status:          status,
+			Health:          healthSummary,
+			HostConfig:      hostConfig,
 			NetworkSettings: &networkSettings,
 			Mounts:          mounts,
 		},
-		ContainerCreateConfig: dockerBackend.ContainerCreateConfig{},
 	}, nil
 }
 
-func convertSecondaryIPPrefixLen(input *define.InspectNetworkSettings, output *types.NetworkSettings) {
-	for index, ip := range input.SecondaryIPAddresses {
-		output.SecondaryIPAddresses[index].PrefixLen = ip.PrefixLength
-	}
-	for index, ip := range input.SecondaryIPv6Addresses {
-		output.SecondaryIPv6Addresses[index].PrefixLen = ip.PrefixLength
-	}
-}
-
-func LibpodToContainerJSON(l *libpod.Container, sz bool) (*types.ContainerJSON, error) {
+//nolint:staticcheck // LegacyImageInspect is deprecated but kept for Docker API compat < v1.52
+func LibpodToContainerJSON(l *libpod.Container, sz bool) (*handlers.LegacyImageInspect, error) {
 	imageID, imageName := l.Image()
 	inspect, err := l.Inspect(sz)
 	if err != nil {
@@ -432,7 +507,7 @@ func LibpodToContainerJSON(l *libpod.Container, sz bool) (*types.ContainerJSON, 
 	if err != nil {
 		return nil, err
 	}
-	state := types.ContainerState{}
+	state := container.State{}
 	if err := json.Unmarshal(i, &state); err != nil {
 		return nil, err
 	}
@@ -442,20 +517,35 @@ func LibpodToContainerJSON(l *libpod.Container, sz bool) (*types.ContainerJSON, 
 		state.Running = true
 	}
 
-	// Dockers created state is our configured state
-	if state.Status == define.ContainerStateCreated.String() {
-		state.Status = define.ContainerStateConfigured.String()
+	// map our statuses to Docker's statuses
+	switch string(state.Status) {
+	case define.ContainerStateConfigured.String(), define.ContainerStateCreated.String():
+		state.Status = "created"
+	case define.ContainerStateRunning.String(), define.ContainerStateStopping.String():
+		state.Status = "running"
+	case define.ContainerStatePaused.String():
+		state.Status = "paused"
+	case define.ContainerStateRemoving.String():
+		state.Status = "removing"
+	case define.ContainerStateStopped.String(), define.ContainerStateExited.String():
+		state.Status = "exited"
+	default:
+		state.Status = "" // unknown state
 	}
 
-	if l.HasHealthCheck() && state.Status != "created" {
-		state.Health = &types.Health{}
+	if l.HasHealthCheck() {
+		state.Health = &container.Health{}
 		if inspect.State.Health != nil {
-			state.Health.Status = inspect.State.Health.Status
+			if inspect.State.Health.Status != "" {
+				state.Health.Status = container.HealthStatus(inspect.State.Health.Status)
+			} else if state.Status == "running" || state.Status == "created" {
+				state.Health.Status = container.Starting
+			}
 			state.Health.FailingStreak = inspect.State.Health.FailingStreak
 			log := inspect.State.Health.Log
 
 			for _, item := range log {
-				res := &types.HealthcheckResult{}
+				res := &container.HealthcheckResult{}
 				s, err := time.Parse(time.RFC3339Nano, item.Start)
 				if err != nil {
 					return nil, err
@@ -486,43 +576,49 @@ func LibpodToContainerJSON(l *libpod.Container, sz bool) (*types.ContainerJSON, 
 	}
 	sort.Strings(hc.Binds)
 
+	// Map CgroupMode to CgroupnsMode for Docker API compatibility
+	switch inspect.HostConfig.CgroupMode {
+	case "private":
+		hc.CgroupnsMode = container.CgroupnsModePrivate
+	case "host":
+		hc.CgroupnsMode = container.CgroupnsModeHost
+	}
+
 	// k8s-file == json-file
 	if hc.LogConfig.Type == define.KubernetesLogging {
 		hc.LogConfig.Type = define.JSONLogging
 	}
-	g, err := json.Marshal(inspect.GraphDriver)
-	if err != nil {
-		return nil, err
-	}
-	graphDriver := types.GraphDriverData{}
-	if err := json.Unmarshal(g, &graphDriver); err != nil {
-		return nil, err
+
+	graphDriver := storage.DriverData{
+		Name: inspect.GraphDriver.Name,
+		Data: inspect.GraphDriver.Data,
 	}
 
-	cb := types.ContainerJSONBase{
-		ID:              l.ID(),
-		Created:         l.CreatedTime().UTC().Format(time.RFC3339Nano), // Docker uses UTC
-		Path:            inspect.Path,
-		Args:            inspect.Args,
-		State:           &state,
-		Image:           "sha256:" + imageID,
-		ResolvConfPath:  inspect.ResolvConfPath,
-		HostnamePath:    inspect.HostnamePath,
-		HostsPath:       inspect.HostsPath,
-		LogPath:         l.LogPath(),
-		Node:            nil,
-		Name:            fmt.Sprintf("/%s", l.Name()),
-		RestartCount:    int(inspect.RestartCount),
-		Driver:          inspect.Driver,
-		Platform:        "linux",
-		MountLabel:      inspect.MountLabel,
-		ProcessLabel:    inspect.ProcessLabel,
-		AppArmorProfile: inspect.AppArmorProfile,
-		ExecIDs:         inspect.ExecIDs,
-		HostConfig:      &hc,
-		GraphDriver:     graphDriver,
-		SizeRw:          inspect.SizeRw,
-		SizeRootFs:      &inspect.SizeRootFs,
+	cb := handlers.LegacyImageInspect{ //nolint:staticcheck // LegacyImageInspect is deprecated but kept for Docker API compat < v1.52
+		InspectResponse: container.InspectResponse{
+			ID:              l.ID(),
+			Created:         l.CreatedTime().UTC().Format(time.RFC3339Nano), // Docker uses UTC
+			Path:            inspect.Path,
+			Args:            inspect.Args,
+			State:           &state,
+			Image:           "sha256:" + imageID,
+			ResolvConfPath:  inspect.ResolvConfPath,
+			HostnamePath:    inspect.HostnamePath,
+			HostsPath:       inspect.HostsPath,
+			LogPath:         l.LogPath(),
+			Name:            fmt.Sprintf("/%s", l.Name()),
+			RestartCount:    int(inspect.RestartCount),
+			Driver:          inspect.Driver,
+			Platform:        "linux",
+			MountLabel:      inspect.MountLabel,
+			ProcessLabel:    inspect.ProcessLabel,
+			AppArmorProfile: inspect.AppArmorProfile,
+			ExecIDs:         inspect.ExecIDs,
+			HostConfig:      &hc,
+			GraphDriver:     &graphDriver,
+			SizeRw:          inspect.SizeRw,
+			SizeRootFs:      &inspect.SizeRootFs,
+		},
 	}
 
 	// set Path and Args
@@ -535,63 +631,66 @@ func LibpodToContainerJSON(l *libpod.Container, sz bool) (*types.ContainerJSON, 
 	}
 	stopTimeout := int(l.StopTimeout())
 
-	exposedPorts := make(nat.PortSet)
-	for ep := range inspect.NetworkSettings.Ports {
-		port, proto, ok := strings.Cut(ep, "/")
-		if !ok {
-			return nil, fmt.Errorf("PORT/PROTOCOL Format required for %q", ep)
-		}
-		exposedPort, err := nat.NewPort(proto, port)
-		if err != nil {
-			return nil, err
-		}
-		exposedPorts[exposedPort] = struct{}{}
-	}
-
 	var healthcheck *container.HealthConfig
 	if inspect.Config.Healthcheck != nil {
 		healthcheck = &container.HealthConfig{
-			Test:        inspect.Config.Healthcheck.Test,
-			Interval:    inspect.Config.Healthcheck.Interval,
-			Timeout:     inspect.Config.Healthcheck.Timeout,
-			StartPeriod: inspect.Config.Healthcheck.StartPeriod,
-			Retries:     inspect.Config.Healthcheck.Retries,
+			Test:          inspect.Config.Healthcheck.Test,
+			Interval:      inspect.Config.Healthcheck.Interval,
+			Timeout:       inspect.Config.Healthcheck.Timeout,
+			StartPeriod:   inspect.Config.Healthcheck.StartPeriod,
+			StartInterval: inspect.Config.Healthcheck.StartInterval,
+			Retries:       inspect.Config.Healthcheck.Retries,
 		}
 	}
 
-	config := container.Config{
-		Hostname:        l.Hostname(),
-		Domainname:      inspect.Config.DomainName,
-		User:            l.User(),
-		AttachStdin:     inspect.Config.AttachStdin,
-		AttachStdout:    inspect.Config.AttachStdout,
-		AttachStderr:    inspect.Config.AttachStderr,
-		ExposedPorts:    exposedPorts,
-		Tty:             inspect.Config.Tty,
-		OpenStdin:       inspect.Config.OpenStdin,
-		StdinOnce:       inspect.Config.StdinOnce,
-		Env:             inspect.Config.Env,
-		Cmd:             l.Command(),
-		Healthcheck:     healthcheck,
-		ArgsEscaped:     false,
-		Image:           imageName,
-		Volumes:         nil,
-		WorkingDir:      l.WorkingDir(),
-		Entrypoint:      l.Entrypoint(),
-		NetworkDisabled: false,
-		MacAddress:      "",
-		OnBuild:         nil,
-		Labels:          l.Labels(),
-		StopSignal:      strconv.Itoa(int(l.StopSignal())),
-		StopTimeout:     &stopTimeout,
-		Shell:           nil,
+	// Convert to moby PortSet.
+	var exposedPorts network.PortSet
+	if len(inspect.Config.ExposedPorts) > 0 {
+		exposedPorts = make(network.PortSet, len(inspect.Config.ExposedPorts))
+		for p := range inspect.Config.ExposedPorts {
+			mp, err := network.ParsePort(p)
+			if err != nil {
+				return nil, fmt.Errorf("invalid exposed port %q: %w", p, err)
+			}
+			exposedPorts[mp] = struct{}{}
+		}
+	}
+
+	config := handlers.ContainerConfig{
+		Config: container.Config{
+			Hostname:        l.Hostname(),
+			Domainname:      inspect.Config.DomainName,
+			User:            l.User(),
+			AttachStdin:     inspect.Config.AttachStdin,
+			AttachStdout:    inspect.Config.AttachStdout,
+			AttachStderr:    inspect.Config.AttachStderr,
+			ExposedPorts:    exposedPorts,
+			Tty:             inspect.Config.Tty,
+			OpenStdin:       inspect.Config.OpenStdin,
+			StdinOnce:       inspect.Config.StdinOnce,
+			Env:             inspect.Config.Env,
+			Cmd:             l.Command(),
+			Healthcheck:     healthcheck,
+			ArgsEscaped:     false,
+			Image:           imageName,
+			Volumes:         nil,
+			WorkingDir:      l.WorkingDir(),
+			Entrypoint:      l.Entrypoint(),
+			NetworkDisabled: false,
+			OnBuild:         nil,
+			Labels:          l.Labels(),
+			StopSignal:      strconv.Itoa(int(l.StopSignal())),
+			StopTimeout:     &stopTimeout,
+			Shell:           nil,
+		},
+		MacAddress: "",
 	}
 
 	m, err := json.Marshal(inspect.Mounts)
 	if err != nil {
 		return nil, err
 	}
-	mounts := []types.MountPoint{}
+	mounts := []container.MountPoint{}
 	if err := json.Unmarshal(m, &mounts); err != nil {
 		return nil, err
 	}
@@ -610,7 +709,7 @@ func LibpodToContainerJSON(l *libpod.Container, sz bool) (*types.ContainerJSON, 
 		return nil, err
 	}
 
-	networkSettings := types.NetworkSettings{}
+	networkSettings := handlers.LegacyNetworkSettings{} //nolint:staticcheck // LegacyNetworkSettings is deprecated but kept for Docker API compat < v1.52
 	if err := json.Unmarshal(n, &networkSettings); err != nil {
 		return nil, err
 	}
@@ -622,13 +721,10 @@ func LibpodToContainerJSON(l *libpod.Container, sz bool) (*types.ContainerJSON, 
 		networkSettings.Networks = map[string]*network.EndpointSettings{}
 	}
 
-	c := types.ContainerJSON{
-		ContainerJSONBase: &cb,
-		Mounts:            mounts,
-		Config:            &config,
-		NetworkSettings:   &networkSettings,
-	}
-	return &c, nil
+	cb.Mounts = mounts
+	cb.Config = &config
+	cb.NetworkSettings = &networkSettings
+	return &cb, nil
 }
 
 func formatCapabilities(slice []string) {
@@ -679,8 +775,8 @@ func UpdateContainer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	options := new(container.UpdateConfig)
-	if err := json.NewDecoder(r.Body).Decode(options); err != nil {
-		utils.Error(w, http.StatusInternalServerError, fmt.Errorf("decoding request body: %w", err))
+	if err := utils.ReadJSONFromBody(r, &options); err != nil {
+		utils.Error(w, http.StatusBadRequest, err)
 		return
 	}
 
@@ -768,7 +864,7 @@ func UpdateContainer(w http.ResponseWriter, r *http.Request) {
 		if resources.Pids == nil {
 			resources.Pids = new(spec.LinuxPids)
 		}
-		resources.Pids.Limit = *options.PidsLimit
+		resources.Pids.Limit = options.PidsLimit
 	}
 
 	// Blkio Weight
@@ -789,11 +885,33 @@ func UpdateContainer(w http.ResponseWriter, r *http.Request) {
 		restartRetries = &localRetries
 	}
 
-	if err := ctr.Update(resources, restartPolicy, restartRetries); err != nil {
+	// Rlimits
+	var rlimits []spec.POSIXRlimit
+	if len(options.Ulimits) > 0 {
+		ulimits := make([]string, len(options.Ulimits))
+		for i, u := range options.Ulimits {
+			ulimits[i] = u.String()
+		}
+		rlimits, err = specgenutil.GenRlimits(ulimits)
+		if err != nil {
+			utils.Error(w, http.StatusInternalServerError, fmt.Errorf("generating rlimits: %w", err))
+			return
+		}
+	}
+
+	updateOptions := &entities.ContainerUpdateOptions{
+		Resources:                       resources,
+		ChangedHealthCheckConfiguration: &define.UpdateHealthCheckConfig{},
+		RestartPolicy:                   restartPolicy,
+		RestartRetries:                  restartRetries,
+		Rlimits:                         rlimits,
+	}
+
+	if err := ctr.Update(updateOptions); err != nil {
 		utils.Error(w, http.StatusInternalServerError, fmt.Errorf("updating container: %w", err))
 		return
 	}
 
-	responseStruct := container.ContainerUpdateOKBody{}
+	responseStruct := container.UpdateResponse{}
 	utils.WriteResponse(w, http.StatusOK, responseStruct)
 }

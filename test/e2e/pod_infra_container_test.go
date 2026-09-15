@@ -6,13 +6,12 @@ import (
 	"fmt"
 	"strconv"
 
-	. "github.com/containers/podman/v5/test/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	. "go.podman.io/podman/v6/test/utils"
 )
 
 var _ = Describe("Podman pod create", func() {
-
 	It("podman create infra container", func() {
 		session := podmanTest.Podman([]string{"pod", "create"})
 		session.WaitWithDefaultTimeout()
@@ -98,11 +97,11 @@ var _ = Describe("Podman pod create", func() {
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 
-		session = podmanTest.Podman([]string{"run", "--pod", podID, fedoraMinimal, "curl", "-s", "--retry", "2", "--retry-connrefused", "-f", "localhost:80"})
+		session = podmanTest.Podman([]string{"run", "--pod", podID, FEDORA_MINIMAL, "curl", "-s", "--retry", "2", "--retry-connrefused", "-f", "localhost:80"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 
-		session = podmanTest.Podman([]string{"run", fedoraMinimal, "curl", "-f", "localhost"})
+		session = podmanTest.Podman([]string{"run", FEDORA_MINIMAL, "curl", "-f", "localhost"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).To(ExitWithError(7, "Failed to connect to localhost port 80 "))
 
@@ -127,7 +126,6 @@ var _ = Describe("Podman pod create", func() {
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 		Expect(session.OutputToString()).Should(Equal("''")) // no network path... host
-
 	})
 
 	It("podman pod correctly sets up IPCNS", func() {
@@ -140,14 +138,14 @@ var _ = Describe("Podman pod create", func() {
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 
-		session = podmanTest.Podman([]string{"run", "--pod", podID, fedoraMinimal, "/bin/sh", "-c", "'touch /dev/shm/hi'"})
+		session = podmanTest.Podman([]string{"run", "--pod", podID, FEDORA_MINIMAL, "/bin/sh", "-c", "'touch /dev/shm/hi'"})
 		session.WaitWithDefaultTimeout()
 		if session.ExitCode() != 0 {
 			Skip("ShmDir not initialized, skipping...")
 		}
 		Expect(session).Should(ExitCleanly())
 
-		session = podmanTest.Podman([]string{"run", "--pod", podID, fedoraMinimal, "/bin/sh", "-c", "'ls /dev/shm'"})
+		session = podmanTest.Podman([]string{"run", "--pod", podID, FEDORA_MINIMAL, "/bin/sh", "-c", "'ls /dev/shm'"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 		Expect(session.OutputToString()).To(Equal("hi"))
@@ -227,7 +225,6 @@ var _ = Describe("Podman pod create", func() {
 	})
 
 	It("podman pod container can override pod pid NS", func() {
-		SkipIfRootlessCgroupsV1("Not supported for rootless + CgroupsV1")
 		session := podmanTest.Podman([]string{"pod", "create", "--share", "pid"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
@@ -428,5 +425,4 @@ var _ = Describe("Podman pod create", func() {
 			Expect(session.OutputToString()).Should(Equal("0"))
 		})
 	}
-
 })

@@ -18,15 +18,10 @@ import (
 type operation int
 
 const (
-	//nolint:stylecheck
-	HWND_BROADCAST = 0xFFFF
-	//nolint:stylecheck
+	HWND_BROADCAST   = 0xFFFF
 	WM_SETTINGCHANGE = 0x001A
-	//nolint:stylecheck
 	SMTO_ABORTIFHUNG = 0x0002
-	//nolint:stylecheck
-	ERR_BAD_ARGS = 0x000A
-	//nolint:stylecheck
+	ERR_BAD_ARGS     = 0x000A
 	OPERATION_FAILED = 0x06AC
 
 	Environment           = "Environment"
@@ -101,7 +96,7 @@ func addPathToRegistry(dir string) error {
 	}
 
 	// Is this directory already on the windows path?
-	for _, element := range strings.Split(existing, ";") {
+	for element := range strings.SplitSeq(existing, ";") {
 		if strings.EqualFold(element, dir) {
 			// Path already added
 			return nil
@@ -149,10 +144,8 @@ func removePathFromRegistry(path string) error {
 		return err
 	}
 
-	// No point preallocating we can't know how big the array needs to be.
-	//nolint:prealloc
 	var elements []string
-	for _, element := range strings.Split(existing, ";") {
+	for element := range strings.SplitSeq(existing, ";") {
 		if strings.EqualFold(element, path) {
 			continue
 		}

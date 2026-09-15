@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package server
 
@@ -7,11 +7,11 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/containers/podman/v5/pkg/api/types"
 	"github.com/google/uuid"
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/podman/v6/pkg/api/types"
 )
 
 // referenceIDHandler adds X-Reference-Id Header allowing event correlation

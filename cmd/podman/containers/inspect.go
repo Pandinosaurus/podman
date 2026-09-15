@@ -1,13 +1,13 @@
 package containers
 
 import (
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/inspect"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/validate"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/inspect"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/validate"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 var (
@@ -19,7 +19,7 @@ var (
 		RunE:              inspectExec,
 		ValidArgsFunction: common.AutocompleteContainers,
 		Example: `podman container inspect myCtr
-  podman container inspect -l --format '{{.Id}} {{.Config.Labels}}'`,
+podman container inspect -l --format '{{.Id}} {{.Config.Labels}}'`,
 	}
 	inspectOpts *entities.InspectOptions
 )
@@ -40,7 +40,7 @@ func init() {
 	validate.AddLatestFlag(inspectCmd, &inspectOpts.Latest)
 }
 
-func inspectExec(cmd *cobra.Command, args []string) error {
+func inspectExec(_ *cobra.Command, args []string) error {
 	// Force container type
 	inspectOpts.Type = common.ContainerType
 	return inspect.Inspect(args, *inspectOpts)

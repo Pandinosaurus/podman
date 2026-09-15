@@ -7,10 +7,10 @@ import "io"
 //go:generate go run ../generator/generator.go InspectOptions
 type InspectOptions struct {
 	// Authfile - path to an authentication file.
-	Authfile *string
+	Authfile *string `schema:"-"`
 	// SkipTLSVerify - skip https and certificate validation when
 	// contacting container registries.
-	SkipTLSVerify *bool
+	SkipTLSVerify *bool `schema:"-"`
 }
 
 // CreateOptions are optional options for creating manifests
@@ -19,15 +19,14 @@ type InspectOptions struct {
 type CreateOptions struct {
 	All        *bool
 	Amend      *bool
-	Annotation map[string]string
+	Annotation map[string]string `json:"annotations" schema:"annotations"`
 }
 
 // ExistsOptions are optional options for checking
 // if a manifest list exists
 //
 //go:generate go run ../generator/generator.go ExistsOptions
-type ExistsOptions struct {
-}
+type ExistsOptions struct{}
 
 // AddOptions are optional options for adding manifest lists
 //
@@ -35,7 +34,7 @@ type ExistsOptions struct {
 type AddOptions struct {
 	All *bool
 
-	Annotation map[string]string
+	Annotation map[string]string `json:"annotations" schema:"annotations"`
 	Arch       *string
 	Features   []string
 	OS         *string
@@ -44,17 +43,17 @@ type AddOptions struct {
 	Variant    *string
 
 	Images        []string
-	Authfile      *string
-	Password      *string
-	Username      *string
-	SkipTLSVerify *bool `schema:"-"`
+	Authfile      *string `schema:"-"`
+	Password      *string `schema:"-"`
+	Username      *string `schema:"-"`
+	SkipTLSVerify *bool   `schema:"-"`
 }
 
 // AddArtifactOptions are optional options for adding artifact manifests
 //
 //go:generate go run ../generator/generator.go AddArtifactOptions
 type AddArtifactOptions struct {
-	Annotation map[string]string
+	Annotation map[string]string `json:"annotations" schema:"annotations"`
 	Arch       *string
 	Features   []string
 	OS         *string
@@ -68,6 +67,7 @@ type AddArtifactOptions struct {
 	LayerType     *string           `json:"artifact_layer_type,omitempty"`
 	ExcludeTitles *bool             `json:"artifact_exclude_titles,omitempty"`
 	Subject       *string           `json:"artifact_subject,omitempty"`
+	IndexSubject  *string           `json:"subject,omitempty"` // IndexSubject is a subject value to set in the manifest list itself
 	Annotations   map[string]string `json:"artifact_annotations,omitempty"`
 	Files         []string          `json:"artifact_files,omitempty"`
 }
@@ -75,8 +75,7 @@ type AddArtifactOptions struct {
 // RemoveOptions are optional options for removing manifest lists
 //
 //go:generate go run ../generator/generator.go RemoveOptions
-type RemoveOptions struct {
-}
+type RemoveOptions struct{}
 
 // ModifyOptions are optional options for modifying manifest lists
 //
@@ -87,19 +86,21 @@ type ModifyOptions struct {
 	Operation *string
 	All       *bool // All when true, operate on all images in a manifest list that may be included in Images
 
-	Annotations map[string]string // Annotations to add to the entries for Images in the manifest list
-	Arch        *string           // Arch overrides the architecture for the image
-	Features    []string          // Feature list for the image
-	OS          *string           // OS overrides the operating system for the image
-	OSFeatures  []string          `json:"os_features" schema:"os_features"` // OSFeatures overrides the OS features for the image
-	OSVersion   *string           `json:"os_version" schema:"os_version"`   // OSVersion overrides the operating system version for the image
-	Variant     *string           // Variant overrides the architecture variant for the image
+	Annotations      map[string]string // Annotations to add to the entries for Images in the manifest list
+	IndexAnnotations map[string]string `json:"index_annotations" schema:"index_annotations"` // Annotations to add to the manifest list as a whole
+	IndexSubject     *string           `json:"subject" schema:"subject"`                     // IndexSubject is a subject value to set in the manifest list itself
+	Arch             *string           // Arch overrides the architecture for the image
+	Features         []string          // Feature list for the image
+	OS               *string           // OS overrides the operating system for the image
+	OSFeatures       []string          `json:"os_features" schema:"os_features"` // OSFeatures overrides the OS features for the image
+	OSVersion        *string           `json:"os_version" schema:"os_version"`   // OSVersion overrides the operating system version for the image
+	Variant          *string           // Variant overrides the architecture variant for the image
 
 	Images        []string // Images is an optional list of images to add/remove to/from manifest list depending on operation
-	Authfile      *string
-	Password      *string
-	Username      *string
-	SkipTLSVerify *bool `schema:"-"`
+	Authfile      *string  `schema:"-"`
+	Password      *string  `schema:"-"`
+	Username      *string  `schema:"-"`
+	SkipTLSVerify *bool    `schema:"-"`
 
 	ArtifactType          **string          `json:"artifact_type"`           // the ArtifactType in an artifact manifest being created
 	ArtifactConfigType    *string           `json:"artifact_config_type"`    // the config.MediaType in an artifact manifest being created

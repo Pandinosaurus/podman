@@ -81,12 +81,12 @@ func main() {
 	}
 
 	// always add reflect
-	imports := []string{"\"reflect\"", "\"github.com/containers/podman/v5/pkg/bindings/internal/util\""}
+	imports := []string{"\"reflect\"", "\"go.podman.io/podman/v6/pkg/bindings/internal/util\""}
 	for _, imp := range f.Imports {
 		imports = append(imports, imp.Path.Value)
 	}
 
-	out, err := os.Create(strings.TrimRight(srcFile, ".go") + "_" + strings.Replace(strings.ToLower(inputStructName), "options", "_options", 1) + ".go")
+	out, err := os.Create(strings.TrimSuffix(srcFile, ".go") + "_" + strings.Replace(strings.ToLower(inputStructName), "options", "_options", 1) + ".go")
 	if err != nil {
 		panic(err)
 	}
@@ -120,7 +120,7 @@ func main() {
 				composite = true
 			}
 
-			//sub := "*"
+			// sub := "*"
 			typeExpr := field.Type
 			start := typeExpr.Pos() - 1
 			end := typeExpr.End() - 1
@@ -160,16 +160,16 @@ func main() {
 		}
 		closed = true
 
-		// go fmt file
-		gofmt := exec.Command("go", "fmt", out.Name())
-		gofmt.Stderr = os.Stdout
-		if err := gofmt.Run(); err != nil {
-			fmt.Println(err)
-			os.Exit(1)
+		// Format file.
+		bin, err := exec.LookPath("../../../bin/golangci-lint")
+		if err != nil {
+			bin, err = exec.LookPath("golangci-lint")
+			if err != nil {
+				fmt.Println(err)
+				os.Exit(1)
+			}
 		}
-
-		// go import file
-		goimport := exec.Command("../../../test/tools/build/goimports", "-w", out.Name())
+		goimport := exec.Command(bin, "fmt", out.Name())
 		goimport.Stderr = os.Stdout
 		if err := goimport.Run(); err != nil {
 			fmt.Println(err)

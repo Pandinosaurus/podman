@@ -278,6 +278,23 @@ class ContainerTestCase(APITestCase):
         # is zero.  I think the test needs some rewrite.
         # self.assertIsNotNone(prune_payload["ImagesDeleted"][1]["Deleted"])
 
+    def test_create_duplicate_name(self):
+        name = f"Container_{random.getrandbits(160):x}"
+        payload = {"Cmd": ["top"], "Image": "alpine:latest"}
+
+        r = requests.post(
+            self.podman_url + f"/v1.40/containers/create?name={name}", json=payload
+        )
+        self.assertEqual(r.status_code, 201, r.text)
+        container_id = r.json()["Id"]
+
+        r = requests.post(
+            self.podman_url + f"/v1.40/containers/create?name={name}", json=payload
+        )
+        self.assertEqual(r.status_code, 409, r.text)
+
+        requests.delete(self.podman_url + f"/v1.40/containers/{container_id}?force=true")
+
     def test_status(self):
         r = requests.post(
             self.podman_url + "/v1.40/containers/create?name=topcontainer",
@@ -458,6 +475,32 @@ class ContainerTestCase(APITestCase):
         self.assertTrue("8080/tcp" in inspect_response["HostConfig"]["PortBindings"])
         self.assertFalse("8081/tcp" in inspect_response["HostConfig"]["PortBindings"])
 
+    def test_host_config_cgroupns_mode(self):
+        for mode in ["private", "host"]:
+            r = requests.post(
+                self.podman_url + "/v1.40/containers/create",
+                json={
+                    "Name": "cgroupns_" + mode,
+                    "Cmd": ["top"],
+                    "Image": "alpine:latest",
+                    "HostConfig": {
+                        "CgroupnsMode": mode
+                    }
+                },
+            )
+            self.assertEqual(r.status_code, 201, r.text)
+            payload = r.json()
+            container_id = payload["Id"]
+            self.assertIsNotNone(container_id)
+
+            r = requests.get(self.podman_url + f"/v1.40/containers/{container_id}/json")
+            self.assertEqual(r.status_code, 200, r.text)
+            inspect_response = r.json()
+            self.assertEqual(mode, inspect_response["HostConfig"]["CgroupnsMode"])
+
+            r = requests.delete(self.podman_url + f"/v1.40/containers/{container_id}")
+            self.assertEqual(r.status_code, 204, r.text)
+
 def execute_process(cmd):
     return subprocess.run(
                 cmd,
@@ -492,13 +535,22 @@ class ContainerCompatibleAPITestCase(APITestCase):
             r = requests.post(self.uri(self.resolve_container("/containers/{}/start")))
             self.assertIn(r.status_code, (204, 304), r.text)
 
-            r = requests.get(self.compat_uri(self.resolve_container("/containers/{}/json")))
+            container_uri = self.resolve_container("/containers/{}/json")
+
+            # SecondaryIPAddresses present for API < v1.52
+            r = requests.get(self.podman_url + "/v1.44/" + container_uri)
             self.assertEqual(r.status_code, 200, r.text)
             self.assertId(r.content)
             out = r.json()
-
             self.assertEqual("10.0.2.0", out["NetworkSettings"]["SecondaryIPAddresses"][0]["Addr"])
             self.assertEqual(24, out["NetworkSettings"]["SecondaryIPAddresses"][0]["PrefixLen"])
+
+            # SecondaryIPAddresses removed for API >= v1.52
+            r = requests.get(self.podman_url + "/v1.52/" + container_uri)
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertId(r.content)
+            out = r.json()
+            self.assertIsNone(out["NetworkSettings"].get("SecondaryIPAddresses"))
         finally:
             delete_named_network_ns(network_ns_name)
 

@@ -9,11 +9,13 @@ PRODUCTSIGN_IDENTITY=${PRODUCTSIGN_IDENTITY:-mock}
 NO_CODESIGN=${NO_CODESIGN:-0}
 HELPER_BINARIES_DIR="/opt/podman/bin"
 MACHINE_POLICY_JSON_DIR="/opt/podman/config"
+BUILD_ORIGIN="pkginstaller"
 
 tmpBin="contrib/pkginstaller/tmp-bin"
 
 binDir="${BASEDIR}/root/podman/bin"
 libDir="${BASEDIR}/root/podman/lib"
+docDir="${BASEDIR}/root/podman/docs/man/man1"
 
 version=$(cat "${BASEDIR}/VERSION")
 arch=$(cat "${BASEDIR}/ARCH")
@@ -21,14 +23,12 @@ arch=$(cat "${BASEDIR}/ARCH")
 function build_podman() {
   pushd "$1"
 
-  case ${goArch} in
-  universal)
-    build_fat
-    cp "${tmpBin}/podman-universal"  "contrib/pkginstaller/out/packaging/${binDir}/podman"
-    cp "${tmpBin}/podman-mac-helper-universal" "contrib/pkginstaller/out/packaging/${binDir}/podman-mac-helper"
-    ;;
+  make podman-remote-darwin-docs
+  mkdir -p "contrib/pkginstaller/out/packaging/${docDir}"
+  cp -v docs/build/remote/darwin/*.1 "contrib/pkginstaller/out/packaging/${docDir}"
 
-  amd64 | arm64)
+  case ${goArch} in
+  arm64)
     build_podman_arch ${goArch}
     cp "${tmpBin}/podman-${goArch}"  "contrib/pkginstaller/out/packaging/${binDir}/podman"
     cp "${tmpBin}/podman-mac-helper-${goArch}" "contrib/pkginstaller/out/packaging/${binDir}/podman-mac-helper"
@@ -42,22 +42,11 @@ function build_podman() {
 }
 
 function build_podman_arch(){
-    make -B GOARCH="$1" podman-remote HELPER_BINARIES_DIR="${HELPER_BINARIES_DIR}"
+    make -B GOARCH="$1" podman-remote HELPER_BINARIES_DIR="${HELPER_BINARIES_DIR}" BUILD_ORIGIN="${BUILD_ORIGIN}"
     make -B GOARCH="$1" podman-mac-helper
     mkdir -p "${tmpBin}"
     cp bin/darwin/podman "${tmpBin}/podman-$1"
     cp bin/darwin/podman-mac-helper "${tmpBin}/podman-mac-helper-$1"
-}
-
-function build_fat(){
-    echo "Building ARM Podman"
-    build_podman_arch "arm64"
-    echo "Building AMD Podman"
-    build_podman_arch "amd64"
-
-    echo "Creating universal binary"
-    lipo -create -output "${tmpBin}/podman-universal" "${tmpBin}/podman-arm64" "${tmpBin}/podman-amd64"
-    lipo -create -output "${tmpBin}/podman-mac-helper-universal" "${tmpBin}/podman-mac-helper-arm64" "${tmpBin}/podman-mac-helper-amd64"
 }
 
 function sign() {
@@ -85,7 +74,7 @@ sign "${binDir}/vfkit"
 sign "${binDir}/podman-mac-helper"
 
 sign "${binDir}/krunkit"
-sign "${libDir}/libkrun-efi.dylib"
+sign "${libDir}/libkrun.dylib"
 sign "${libDir}/libvirglrenderer.1.dylib"
 sign "${libDir}/libepoxy.0.dylib"
 sign "${libDir}/libMoltenVK.dylib"

@@ -1,7 +1,6 @@
 OCI Image Builder
 ==========================
 
-[![Go Report Card](https://goreportcard.com/badge/github.com/openshift/imagebuilder)](https://goreportcard.com/report/github.com/openshift/imagebuilder)
 [![GoDoc](https://godoc.org/github.com/openshift/imagebuilder?status.png)](https://godoc.org/github.com/openshift/imagebuilder)
 [![Travis](https://app.travis-ci.com/openshift/imagebuilder.svg?branch=master)](https://app.travis-ci.com/github/openshift/imagebuilder)
 [![Join the chat at freenode:openshift-dev](https://img.shields.io/badge/irc-freenode%3A%20%23openshift--dev-blue.svg)](http://webchat.freenode.net/?channels=%23openshift-dev)
@@ -102,12 +101,15 @@ Example of usage from OpenShift's experimental `dockerbuild` [command with mount
 ## Run conformance tests (very slow):
 
 ```
-docker rmi busybox; docker pull busybox
-docker rmi alpine; docker pull alpine
-docker rmi centos:7; docker pull centos:7
+docker rmi mirror.gcr.io/alpine; docker pull mirror.gcr.io/alpine
+docker rmi mirror.gcr.io/busybox; docker pull mirror.gcr.io/busybox
+docker rmi public.ecr.aws/docker/library/centos:7; docker pull public.ecr.aws/docker/library/centos:7
+docker rmi mirror.gcr.io/debian; docker pull mirror.gcr.io/debian
 docker rmi registry.fedoraproject.org/fedora-minimal; docker pull registry.fedoraproject.org/fedora-minimal
-docker rmi registry.fedoraproject.org/fedora-minimal:41-x86_64; docker pull registry.fedoraproject.org/fedora-minimal:41-x86_64
-docker rmi registry.fedoraproject.org/fedora-minimal:41-aarch64; docker pull registry.fedoraproject.org/fedora-minimal:41-aarch64
+docker rmi registry.fedoraproject.org/fedora-minimal:44-x86_64; docker pull registry.fedoraproject.org/fedora-minimal:44-x86_64
+docker rmi registry.fedoraproject.org/fedora-minimal:44-aarch64; docker pull registry.fedoraproject.org/fedora-minimal:44-aarch64
+docker rmi mirror.gcr.io/golang:1.25; docker pull mirror.gcr.io/golang:1.25
+docker rmi mirror.gcr.io/nginx; docker pull mirror.gcr.io/nginx
 chmod -R go-w ./dockerclient/testdata
-go test ./dockerclient -tags conformance -timeout 30m
+env DOCKER_API_VERSION=1.44 go test ./dockerclient -tags conformance -timeout 30m
 ```

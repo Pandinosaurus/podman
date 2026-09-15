@@ -4,16 +4,15 @@ package integration
 
 import (
 	"fmt"
-	"sort"
+	"slices"
 
-	. "github.com/containers/podman/v5/test/utils"
-	"github.com/containers/storage/pkg/stringid"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	. "go.podman.io/podman/v6/test/utils"
+	"go.podman.io/storage/pkg/stringid"
 )
 
 var _ = Describe("Podman ps", func() {
-
 	It("podman pod ps no pods", func() {
 		session := podmanTest.Podman([]string{"pod", "ps"})
 		session.WaitWithDefaultTimeout()
@@ -133,7 +132,6 @@ var _ = Describe("Podman ps", func() {
 		session := podmanTest.Podman([]string{"pod", "ps", "-q", "--format", "{{.ID}}"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).To(ExitWithError(125, "quiet and format cannot be used together"))
-
 	})
 
 	It("podman pod ps --sort by name", func() {
@@ -153,11 +151,10 @@ var _ = Describe("Podman ps", func() {
 
 		sortedArr := session.OutputToStringArray()
 
-		Expect(sort.SliceIsSorted(sortedArr, func(i, j int) bool { return sortedArr[i] < sortedArr[j] })).To(BeTrue(), "slice is sorted")
+		Expect(slices.IsSorted(sortedArr)).To(BeTrue(), "slice is sorted")
 	})
 
 	It("podman pod ps --ctr-names", func() {
-		SkipIfRootlessCgroupsV1("Not supported for rootless + CgroupsV1")
 		_, ec, podid := podmanTest.CreatePod(nil)
 		Expect(ec).To(Equal(0))
 
@@ -376,5 +373,4 @@ var _ = Describe("Podman ps", func() {
 		Expect(session).Should(ExitCleanly())
 		Expect(session.OutputToString()).To(MatchRegexp(`^POD ID\s+NAME\s+STATUS\s+CREATED\s+INFRA ID\s+IDS\s+NAMES\s+STATUS\s+CGROUP\s+NAMESPACES$`))
 	})
-
 })

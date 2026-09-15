@@ -1,13 +1,14 @@
 package define
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
-	"github.com/containers/image/v5/manifest"
-	"github.com/containers/podman/v5/pkg/signal"
+	"go.podman.io/image/v5/manifest"
+	"go.podman.io/podman/v6/pkg/signal"
 )
 
 type InspectIDMappings struct {
@@ -57,6 +58,8 @@ type InspectContainerConfig struct {
 	Annotations map[string]string `json:"Annotations"`
 	// Container stop signal
 	StopSignal string `json:"StopSignal"`
+	// Configured startup healthcheck for the container
+	StartupHealthCheck *StartupHealthCheck `json:"StartupHealthCheck,omitempty"`
 	// Configured healthcheck for the container
 	Healthcheck *manifest.Schema2HealthConfig `json:"Healthcheck,omitempty"`
 	// HealthcheckOnFailureAction defines an action to take once the container turns unhealthy.
@@ -97,6 +100,8 @@ type InspectContainerConfig struct {
 	SdNotifyMode string `json:"sdNotifyMode,omitempty"`
 	// SdNotifySocket is the NOTIFY_SOCKET in use by/configured for the container.
 	SdNotifySocket string `json:"sdNotifySocket,omitempty"`
+	// ExposedPorts includes ports the container has exposed.
+	ExposedPorts map[string]struct{} `json:"ExposedPorts,omitempty"`
 
 	// V4PodmanCompatMarshal indicates that the json marshaller should
 	// use the old v4 inspect format to keep API compatibility.
@@ -107,8 +112,8 @@ type InspectContainerConfig struct {
 func (insp *InspectContainerConfig) UnmarshalJSON(data []byte) error {
 	type Alias InspectContainerConfig
 	aux := &struct {
-		Entrypoint interface{} `json:"Entrypoint"`
-		StopSignal interface{} `json:"StopSignal"`
+		Entrypoint any `json:"Entrypoint"`
+		StopSignal any `json:"StopSignal"`
 		*Alias
 	}{
 		Alias: (*Alias)(insp),
@@ -122,7 +127,7 @@ func (insp *InspectContainerConfig) UnmarshalJSON(data []byte) error {
 		insp.Entrypoint = strings.Split(entrypoint, " ")
 	case []string:
 		insp.Entrypoint = entrypoint
-	case []interface{}:
+	case []any:
 		insp.Entrypoint = []string{}
 		for _, entry := range entrypoint {
 			if str, ok := entry.(string); ok {
@@ -149,11 +154,16 @@ func (insp *InspectContainerConfig) UnmarshalJSON(data []byte) error {
 }
 
 func (insp *InspectContainerConfig) MarshalJSON() ([]byte, error) {
+	buf := bytes.Buffer{}
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+
 	// the alias is needed otherwise MarshalJSON will
 	type Alias InspectContainerConfig
 	conf := (*Alias)(insp)
 	if !insp.V4PodmanCompatMarshal {
-		return json.Marshal(conf)
+		err := enc.Encode(conf)
+		return buf.Bytes(), err
 	}
 
 	type v4InspectContainerConfig struct {
@@ -167,7 +177,8 @@ func (insp *InspectContainerConfig) MarshalJSON() ([]byte, error) {
 		StopSignal: uint(stopSignal),
 		Alias:      conf,
 	}
-	return json.Marshal(newConf)
+	err := enc.Encode(newConf)
+	return buf.Bytes(), err
 }
 
 // InspectRestartPolicy holds information about the container's restart policy.
@@ -254,6 +265,12 @@ type InspectHostPort struct {
 	HostPort string `json:"HostPort"`
 }
 
+// HostIp allows Docker-compatible {{.HostIp}} access in Go templates.
+// See https://github.com/containers/podman/issues/29164
+func (hp InspectHostPort) HostIp() string {
+	return hp.HostIP
+}
+
 // InspectMount provides a record of a single mount in a container. It contains
 // fields for both named and normal volumes. Only user-specified volumes will be
 // included, and tmpfs volumes are not included even if the user specified them.
@@ -281,6 +298,9 @@ type InspectMount struct {
 	// Mount propagation for the mount. Can be empty if not specified, but
 	// is always printed - no omitempty.
 	Propagation string `json:"Propagation"`
+	// SubPath object from the volume. Specified as a path within
+	// the source volume to be mounted at the Destination.
+	SubPath string `json:"SubPath,omitempty"`
 }
 
 // InspectContainerState provides a detailed record of a container's current
@@ -305,8 +325,8 @@ type InspectContainerState struct {
 	Health         *HealthCheckResults `json:"Health,omitempty"`
 	Checkpointed   bool                `json:"Checkpointed,omitempty"`
 	CgroupPath     string              `json:"CgroupPath,omitempty"`
-	CheckpointedAt time.Time           `json:"CheckpointedAt,omitempty"`
-	RestoredAt     time.Time           `json:"RestoredAt,omitempty"`
+	CheckpointedAt time.Time           `json:"CheckpointedAt"`
+	RestoredAt     time.Time           `json:"RestoredAt"`
 	CheckpointLog  string              `json:"CheckpointLog,omitempty"`
 	CheckpointPath string              `json:"CheckpointPath,omitempty"`
 	RestoreLog     string              `json:"RestoreLog,omitempty"`
@@ -349,8 +369,6 @@ type HealthCheckLog struct {
 // as possible from the spec and container config.
 // Some things cannot be inferred. These will be populated by spec annotations
 // (if available).
-//
-//nolint:revive,stylecheck // Field names are fixed for compatibility and cannot be changed.
 type InspectContainerHostConfig struct {
 	// Binds contains an array of user-added mounts.
 	// Both volume mounts and named volumes are included.
@@ -379,8 +397,8 @@ type InspectContainerHostConfig struct {
 	// NetworkMode is the configuration of the container's network
 	// namespace.
 	// Populated as follows:
-	// default - A network namespace is being created and configured via CNI
-	// none - A network namespace is being created, not configured via CNI
+	// default - A network namespace is being created and configured
+	// none - A network namespace is being created, not configured
 	// host - No network namespace created
 	// container:<id> - Using another container's network namespace
 	// ns:<path> - A path to a network namespace has been specified
@@ -436,6 +454,8 @@ type InspectContainerHostConfig struct {
 	// ExtraHosts contains hosts that will be added to the container's
 	// /etc/hosts.
 	ExtraHosts []string `json:"ExtraHosts"`
+	// HostsFile is the base file to create the `/etc/hosts` file inside the container.
+	HostsFile string `json:"HostsFile"`
 	// GroupAdd contains groups that the user inside the container will be
 	// added to.
 	GroupAdd []string `json:"GroupAdd"`
@@ -636,8 +656,8 @@ type InspectContainerHostConfig struct {
 	// MemorySwappiness is the willingness of the kernel to page container
 	// memory to swap. It is an integer from 0 to 100, with low numbers
 	// being more likely to be put into swap.
-	// -1, the default, will not set swappiness and use the system defaults.
-	MemorySwappiness int64 `json:"MemorySwappiness"`
+	// nil means swappiness is unset and the system default is used.
+	MemorySwappiness *int64 `json:"MemorySwappiness"`
 	// OomKillDisable indicates whether the kernel OOM killer is disabled
 	// for the container.
 	OomKillDisable bool `json:"OomKillDisable"`
@@ -696,8 +716,8 @@ type InspectBasicNetworkConfig struct {
 	// MacAddress is the MAC address for the interface in this network.
 	MacAddress string `json:"MacAddress"`
 	// AdditionalMacAddresses is a set of additional MAC Addresses beyond
-	// the first. CNI may configure more than one interface for a single
-	// network, which can cause this.
+	// the first. The network backend may configure more than one interface
+	// for a single network, which can cause this.
 	AdditionalMacAddresses []string `json:"AdditionalMACAddresses,omitempty"`
 }
 
@@ -719,8 +739,11 @@ type InspectAdditionalNetwork struct {
 	// Links is presently unused and maintained exclusively for
 	// compatibility.
 	Links []string `json:"Links"`
-	// Aliases are any network aliases the container has in this network.
+	// Aliases are user-provided network aliases the container has in this network.
 	Aliases []string `json:"Aliases,omitempty"`
+	// DNSNames contains the complete list of DNS names that resolve to this
+	// container, including the container name, user aliases, short ID, and hostname.
+	DNSNames []string `json:"DNSNames,omitempty"`
 }
 
 // InspectNetworkSettings holds information about the network settings of the
@@ -789,6 +812,8 @@ type InspectContainerData struct {
 	LockNumber              uint32                      `json:"lockNumber"`
 	Config                  *InspectContainerConfig     `json:"Config"`
 	HostConfig              *InspectContainerHostConfig `json:"HostConfig"`
+	UseImageHosts           bool                        `json:"UseImageHosts"`
+	UseImageHostname        bool                        `json:"UseImageHostname"`
 }
 
 // InspectExecSession contains information about a given exec session.
@@ -845,6 +870,8 @@ type InspectExecProcess struct {
 }
 
 // DriverData handles the data for a storage driver
+//
+// swagger:model LibpodDriverData
 type DriverData struct {
 	Name string            `json:"Name"`
 	Data map[string]string `json:"Data"`

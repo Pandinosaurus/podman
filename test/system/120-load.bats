@@ -66,7 +66,7 @@ verify_iid_and_name() {
     # We can't use run_podman because that uses the BATS 'run' function
     # which redirects stdout and stderr. Here we need to guarantee
     # that podman's stdout is a pipe, not any other form of redirection
-    $PODMAN save --format oci-archive $fqin | cat >$archive
+    "${PODMAN_CMD[@]}" save --format oci-archive $fqin | cat >$archive
     assert "$?" -eq 0 "Command failed: podman save ... | cat"
 
     # Make sure we can reload it
@@ -81,13 +81,16 @@ verify_iid_and_name() {
     run_podman rmi $fqin
 }
 
-@test "podman image scp transfer" {
+
+@test "podman image scp --format invalid" {
     skip_if_remote "only applicable under local podman"
 
-    # See https://github.com/containers/podman/pull/21300 for details
-    if [[ "$CI_DESIRED_DATABASE" = "boltdb" ]]; then
-        skip "impossible due to pitfalls in our SSH implementation"
-    fi
+    run_podman 125 image scp --format invalid-format $IMAGE somehost::
+    assert "$output" =~ "Error:.*invalid-format.*is not a valid value" "invalid --format is rejected"
+}
+
+@test "podman image scp transfer" {
+    skip_if_remote "only applicable under local podman"
 
     # FIXME: Broken on debian SID; still broken 2024-09-11
     # See https://github.com/containers/podman/pull/23020#issuecomment-2179284640
@@ -128,8 +131,9 @@ verify_iid_and_name() {
     run_podman image scp $newname ${notme}@localhost::
     is "$output" "Copying blob .*Copying config.*Writing manifest"
 
-    # confirm that image was copied. FIXME: also try $PODMAN image inspect?
-    _sudo $PODMAN image exists $newname
+    # Confirm image was copied and manifest format is preserved (OCI).
+    run _sudo "${PODMAN_CMD[@]}" image inspect --format '{{.ManifestType}}' $newname
+    assert "$output" == "application/vnd.docker.distribution.manifest.v2+json" "destination image has Docker manifest type (default) after transfer"
 
     # Copy it back, this time using -q
     run_podman untag $IMAGE $newname
@@ -150,27 +154,26 @@ verify_iid_and_name() {
     assert "$output" =~ "$src_digest" "Digest of re-fetched image is in list of original image digests"
 
     # remove root img for transfer back with another name
-    _sudo $PODMAN image rm $newname
+    _sudo "${PODMAN_CMD[@]}" image rm $newname
 
     # get foobar's ID, for an ID transfer test
     run_podman image inspect --format '{{.ID}}' foobar:123
-    run_podman image scp $output ${notme}@localhost::foobartwo
+    run_podman image scp --format oci-archive $output ${notme}@localhost::foobartwo
 
-    _sudo $PODMAN image exists foobartwo
+    run _sudo "${PODMAN_CMD[@]}" image inspect --format '{{.ManifestType}}' foobartwo
+    assert "$output" == "application/vnd.oci.image.manifest.v1+json" "destination image has OCI manifest type"
 
     # Clean up
-    _sudo $PODMAN image rm foobartwo
+    _sudo "${PODMAN_CMD[@]}" image rm foobartwo
     run_podman untag $IMAGE $newname
 
-    # Negative test for nonexistent image.
-    # FIXME: error message is 2 lines, the 2nd being "exit status 125".
-    # FIXME: is that fixable, or do we have to live with it?
+    # Negative test for nonexistent image (output may include exit status on second line).
     nope="nope.nope/nonesuch:notag"
     run_podman 125 image scp ${notme}@localhost::$nope
-    is "$output" "Error: $nope: image not known.*" "Pulling nonexistent image"
+    assert "$output" =~ "Error:.*$nope.*image not known" "Pulling nonexistent image"
 
     run_podman 125 image scp $nope ${notme}@localhost::
-    is "$output" "Error: $nope: image not known.*" "Pushing nonexistent image"
+    assert "$output" =~ "Error:.*$nope.*image not known" "Pushing nonexistent image"
 
     run_podman rmi foobar:123
 }
@@ -220,23 +223,33 @@ verify_iid_and_name() {
 }
 
 @test "podman load - from URL" {
-    get_iid_and_name
-    run_podman save $img_name -o $archive
-    run_podman rmi $iid
+    # Use a different image, not $IMAGE, as we need that for the webserver container.
+    img1=${PODMAN_NONLOCAL_IMAGE_FQN}
+    _prefetch $img1
+
+    run_podman images -a --format '{{.ID}} {{.Repository}}:{{.Tag}}' $img1
+    images_output="$output"
+
+    archive=$PODMAN_TMPDIR/myimage-$(safename).tar
+    run_podman save $img1 -o $archive
+    run_podman rmi $img1
 
     HOST_PORT=$(random_free_port)
     SERVER=http://127.0.0.1:$HOST_PORT
 
     # Bind-mount the archive to a container running httpd
+    local cname="cweb=$(safename)"
     run_podman run -d --name myweb -p "$HOST_PORT:80" \
             -v $archive:/var/www/image.tar:Z \
             -w /var/www \
             $IMAGE /bin/busybox-extras httpd -f -p 80
 
     run_podman load -i $SERVER/image.tar
-    verify_iid_and_name $img_name
 
-    run_podman rm -f -t0 myweb
+    run_podman images -a --format '{{.ID}} {{.Repository}}:{{.Tag}}' $img1
+    assert "$output" == "$images_output"
+
+    run_podman rm -f -t0 $cname
 }
 
 @test "podman load - redirect corrupt payload" {
@@ -283,7 +296,7 @@ verify_iid_and_name() {
     # We can't use run_podman because that uses the BATS 'run' function
     # which redirects stdout and stderr. Here we need to guarantee
     # that podman's stdout is a pipe, not any other form of redirection
-    $PODMAN save -m $img1 $img2 | cat >$archive
+    "${PODMAN_CMD[@]}" save -m $img1 $img2 | cat >$archive
     assert "$?" -eq 0 "Command failed: podman save ... | cat"
 
     run_podman rmi -f $img1 $img2

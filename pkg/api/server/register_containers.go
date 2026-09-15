@@ -1,13 +1,13 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package server
 
 import (
 	"net/http"
 
-	"github.com/containers/podman/v5/pkg/api/handlers/compat"
-	"github.com/containers/podman/v5/pkg/api/handlers/libpod"
 	"github.com/gorilla/mux"
+	"go.podman.io/podman/v6/pkg/api/handlers/compat"
+	"go.podman.io/podman/v6/pkg/api/handlers/libpod"
 )
 
 func (s *APIServer) registerContainersHandlers(r *mux.Router) error {
@@ -75,9 +75,10 @@ func (s *APIServer) registerContainersHandlers(r *mux.Router) error {
 	//    description: |
 	//        A JSON encoded value of the filters (a `map[string][]string`) to process on the containers list. Available filters:
 	//        - `ancestor`=(`<image-name>[:<tag>]`, `<image id>`, or `<image@digest>`)
+	//        - `annotation`=(`key` or `"key=value"`) of a container annotation
 	//        - `before`=(`<container id>` or `<container name>`)
-	//        - `expose`=(`<port>[/<proto>]` or `<startport-endport>/[<proto>]`)
 	//        - `exited=<int>` containers with exit code of `<int>`
+	//        - `expose`=(`<port>[/<proto>]` or `<startport-endport>/[<proto>]`)
 	//        - `health`=(`starting`, `healthy`, `unhealthy` or `none`)
 	//        - `id=<ID>` a container's ID
 	//        - `is-task`=(`true` or `false`)
@@ -112,8 +113,9 @@ func (s *APIServer) registerContainersHandlers(r *mux.Router) error {
 	//    type: string
 	//    description:  |
 	//      Filters to process on the prune list, encoded as JSON (a `map[string][]string`).  Available filters:
-	//       - `until=<timestamp>` Prune containers created before this timestamp. The `<timestamp>` can be Unix timestamps, date formatted timestamps, or Go duration strings (e.g. `10m`, `1h30m`) computed relative to the daemon machine’s time.
+	//       - `annotation` (`annotation=<key>`, `annotation=<key>=<value>`, `annotation!=<key>`, or `annotation!=<key>=<value>`) Prune containers with (or without, in case `annotation!=...` is used) the specified annotations.
 	//       - `label` (`label=<key>`, `label=<key>=<value>`, `label!=<key>`, or `label!=<key>=<value>`) Prune containers with (or without, in case `label!=...` is used) the specified labels.
+	//       - `until=<timestamp>` Prune containers created before this timestamp. The `<timestamp>` can be Unix timestamps, date formatted timestamps, or Go duration strings (e.g. `10m`, `1h30m`) computed relative to the daemon machine’s time.
 	// produces:
 	// - application/json
 	// responses:
@@ -149,6 +151,25 @@ func (s *APIServer) registerContainersHandlers(r *mux.Router) error {
 	//    name: link
 	//    type: boolean
 	//    description: not supported
+	//  - in: query
+	//    name: ignore
+	//    type: boolean
+	//    default: false
+	//    description: Ignore if a specified container does not exist.
+	//  - in: query
+	//    name: depend
+	//    type: boolean
+	//    default: false
+	//    description: Remove container dependencies.
+	//  - in: query
+	//    name: timeout
+	//    type: integer
+	//    description: Number of seconds to wait before forcibly stopping the container.
+	//  - in: query
+	//    name: volumes
+	//    type: boolean
+	//    default: false
+	//    description: Remove anonymous volumes associated with the container.
 	// produces:
 	// - application/json
 	// responses:
@@ -396,6 +417,8 @@ func (s *APIServer) registerContainersHandlers(r *mux.Router) error {
 	//       type: object
 	//   404:
 	//     $ref: "#/responses/containerNotFound"
+	//   409:
+	//     $ref: "#/responses/conflictError"
 	//   500:
 	//     $ref: "#/responses/internalError"
 	r.HandleFunc(VersionedPath("/containers/{name}/stats"), s.StreamBufferedAPIHandler(compat.StatsContainer)).Methods(http.MethodGet)
@@ -417,6 +440,15 @@ func (s *APIServer) registerContainersHandlers(r *mux.Router) error {
 	//    name: t
 	//    type: integer
 	//    description: number of seconds to wait before killing container
+	//  - in: query
+	//    name: timeout
+	//    type: integer
+	//    description: Number of seconds to wait before killing the container (libpod alias for `t`).
+	//  - in: query
+	//    name: ignore
+	//    type: boolean
+	//    default: false
+	//    description: Do not return an error if the container is already stopped.
 	// produces:
 	// - application/json
 	// responses:
@@ -488,7 +520,9 @@ func (s *APIServer) registerContainersHandlers(r *mux.Router) error {
 	// tags:
 	//   - containers (compat)
 	// summary: Wait on a container
-	// description: Block until a container stops or given condition is met.
+	// description: |
+	//   Block until a container stops or given condition is met.
+	//   This is a Docker-compatible endpoint.
 	// parameters:
 	//  - in: path
 	//    name: name
@@ -498,19 +532,16 @@ func (s *APIServer) registerContainersHandlers(r *mux.Router) error {
 	//  - in: query
 	//    name: condition
 	//    type: string
+	//    default: not-running
 	//    description: |
-	//      wait until container is to a given condition. default is stopped. valid conditions are:
-	//        - configured
-	//        - created
-	//        - exited
-	//        - paused
-	//        - running
-	//        - stopped
-	//  - in: query
-	//    name: interval
-	//    type: string
-	//    default: "250ms"
-	//    description: Time Interval to wait before polling for completion.
+	//      Wait condition.  Valid values are:
+	//        - not-running (default) - return when the container is not running
+	//          (stopped, exited, or was never started).
+	//        - next-exit - wait for the next time the container stops.
+	//          If the container is running, block until it exits.
+	//          If the container is already stopped, block until
+	//          the next start-and-exit cycle.
+	//        - removed - wait until the container is removed.
 	// produces:
 	// - application/json
 	// responses:
@@ -681,7 +712,7 @@ func (s *APIServer) registerContainersHandlers(r *mux.Router) error {
 	// ---
 	// tags:
 	//   - containers (compat)
-	// summary: Update configuration of an existing container
+	// summary: Update configuration of an existing container, allowing changes to resource limits
 	// description: Change configuration settings for an existing container without requiring recreation.
 	// parameters:
 	//  - in: path
@@ -754,6 +785,15 @@ func (s *APIServer) registerContainersHandlers(r *mux.Router) error {
 	//    description: Return this number of most recently created containers, including non-running ones.
 	//    type: integer
 	//  - in: query
+	//    name: last
+	//    description: Alias for `limit`. Return this number of most recently created containers.
+	//    type: integer
+	//  - in: query
+	//    name: external
+	//    type: boolean
+	//    default: false
+	//    description: Return containers created by external tools that use container storage.
+	//  - in: query
 	//    name: namespace
 	//    type: boolean
 	//    description: Include namespace information
@@ -779,9 +819,10 @@ func (s *APIServer) registerContainersHandlers(r *mux.Router) error {
 	//    description: |
 	//        A JSON encoded value of the filters (a `map[string][]string`) to process on the containers list. Available filters:
 	//        - `ancestor`=(`<image-name>[:<tag>]`, `<image id>`, or `<image@digest>`)
+	//        - `annotation`=(`key` or `"key=value"`) of a container annotation
 	//        - `before`=(`<container id>` or `<container name>`)
-	//        - `expose`=(`<port>[/<proto>]` or `<startport-endport>/[<proto>]`)
 	//        - `exited=<int>` containers with exit code of `<int>`
+	//        - `expose`=(`<port>[/<proto>]` or `<startport-endport>/[<proto>]`)
 	//        - `health`=(`starting`, `healthy`, `unhealthy` or `none`)
 	//        - `id=<ID>` a container's ID
 	//        - `is-task`=(`true` or `false`)
@@ -815,8 +856,9 @@ func (s *APIServer) registerContainersHandlers(r *mux.Router) error {
 	//    type: string
 	//    description:  |
 	//      Filters to process on the prune list, encoded as JSON (a `map[string][]string`).  Available filters:
-	//       - `until=<timestamp>` Prune containers created before this timestamp. The `<timestamp>` can be Unix timestamps, date formatted timestamps, or Go duration strings (e.g. `10m`, `1h30m`) computed relative to the daemon machine’s time.
+	//       - `annotation` (`annotation=<key>`, `annotation=<key>=<value>`, `annotation!=<key>`, or `annotation!=<key>=<value>`) Prune containers with (or without, in case `annotation!=...` is used) the specified annotations.
 	//       - `label` (`label=<key>`, `label=<key>=<value>`, `label!=<key>`, or `label!=<key>=<value>`) Prune containers with (or without, in case `label!=...` is used) the specified labels.
+	//       - `until=<timestamp>` Prune containers created before this timestamp. The `<timestamp>` can be Unix timestamps, date formatted timestamps, or Go duration strings (e.g. `10m`, `1h30m`) computed relative to the daemon machine’s time.
 	// produces:
 	// - application/json
 	// responses:
@@ -959,6 +1001,11 @@ func (s *APIServer) registerContainersHandlers(r *mux.Router) error {
 	//    type: string
 	//    required: true
 	//    description: the name or ID of the container
+	//  - in: query
+	//    name: external
+	//    type: boolean
+	//    default: false
+	//    description: Include external containers that are not managed by Podman.
 	// produces:
 	// - application/json
 	// responses:
@@ -1086,7 +1133,10 @@ func (s *APIServer) registerContainersHandlers(r *mux.Router) error {
 	//  - in: query
 	//    name: t
 	//    type: integer
-	//    default: 10
+	//    description: number of seconds to wait before killing container (Docker compatibility)
+	//  - in: query
+	//    name: timeout
+	//    type: integer
 	//    description: number of seconds to wait before killing container
 	// produces:
 	// - application/json
@@ -1178,6 +1228,11 @@ func (s *APIServer) registerContainersHandlers(r *mux.Router) error {
 	//    type: integer
 	//    default: 5
 	//    description: Time in seconds between stats reports
+	//  - in: query
+	//    name: all
+	//    type: boolean
+	//    default: false
+	//    description: Provide statistics for all running containers
 	// produces:
 	// - application/json
 	// responses:
@@ -1338,7 +1393,7 @@ func (s *APIServer) registerContainersHandlers(r *mux.Router) error {
 	//    default: 10
 	//    description: number of seconds to wait before killing container
 	//  - in: query
-	//    name: Ignore
+	//    name: ignore
 	//    type: boolean
 	//    default: false
 	//    description: do not return error if container is already stopped
@@ -1518,6 +1573,11 @@ func (s *APIServer) registerContainersHandlers(r *mux.Router) error {
 	//    type: integer
 	//    required: false
 	//    description: Width to set for the terminal, in characters
+	//  - in: query
+	//    name: running
+	//    type: boolean
+	//    required: false
+	//    description: Ignore containers not running errors
 	// produces:
 	// - application/json
 	// responses:
@@ -1603,6 +1663,10 @@ func (s *APIServer) registerContainersHandlers(r *mux.Router) error {
 	//    name: printStats
 	//    type: boolean
 	//    description: add checkpoint statistics to the returned CheckpointReport
+	//  - in: query
+	//    name: createImage
+	//    type: string
+	//    description: create a checkpoint image with the specified name
 	// produces:
 	// - application/json
 	// responses:
@@ -1636,7 +1700,11 @@ func (s *APIServer) registerContainersHandlers(r *mux.Router) error {
 	//  - in: query
 	//    name: tcpEstablished
 	//    type: boolean
-	//    description: checkpoint a container with established TCP connections
+	//    description: restore a container with established TCP connections
+	//  - in: query
+	//    name: tcpClose
+	//    type: boolean
+	//    description: restore a container but close the TCP connections
 	//  - in: query
 	//    name: import
 	//    type: boolean
@@ -1680,10 +1748,8 @@ func (s *APIServer) registerContainersHandlers(r *mux.Router) error {
 	//     $ref: "#/responses/internalError"
 	r.HandleFunc(VersionedPath("/libpod/containers/{name}/restore"), s.APIHandler(libpod.Restore)).Methods(http.MethodPost)
 	// swagger:operation GET /containers/{name}/changes compat ContainerChanges
-	// swagger:operation GET /libpod/containers/{name}/changes libpod ContainerChangesLibpod
 	// ---
 	// tags:
-	//   - containers
 	//   - containers (compat)
 	// summary: Report on changes to container's filesystem; adds, deletes or modifications.
 	// description: |
@@ -1720,6 +1786,43 @@ func (s *APIServer) registerContainersHandlers(r *mux.Router) error {
 	//     $ref: "#/responses/internalError"
 	r.HandleFunc(VersionedPath("/containers/{name}/changes"), s.APIHandler(compat.Changes)).Methods(http.MethodGet)
 	r.HandleFunc("/containers/{name}/changes", s.APIHandler(compat.Changes)).Methods(http.MethodGet)
+	// swagger:operation GET /libpod/containers/{name}/changes libpod ContainerChangesLibpod
+	// ---
+	// tags:
+	//   - containers
+	// summary: Report on changes to container's filesystem; adds, deletes or modifications.
+	// description: |
+	//   Returns which files in a container's filesystem have been added, deleted, or modified. The Kind of modification can be one of:
+	//
+	//   0: Modified
+	//   1: Added
+	//   2: Deleted
+	// parameters:
+	//  - in: path
+	//    name: name
+	//    type: string
+	//    required: true
+	//    description: the name or id of the container
+	//  - in: query
+	//    name: parent
+	//    type: string
+	//    description: specify a second layer which is used to compare against it instead of the parent layer
+	//  - in: query
+	//    name: diffType
+	//    type: string
+	//    enum: [all, container, image]
+	//    description: select what you want to match, default is all
+	// responses:
+	//   200:
+	//     description: Array of Changes
+	//     content:
+	//       application/json:
+	//       schema:
+	//         $ref: "#/responses/Changes"
+	//   404:
+	//     $ref: "#/responses/containerNotFound"
+	//   500:
+	//     $ref: "#/responses/internalError"
 	r.HandleFunc(VersionedPath("/libpod/containers/{name}/changes"), s.APIHandler(compat.Changes)).Methods(http.MethodGet)
 	// swagger:operation POST /libpod/containers/{name}/init libpod ContainerInitLibpod
 	// ---
@@ -1778,8 +1881,8 @@ func (s *APIServer) registerContainersHandlers(r *mux.Router) error {
 	// ---
 	// tags:
 	//   - containers
-	// summary: Update an existing containers cgroup configuration
-	// description: Update an existing containers cgroup configuration.
+	// summary: Updates the configuration of an existing container, allowing changes to resource limits and healthchecks
+	// description: Updates the configuration of an existing container, allowing changes to resource limits and healthchecks.
 	// parameters:
 	//  - in: path
 	//    name: name
@@ -1804,9 +1907,8 @@ func (s *APIServer) registerContainersHandlers(r *mux.Router) error {
 	// produces:
 	// - application/json
 	// responses:
-	//   responses:
-	//     201:
-	//       $ref: "#/responses/containerUpdateResponse"
+	//   201:
+	//     $ref: "#/responses/containerUpdateResponse"
 	//   400:
 	//     $ref: "#/responses/badParamError"
 	//   404:

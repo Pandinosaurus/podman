@@ -8,12 +8,12 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/api/handlers"
-	"github.com/containers/podman/v5/pkg/bindings"
-	dockerAPI "github.com/docker/docker/api/types"
 	jsoniter "github.com/json-iterator/go"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/api/handlers"
+	"go.podman.io/podman/v6/pkg/bindings"
+	"go.podman.io/podman/v6/pkg/domain/entities/types"
 )
 
 var json = jsoniter.ConfigCompatibleWithStandardLibrary
@@ -43,7 +43,7 @@ func ExecCreate(ctx context.Context, nameOrID string, config *handlers.ExecCreat
 	}
 	defer resp.Body.Close()
 
-	respStruct := new(dockerAPI.IDResponse)
+	respStruct := new(types.IDResponse)
 	if err := resp.Process(respStruct); err != nil {
 		return "", err
 	}

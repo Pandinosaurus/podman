@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/validate"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/validate"
 )
 
 var (
@@ -25,8 +25,8 @@ var (
 		Args:               cobra.ExactArgs(1),
 		ValidArgsFunction:  common.AutoCompleteFarms,
 		Example: `podman farm update --add con1 farm1
-	podman farm update --remove con2 farm2
-	podman farm update --default farm3`,
+podman farm update --remove con2 farm2
+podman farm update --default farm3`,
 	}
 
 	// Temporary struct to hold cli values.

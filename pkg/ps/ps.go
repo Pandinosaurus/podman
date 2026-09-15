@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package ps
 
@@ -7,36 +7,47 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	libnetworkTypes "github.com/containers/common/libnetwork/types"
-	"github.com/containers/podman/v5/libpod"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/domain/filters"
-	psdefine "github.com/containers/podman/v5/pkg/ps/define"
-	"github.com/containers/storage"
-	"github.com/containers/storage/types"
 	"github.com/sirupsen/logrus"
+	libnetworkTypes "go.podman.io/common/libnetwork/types"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/domain/filters"
+	psdefine "go.podman.io/podman/v6/pkg/ps/define"
+	"go.podman.io/storage"
+	"go.podman.io/storage/types"
 )
 
+// ExternalContainerFilter is a function to determine whether a container list is included
+// in command output. Container lists to be outputted are tested using the function.
+// A true return will include the container list, a false return will exclude it.
+type ExternalContainerFilter func(*entities.ListContainer) bool
+
 func GetContainerLists(runtime *libpod.Runtime, options entities.ContainerListOptions) ([]entities.ListContainer, error) {
-	var (
-		pss = []entities.ListContainer{}
-	)
+	pss := []entities.ListContainer{}
 	filterFuncs := make([]libpod.ContainerFilter, 0, len(options.Filters))
+	filterExtFuncs := make([]entities.ExternalContainerFilter, 0, len(options.Filters))
 	all := options.All || options.Last > 0
 	if len(options.Filters) > 0 {
 		for k, v := range options.Filters {
 			generatedFunc, err := filters.GenerateContainerFilterFuncs(k, v, runtime)
-			if err != nil {
+			if err != nil && !options.External {
 				return nil, err
 			}
 			filterFuncs = append(filterFuncs, generatedFunc)
+
+			if options.External {
+				generatedExtFunc, err := filters.GenerateExternalContainerFilterFuncs(k, v, runtime)
+				if err != nil {
+					return nil, err
+				}
+				filterExtFuncs = append(filterExtFuncs, generatedExtFunc)
+			}
 		}
 	}
 
@@ -87,7 +98,7 @@ func GetContainerLists(runtime *libpod.Runtime, options entities.ContainerListOp
 	}
 
 	if options.External {
-		listCon, err := GetExternalContainerLists(runtime)
+		listCon, err := GetExternalContainerLists(runtime, filterExtFuncs...)
 		if err != nil {
 			return nil, err
 		}
@@ -107,10 +118,8 @@ func GetContainerLists(runtime *libpod.Runtime, options entities.ContainerListOp
 }
 
 // GetExternalContainerLists returns list of external containers for e.g. created by buildah
-func GetExternalContainerLists(runtime *libpod.Runtime) ([]entities.ListContainer, error) {
-	var (
-		pss = []entities.ListContainer{}
-	)
+func GetExternalContainerLists(runtime *libpod.Runtime, filterExtFuncs ...entities.ExternalContainerFilter) ([]entities.ListContainer, error) {
+	pss := []*entities.ListContainer{}
 
 	externCons, err := runtime.StorageContainers()
 	if err != nil {
@@ -128,10 +137,31 @@ func GetExternalContainerLists(runtime *libpod.Runtime) ([]entities.ListContaine
 		case err != nil:
 			return nil, err
 		default:
-			pss = append(pss, listCon)
+			pss = append(pss, &listCon)
 		}
 	}
-	return pss, nil
+
+	filteredPss := applyExternalContainersFilters(pss, filterExtFuncs...)
+
+	return filteredPss, nil
+}
+
+// Apply container filters on bunch of external container lists
+func applyExternalContainersFilters(containersList []*entities.ListContainer, filters ...entities.ExternalContainerFilter) []entities.ListContainer {
+	ctrsFiltered := make([]entities.ListContainer, 0, len(containersList))
+
+	for _, ctr := range containersList {
+		include := true
+		for _, filter := range filters {
+			include = include && filter(ctr)
+		}
+
+		if include {
+			ctrsFiltered = append(ctrsFiltered, *ctr)
+		}
+	}
+
+	return ctrsFiltered
 }
 
 // ListContainerBatch is used in ps to reduce performance hits by "batching"
@@ -198,7 +228,11 @@ func ListContainerBatch(rt *libpod.Runtime, ctr *libpod.Container, opts entities
 
 		healthStatus, err = c.HealthCheckStatus()
 		if err != nil {
-			return err
+			// Do not treat a corrupted healthcheck log as a hard error.
+			if !errors.Is(err, define.ErrHealthCheckLogCorrupted) {
+				return err
+			}
+			logrus.Warnf("Container %s health check log is corrupted: %v", c.ID(), err)
 		}
 
 		restartCount, err = c.RestartCount()
@@ -341,9 +375,12 @@ func getNamespaceInfo(path string) (string, error) {
 
 // getStrFromSquareBrackets gets the string inside [] from a string.
 func getStrFromSquareBrackets(cmd string) string {
-	reg := regexp.MustCompile(`.*\[|\].*`)
-	arr := strings.Split(reg.ReplaceAllLiteralString(cmd, ""), ",")
-	return strings.Join(arr, ",")
+	start := strings.IndexByte(cmd, '[')
+	end := strings.IndexByte(cmd, ']')
+	if start != -1 && end != -1 && end > start {
+		return cmd[start+1 : end]
+	}
+	return cmd
 }
 
 // SortContainers helps us set-up ability to sort by createTime

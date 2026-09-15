@@ -16,12 +16,9 @@ Each setup is supported with an example.
 One of the guiding factors on networking for containers with Podman is going to
 be whether or not the container is run by a root user or not. This is because
 unprivileged users cannot create networking interfaces on the host. Therefore,
-for rootless containers, the default network mode is slirp4netns. Because of the
-limited privileges, slirp4netns lacks some of the features of networking
-compared to rootful Podman's networking; for example, slirp4netns cannot give
-containers a routable IP address. The default networking mode for rootful
-containers on the other side is netavark, which allows a container to have a
-routable IP address.
+for rootless containers, the default network mode is pasta. The default
+networking mode for rootful containers is netavark, which allows a container
+to have a routable IP address.
 
 ## Firewalls
 
@@ -45,10 +42,9 @@ the container on an internal bridge network, which is then connected to the inte
 via Network Address Translation(NAT).  We also see users wanting to use `macvlan`
 for networking as well. The `macvlan` plugin forwards an entire network interface
 from the host into the container, allowing it access to the network the host is connected
-to. And finally, the default network configuration for rootless containers is slirp4netns.
-The slirp4netns network mode has limited capabilities but can be run on users without
-root privileges. It creates a tunnel from the host into the container to forward
-traffic.
+to. And finally, the default network configuration for rootless containers is pasta.
+The pasta network mode can be run on users without root privileges and provides
+user-mode networking for containers.
 
 ### Bridge
 
@@ -78,13 +74,19 @@ command. Containers can be joined to a network when they are created with the
 `--network` flag, or after they are created via the `podman network connect` and
 `podman network disconnect` commands.
 
-As mentioned earlier, slirp4netns is the default network configuration for rootless
-users.  But as of Podman version 4.0, rootless users can also use netavark.
+As mentioned earlier, pasta is the default network configuration for rootless
+users. Rootless users can also use netavark for bridge networking.
 The user experience of rootless netavark is very akin to a rootful netavark, except that
-there is no default network configuration provided.  You simply need to create a
-network, and the one will be created as a bridge network. If you would like to switch from
-CNI networking to netavark, you must issue the `podman system reset --force` command.
-This will delete all of your images, containers, and custom networks.
+there is no default network configuration provided. You simply need to create a
+network, and the one will be created as a bridge network.
+
+By default, rootless bridge networks use `rootlessport` for port forwarding, which
+is a userspace proxy that does not preserve client source IPs. To preserve source
+IPs, set `rootless_port_forwarder="pasta"` in the `[network]` section of
+`containers.conf`. This uses `pesto` to configure pasta's kernel-level forwarding,
+so containers see the real client IP address instead of the bridge gateway.
+This option is experimental and its behavior is subject to change.
+It requires a version of passt (`>= passt-0^20260507.g1afd4ed`) that ships the `pesto` binary.
 
 ```
 $ podman network create
@@ -122,13 +124,13 @@ outside the host as both rootful and rootless.  It will also show how an outside
 client can connect to the container.
 
 ```
-(rootful) $ sudo podman run -dt --name webserver -p 8080:80 quay.io/libpod/banner
+(rootful) $ sudo podman run -d --name webserver -p 8080:80 quay.io/libpod/banner
 00f3440c7576aae2d5b193c40513c29c7964e96bf797cf0cc352c2b68ccbe66a
 ```
 
 Now run the container.
 ```
-$ podman run -dt --name webserver --net podman1 -p 8081:80 quay.io/libpod/banner
+$ podman run -d --name webserver --network podman1 -p 8081:80 quay.io/libpod/banner
 269fd0d6b2c8ed60f2ca41d7beceec2471d72fb9a33aa8ca45b81dc9a0abbb12
 ```
 Note in the above run command, the container’s port 80 (where the Nginx server is
@@ -185,17 +187,10 @@ The next step is to ensure that the DHCP service is running. This handles
 the DHCP leases from the network. If DHCP is not needed, the `--subnet` option
 can be used to assign a static subnet in the `network create` command above.
 
-CNI and netavark both use their own DHCP service; therefore, you need to know
-what backend you are using. To see what you are using, run this command:
-```
-$ sudo podman info --format {{.Host.NetworkBackend}}
-```
-If this command does not work, you are using an older version prior to Podman
-v4.0 which means you are using CNI.
-If the netavark backend is used, at least Podman v4.5 with netavark v1.6 is
-required to use DHCP.
+Podman uses netavark for networking, which requires netavark v1.6 or later with Podman v4.5+
+to use DHCP.
 
-For netavark use:
+To enable DHCP with netavark:
 ```
 $ sudo systemctl enable --now netavark-dhcp-proxy.socket
 ```
@@ -204,19 +199,9 @@ Or if the system doesn't use systemd, start the daemon manually:
 $ /usr/libexec/podman/netavark dhcp-proxy --activity-timeout 0
 ```
 
-With CNI use:
-```
-$ sudo systemctl enable --now cni-dhcp.socket
-```
-Or if the system doesn't use systemd, start the daemon manually:
-```
-$ sudo /usr/libexec/cni/dhcp daemon
-```
-Note that depending on the distribution, the binary location may differ.
-
 Now run the container and be certain to attach it to the network we created earlier.
 ```
-$ sudo podman run -dt --name webserver --network webnetwork quay.io/libpod/banner
+$ sudo podman run -d --name webserver --network webnetwork quay.io/libpod/banner
 03d82083c434d7e937fc0b87c25401f46ab5050007df403bf988e25e52c5cc40
 [baude@localhost ~]$ sudo podman exec webserver ip address show eth0
 2: eth0@if3: <BROADCAST,MULTICAST,UP,LOWER_UP,M-DOWN> mtu 1500 qdisc noqueue state
@@ -239,24 +224,25 @@ managed by firewalld, no change to the firewall is needed.
 
 
 
-### Slirp4netns
+### Pasta
 
-Slirp4netns is the default network setup for rootless containers and pods.  It was
-invented because unprivileged users are not allowed to make network interfaces on
-the host.  Slirp4netns creates a TAP device in the container’s network namespace
-and connects to the usermode TCP/IP stack.  Consider the following illustration.
+Pasta is the default network setup for rootless containers and pods. It was
+designed to provide user-mode networking for unprivileged users who are not
+allowed to make network interfaces on the host. Pasta creates a TAP device in
+the container’s network namespace and provides a user-mode TCP/IP stack.
+Consider the following illustration.
 
-![slirp_network](podman_rootless_default.png)
+![pasta_network](podman_rootless_default.png)
 
 The unprivileged user on this laptop has created two containers: a DB container and
-a web container.  Both of these containers have the ability to access content on
-networks outside the laptop.  And outside clients can access the containers if the
-container is bound to a host port and the laptop firewall allows it.  Remember, unprivileged
+a web container. Both of these containers have the ability to access content on
+networks outside the laptop. And outside clients can access the containers if the
+container is bound to a host port and the laptop firewall allows it. Remember, unprivileged
 users must use ports 1024 through 65535 as lower ports require root privileges. (CAP_NET_BIND_SERVICE)
 Note: this can be adjusted using the `sysctl net.ipv4.ip_unprivileged_port_start`
 
-One of the drawbacks of slirp4netns is that the containers are completely isolated
-from each other.  Unlike the bridge approach, there is no virtual network.  For containers
+One of the drawbacks of pasta networking is that containers are isolated from each
+other by default. Unlike the bridge approach, there is no virtual network. For containers
 to communicate with each other, they can use the port mappings with the host system,
 or they can be put into a Pod where they share the same network namespace. See [Communicating
 between containers and pods](#Communicating-between-containers-and-pods) for more information.
@@ -270,7 +256,7 @@ network can communicate with the rootless web server.
 First, run the rootless web server and map port 80 from the container to a non-privileged
 port like 8080.
 ```
-$ podman run -dt --name webserver -p 8080:80 quay.io/libpod/banner
+$ podman run -d --name webserver -p 8080:80 quay.io/libpod/banner
 17ea33ccd7f55ff45766b3ec596b990a5f2ba66eb9159cb89748a85dc3cebfe0
 ```
 Because rootless containers cannot communicate with each other directly with TCP/IP
@@ -319,7 +305,7 @@ By definition, all containers in a Podman pod share the same network namespace. 
 fact means that they will have the same IP address, MAC addresses, and port mappings.
 You can conveniently communicate between containers in a pod by using localhost.
 
-![slirp_network](podman_pod.png)
+![pod_network](podman_pod.png)
 
 The above illustration describes a Pod on a bridged network.  As depicted, the Pod
 has two containers “inside” it: a DB and a Web container.  Because they share the

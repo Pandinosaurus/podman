@@ -5,12 +5,12 @@ import (
 	"os"
 	"os/exec"
 
-	buildahCLI "github.com/containers/buildah/pkg/cli"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/utils"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	buildahCLI "go.podman.io/buildah/pkg/cli"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/utils"
 )
 
 var (
@@ -24,8 +24,8 @@ var (
 		RunE:              build,
 		ValidArgsFunction: common.AutocompleteDefaultOneArg,
 		Example: `podman build .
-  podman build --creds=username:password -t imageName -f Containerfile.simple .
-  podman build --layers --force-rm --tag imageName .`,
+podman build --creds=username:password -t imageName -f Containerfile.simple .
+podman build --layers --force-rm --tag imageName .`,
 	}
 
 	imageBuildCmd = &cobra.Command{
@@ -36,8 +36,8 @@ var (
 		RunE:              buildCmd.RunE,
 		ValidArgsFunction: buildCmd.ValidArgsFunction,
 		Example: `podman image build .
-  podman image build --creds=username:password -t imageName -f Containerfile.simple .
-  podman image build --layers --force-rm --tag imageName .`,
+podman image build --creds=username:password -t imageName -f Containerfile.simple .
+podman image build --layers --force-rm --tag imageName .`,
 	}
 
 	buildxBuildCmd = &cobra.Command{
@@ -48,8 +48,8 @@ var (
 		RunE:              buildCmd.RunE,
 		ValidArgsFunction: buildCmd.ValidArgsFunction,
 		Example: `podman buildx build .
-  podman buildx build --creds=username:password -t imageName -f Containerfile.simple .
-  podman buildx build --layers --force-rm --tag imageName .`,
+podman buildx build --creds=username:password -t imageName -f Containerfile.simple .
+podman buildx build --layers --force-rm --tag imageName .`,
 	}
 
 	buildOpts = common.BuildFlagsWrapper{}
@@ -96,8 +96,7 @@ func build(cmd *cobra.Command, args []string) error {
 			}
 		}()
 	}
-	report, err := registry.ImageEngine().Build(registry.GetContext(), apiBuildOpts.ContainerFiles, *apiBuildOpts)
-
+	report, err := registry.ImageEngine().Build(registry.Context(), apiBuildOpts.ContainerFiles, *apiBuildOpts)
 	if err != nil {
 		exitCode := buildahCLI.ExecErrorCodeGeneric
 		if registry.IsRemote() {
@@ -119,11 +118,12 @@ func build(cmd *cobra.Command, args []string) error {
 	}
 
 	if cmd.Flag("iidfile").Changed {
-		f, err := os.Create(buildOpts.Iidfile)
-		if err != nil {
+		if err := os.WriteFile(buildOpts.Iidfile, []byte("sha256:"+report.ID), 0o644); err != nil {
 			return err
 		}
-		if _, err := f.WriteString("sha256:" + report.ID); err != nil {
+	}
+	if cmd.Flag("iidfile-raw").Changed {
+		if err := os.WriteFile(buildOpts.IidfileRaw, []byte(report.ID), 0o644); err != nil {
 			return err
 		}
 	}

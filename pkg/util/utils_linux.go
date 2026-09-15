@@ -10,18 +10,16 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/rootless"
 	"github.com/containers/psgo"
 	spec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/opencontainers/runtime-tools/generate"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/rootless"
 	"golang.org/x/sys/unix"
 )
 
-var (
-	errNotADevice = errors.New("not a device node")
-)
+var errNotADevice = errors.New("not a device node")
 
 // GetContainerPidInformationDescriptors returns a string slice of all supported
 // format descriptors of GetContainerPidInformation.
@@ -33,7 +31,8 @@ func GetContainerPidInformationDescriptors() ([]string, error) {
 // [major:minor] is the device's major and minor numbers formatted as, for
 // example, 2:0 and path is the path to the device node.
 // Symlinks to nodes are ignored.
-func FindDeviceNodes() (map[string]string, error) {
+// If onlyBlockDevices is specified, character devices are ignored.
+func FindDeviceNodes(onlyBlockDevices bool) (map[string]string, error) {
 	nodes := make(map[string]string)
 	err := filepath.WalkDir("/dev", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -44,7 +43,13 @@ func FindDeviceNodes() (map[string]string, error) {
 		}
 
 		// If we aren't a device node, do nothing.
-		if d.Type()&(os.ModeDevice|os.ModeCharDevice) == 0 {
+		if d.Type()&os.ModeDevice == 0 {
+			return nil
+		}
+
+		// Ignore character devices, because it is not possible to set limits on them.
+		// os.ModeCharDevice is usable only when os.ModeDevice is set.
+		if onlyBlockDevices && d.Type()&os.ModeCharDevice != 0 {
 			return nil
 		}
 
@@ -108,7 +113,7 @@ func AddPrivilegedDevices(g *generate.Generator, systemdMode bool) error {
 	}
 
 	if rootless.IsRootless() {
-		mounts := make(map[string]interface{})
+		mounts := make(map[string]any)
 		for _, m := range g.Mounts() {
 			mounts[m.Destination] = true
 		}
@@ -175,7 +180,7 @@ func AddPrivilegedDevices(g *generate.Generator, systemdMode bool) error {
 func getDevices(path string) ([]spec.LinuxDevice, error) {
 	files, err := os.ReadDir(path)
 	if err != nil {
-		if rootless.IsRootless() && os.IsPermission(err) {
+		if rootless.IsRootless() && errors.Is(err, os.ErrPermission) {
 			return nil, nil
 		}
 		return nil, err
@@ -209,7 +214,7 @@ func getDevices(path string) ([]spec.LinuxDevice, error) {
 
 		device, err := DeviceFromPath(filepath.Join(path, f.Name()))
 		if err != nil {
-			if err == errNotADevice {
+			if errors.Is(err, errNotADevice) {
 				continue
 			}
 			if errors.Is(err, fs.ErrNotExist) {

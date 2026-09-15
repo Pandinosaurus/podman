@@ -9,12 +9,12 @@ import (
 	"os/exec"
 	"path/filepath"
 
-	"github.com/containers/podman/v5/pkg/machine"
-	"github.com/containers/podman/v5/pkg/machine/env"
-	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
-	"github.com/containers/podman/v5/pkg/machine/wsl/wutil"
-	"github.com/containers/podman/v5/pkg/specgen"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/podman/v6/pkg/machine/env"
+	"go.podman.io/podman/v6/pkg/machine/vmconfigs"
+	"go.podman.io/podman/v6/pkg/machine/wsl/wutil"
+	"go.podman.io/podman/v6/pkg/specgen"
 )
 
 const gvForwarderPath = "/usr/libexec/podman/gvforwarder"
@@ -32,7 +32,7 @@ fi
 if [[ ! $ROUTE =~ default\ via ]]; then
 	exit 3
 fi
-nohup $GVFORWARDER -iface podman-usermode -stop-if-exist ignore -url "stdio:$GVPROXY?listen-stdio=accept" > /var/log/vm.log 2> /var/log/vm.err  < /dev/null &
+nohup $GVFORWARDER -iface podman-usermode -stop-if-exist ignore -url "stdio:$GVPROXY?listen-stdio=accept&ssh-port=-1" > /var/log/vm.log 2> /var/log/vm.err  < /dev/null &
 echo $! > $STATE/vm.pid
 sleep 1
 ps -eo args | grep -q -m1 ^$GVFORWARDER || exit 42
@@ -78,7 +78,11 @@ func startUserModeNetworking(mc *vmconfigs.MachineConfig) error {
 		return nil
 	}
 
-	exe, err := machine.FindExecutablePeer(gvProxy)
+	cfg, err := config.Default()
+	if err != nil {
+		return err
+	}
+	exe, err := cfg.FindHelperBinary(gvProxy, false)
 	if err != nil {
 		return fmt.Errorf("could not locate %s, which is necessary for user-mode networking, please reinstall", gvProxy)
 	}
@@ -149,7 +153,7 @@ func stopUserModeNetworking(mc *vmconfigs.MachineConfig) error {
 
 	err = wslPipe(stopUserModeNet, userModeDist, "bash")
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
+		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
 			switch exitErr.ExitCode() {
 			case 2:
 				err = fmt.Errorf("startup state was missing")
@@ -157,7 +161,7 @@ func stopUserModeNetworking(mc *vmconfigs.MachineConfig) error {
 				err = fmt.Errorf("route state is missing a default route")
 			}
 		}
-		logrus.Warnf("problem tearing down user-mode networking cleanly, forcing: %s", err.Error())
+		logrus.Warnf("problem tearing down user-mode networking cleanly, forcing: %v", err)
 	}
 
 	return terminateDist(userModeDist)
@@ -180,7 +184,7 @@ func launchUserModeNetDist(exeFile string) error {
 	if err := wslPipe(cmdStr, userModeDist, "bash"); err != nil {
 		_ = terminateDist(userModeDist)
 
-		if exitErr, ok := err.(*exec.ExitError); ok {
+		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
 			switch exitErr.ExitCode() {
 			case 2:
 				return fmt.Errorf("another user-mode network is running, only one can be used at a time: shut down all machines and run wsl --shutdown if this is unexpected")
@@ -247,7 +251,7 @@ func getUserModeNetDir() (string, error) {
 	}
 
 	dir := filepath.Join(vmDataDir, userModeDist)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("could not create %s directory: %w", userModeDist, err)
 	}
 
@@ -261,7 +265,7 @@ func getUserModeNetEntriesDir() (string, error) {
 	}
 
 	dir := filepath.Join(netDir, "entries")
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("could not create %s/entries directory: %w", userModeDist, err)
 	}
 
@@ -275,7 +279,7 @@ func addUserModeNetEntry(mc *vmconfigs.MachineConfig) error {
 	}
 
 	path := filepath.Join(entriesDir, env.WithPodmanPrefix(mc.Name))
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
 	if err != nil {
 		return fmt.Errorf("could not add user-mode networking registration: %w", err)
 	}
@@ -324,7 +328,6 @@ func cleanupAndCountNetEntries() (uint, error) {
 
 func obtainUserModeNetLock() (*fileLock, error) {
 	dir, err := getUserModeNetDir()
-
 	if err != nil {
 		return nil, err
 	}

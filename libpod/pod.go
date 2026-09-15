@@ -1,18 +1,19 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package libpod
 
 import (
 	"errors"
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/libpod/lock"
 	"github.com/opencontainers/runtime-spec/specs-go"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/libpod/lock"
 )
 
 // Pod represents a group of containers that are managed together.
@@ -286,9 +287,7 @@ func (p *Pod) VolumesFrom() []string {
 // Labels returns the pod's labels
 func (p *Pod) Labels() map[string]string {
 	labels := make(map[string]string)
-	for key, value := range p.config.Labels {
-		labels[key] = value
-	}
+	maps.Copy(labels, p.config.Labels)
 
 	return labels
 }
@@ -507,7 +506,7 @@ func (p *Pod) initContainers() ([]*Container, error) {
 		return nil, err
 	}
 	// Sort the pod containers by created time
-	sort.Slice(cons, func(i, j int) bool { return cons[i].CreatedTime().Before(cons[j].CreatedTime()) })
+	slices.SortFunc(cons, func(a, b *Container) int { return a.CreatedTime().Compare(b.CreatedTime()) })
 	// Iterate sorted containers and add ids for any init containers
 	for _, c := range cons {
 		if len(c.config.InitContainerType) > 0 {

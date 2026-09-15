@@ -20,14 +20,15 @@ import (
 
 	"github.com/containerd/errdefs"
 	"github.com/containerd/platforms"
-	"github.com/containers/storage/pkg/regexp"
 	"github.com/openshift/imagebuilder/internal"
 	"github.com/openshift/imagebuilder/signal"
 	"github.com/openshift/imagebuilder/strslice"
+	"go.podman.io/storage/pkg/regexp"
 
 	buildkitcommand "github.com/moby/buildkit/frontend/dockerfile/command"
 	buildkitparser "github.com/moby/buildkit/frontend/dockerfile/parser"
 	buildkitshell "github.com/moby/buildkit/frontend/dockerfile/shell"
+	"github.com/tonistiigi/dchapes-mode"
 )
 
 var (
@@ -41,18 +42,11 @@ var builtinArgDefaults = map[string]string{
 	"TARGETPLATFORM": localspec.OS + "/" + localspec.Architecture,
 	"TARGETOS":       localspec.OS,
 	"TARGETARCH":     localspec.Architecture,
-	"TARGETVARIANT":  localspec.Variant,
+	"TARGETVARIANT":  "",
 	"BUILDPLATFORM":  localspec.OS + "/" + localspec.Architecture,
 	"BUILDOS":        localspec.OS,
 	"BUILDARCH":      localspec.Architecture,
-	"BUILDVARIANT":   localspec.Variant,
-}
-
-func init() {
-	if localspec.Variant != "" {
-		builtinArgDefaults["TARGETPLATFORM"] = builtinArgDefaults["TARGETPLATFORM"] + "/" + localspec.Variant
-		builtinArgDefaults["BUILDPLATFORM"] = builtinArgDefaults["BUILDPLATFORM"] + "/" + localspec.Variant
-	}
+	"BUILDVARIANT":   "",
 }
 
 // ENV foo bar
@@ -371,8 +365,14 @@ func from(b *Builder, args []string, attributes map[string]bool, flagArgs []stri
 				return fmt.Errorf("no value specified for --platform=")
 			}
 			b.Platform = platformString
+		case strings.HasPrefix(arg, "--after="):
+			afterStage := strings.TrimPrefix(arg, "--after=")
+			if afterStage == "" {
+				return fmt.Errorf("no value specified for --after=")
+			}
+			b.After = afterStage
 		default:
-			return fmt.Errorf("FROM only supports the --platform flag")
+			return fmt.Errorf("FROM only supports the --platform and --after flags")
 		}
 	}
 	b.RunConfig.Image = name
@@ -569,12 +569,12 @@ func expose(b *Builder, args []string, attributes map[string]bool, flagArgs []st
 
 	existing := map[string]struct{}{}
 	for k := range b.RunConfig.ExposedPorts {
-		existing[k.Port()] = struct{}{}
+		existing[k.Port()+"/"+k.Proto()] = struct{}{}
 	}
 
 	for _, port := range args {
 		dp := docker.Port(port)
-		if _, exists := existing[dp.Port()]; !exists {
+		if _, exists := existing[dp.Port()+"/"+dp.Proto()]; !exists {
 			b.RunConfig.ExposedPorts[docker.Port(fmt.Sprintf("%s/%s", dp.Port(), dp.Proto()))] = struct{}{}
 		}
 	}
@@ -815,11 +815,20 @@ func shell(b *Builder, args []string, attributes map[string]bool, flagArgs []str
 }
 
 // checkChmodConversion makes sure that the argument to a --chmod= flag for
-// COPY or ADD is an octal number
+// COPY or ADD is an octal number between 0 and 07777 or a symbolic mode,
+// both of which the dockerfile frontend spec accepts since Dockerfile
+// syntax 1.14. Parsing here only validates the syntax: the clauses are
+// resolved against each copied file's current mode by the executor, which
+// is where conditional bits such as the capital X in a+rX are meaningful.
 func checkChmodConversion(chmod string) error {
-	_, err := strconv.ParseUint(chmod, 8, 32)
-	if err != nil {
-		return fmt.Errorf("Error parsing chmod %s", chmod)
+	if v, err := strconv.ParseUint(chmod, 8, 32); err == nil {
+		if v > 0o7777 {
+			return fmt.Errorf("Error parsing chmod %s: it should be octal and between 0 and 07777", chmod)
+		}
+		return nil
+	}
+	if _, err := mode.Parse(chmod); err != nil {
+		return fmt.Errorf("Error parsing chmod %s: %w", chmod, err)
 	}
 	return nil
 }

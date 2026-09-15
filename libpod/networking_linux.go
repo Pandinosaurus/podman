@@ -5,19 +5,20 @@ package libpod
 import (
 	"fmt"
 	"net"
+	"strings"
 
-	"github.com/containernetworking/plugins/pkg/ns"
-	"github.com/containers/common/libnetwork/types"
-	"github.com/containers/common/pkg/netns"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/rootless"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
+	"go.podman.io/common/libnetwork/types"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/common/pkg/netns"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/rootless"
 )
 
 // Create and configure a new network namespace for a container
-func (r *Runtime) configureNetNS(ctr *Container, ctrNS string) (status map[string]types.StatusBlock, rerr error) {
+func (r *Runtime) configureNetNS(ctr *Container, ctrNS string, reload bool) (status map[string]types.StatusBlock, rerr error) {
 	if err := r.exposeMachinePorts(ctr.config.PortMappings); err != nil {
 		return nil, err
 	}
@@ -29,8 +30,8 @@ func (r *Runtime) configureNetNS(ctr *Container, ctrNS string) (status map[strin
 			}
 		}
 	}()
-	if ctr.config.NetMode.IsSlirp4netns() {
-		return nil, r.setupSlirp4netns(ctr, ctrNS)
+	if strings.HasPrefix(string(ctr.config.NetMode), "slirp4netns") {
+		return nil, fmt.Errorf("slirp4netns support has been removed, run `podman system migrate` to update this container to use pasta")
 	}
 	if ctr.config.NetMode.IsPasta() {
 		return nil, r.setupPasta(ctr, ctrNS)
@@ -59,16 +60,21 @@ func (r *Runtime) configureNetNS(ctr *Container, ctrNS string) (status map[strin
 		}
 	}()
 
-	// set up rootless port forwarder when rootless with ports and the network status is empty,
-	// if this is called from network reload the network status will not be empty and we should
-	// not set up port because they are still active
-	if rootless.IsRootless() && len(ctr.config.PortMappings) > 0 && ctr.getNetworkStatus() == nil {
-		// set up port forwarder for rootless netns
-		// TODO: support slirp4netns port forwarder as well
-		// make sure to fix this in container.handleRestartPolicy() as well
-		// Important we have to call this after r.setUpNetwork() so that
-		// we can use the proper netStatus
-		err = r.setupRootlessPortMappingViaRLK(ctr, ctrNS, netStatus)
+	// Set up port forwarding for rootless bridge networks.
+	// Note: pasta/pesto port forwarding is handled inside container-libs
+	// netavark Setup(), so only rootlessport needs explicit setup here.
+	if rootless.IsRootless() && len(ctr.config.PortMappings) > 0 {
+		switch r.config.Network.RootlessPortForwarder {
+		case config.RootlessPortForwarderPasta:
+			// Handled by container-libs netavark Setup()
+		case config.RootlessPortForwarderRootlessport, "":
+			if !reload {
+				err = r.setupRootlessPortMappingViaRLK(ctr, ctrNS, netStatus)
+			}
+		default:
+			err = fmt.Errorf("invalid rootless_port_forwarder value %q, must be %q or %q",
+				r.config.Network.RootlessPortForwarder, config.RootlessPortForwarderRootlessport, config.RootlessPortForwarderPasta)
+		}
 	}
 	return netStatus, err
 }
@@ -93,7 +99,7 @@ func (r *Runtime) createNetNS(ctr *Container) (n string, q map[string]types.Stat
 	logrus.Debugf("Made network namespace at %s for container %s", ctrNS.Path(), ctr.ID())
 
 	var networkStatus map[string]types.StatusBlock
-	networkStatus, err = r.configureNetNS(ctr, ctrNS.Path())
+	networkStatus, err = r.configureNetNS(ctr, ctrNS.Path(), false)
 	return ctrNS.Path(), networkStatus, err
 }
 
@@ -105,7 +111,7 @@ func (r *Runtime) setupNetNS(ctr *Container) error {
 		return err
 	}
 
-	networkStatus, err := r.configureNetNS(ctr, nsPath)
+	networkStatus, err := r.configureNetNS(ctr, nsPath, false)
 
 	// Assign NetNS attributes to container
 	ctr.state.NetNS = nsPath
@@ -122,7 +128,7 @@ func (r *Runtime) teardownNetNS(ctr *Container) error {
 
 	// Do not check the error here, we want to always umount the netns
 	// This will ensure that the container interface will be deleted
-	// even when there is a CNI or netavark bug.
+	// even when there is a network backend bug.
 	prevErr := r.teardownNetwork(ctr)
 
 	// First unmount the namespace
@@ -173,7 +179,7 @@ func getContainerNetIO(ctr *Container) (map[string]define.ContainerNetworkStats,
 		return nil, nil
 	}
 
-	err := ns.WithNetNSPath(netNSPath, func(_ ns.NetNS) error {
+	err := netns.WithNetNSPath(netNSPath, func(_ netns.NetNS) error {
 		links, err := netlink.LinkList()
 		if err != nil {
 			return fmt.Errorf("retrieving all network interfaces: %w", err)
@@ -218,7 +224,7 @@ func (c *Container) joinedNetworkNSPath() (string, bool) {
 
 func (c *Container) inspectJoinedNetworkNS(networkns string) (q types.StatusBlock, retErr error) {
 	var result types.StatusBlock
-	err := ns.WithNetNSPath(networkns, func(_ ns.NetNS) error {
+	err := netns.WithNetNSPath(networkns, func(_ netns.NetNS) error {
 		ifaces, err := net.Interfaces()
 		if err != nil {
 			return err

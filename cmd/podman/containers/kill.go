@@ -7,14 +7,14 @@ import (
 	"os"
 	"strings"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/utils"
-	"github.com/containers/podman/v5/cmd/podman/validate"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/signal"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/utils"
+	"go.podman.io/podman/v6/cmd/podman/validate"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/signal"
 )
 
 var (
@@ -29,8 +29,8 @@ var (
 		},
 		ValidArgsFunction: common.AutocompleteContainersRunning,
 		Example: `podman kill mywebserver
-  podman kill 860a4b23
-  podman kill --signal TERM ctrID`,
+podman kill 860a4b23
+podman kill --signal TERM ctrID`,
 	}
 
 	containerKillCommand = &cobra.Command{
@@ -43,8 +43,8 @@ var (
 		RunE:              killCommand.RunE,
 		ValidArgsFunction: killCommand.ValidArgsFunction,
 		Example: `podman container kill mywebserver
-  podman container kill 860a4b23
-  podman container kill --signal TERM ctrID`,
+podman container kill 860a4b23
+podman container kill --signal TERM ctrID`,
 	}
 )
 
@@ -101,7 +101,7 @@ func kill(_ *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("reading CIDFile: %w", err)
 		}
-		id := strings.Split(string(content), "\n")[0]
+		id, _, _ := strings.Cut(string(content), "\n")
 		args = append(args, id)
 	}
 

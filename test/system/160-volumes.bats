@@ -242,7 +242,6 @@ EOF
 
 # Podman volume import test
 @test "podman volume import test" {
-    skip_if_remote "volumes import is not applicable on podman-remote"
     run_podman volume create --driver local my_vol
     run_podman run --rm -v my_vol:/data $IMAGE sh -c "echo hello >> /data/test"
     run_podman volume create my_vol2
@@ -260,8 +259,6 @@ EOF
 
 # stdout with NULs is easier to test here than in ginkgo
 @test "podman volume export to stdout" {
-    skip_if_remote "N/A on podman-remote"
-
     local volname="myvol_$(random_string 10)"
     local mountpoint="/data$(random_string 8)"
 
@@ -278,7 +275,7 @@ EOF
     # The "-v" is only for debugging: tar will emit the filename to stderr.
     # If this test ever fails, that may give a clue.
     echo "$_LOG_PROMPT $PODMAN volume export $volname | tar -x ..."
-    tar_output="$($PODMAN volume export $volname | tar -x -v --to-stdout)"
+    tar_output="$("${PODMAN_CMD[@]}" volume export $volname | tar -x -v --to-stdout)"
     echo "$tar_output"
     assert "$tar_output" == "$content" "extracted content"
 
@@ -381,37 +378,87 @@ EOF
     run_podman run --name c2 --volume ${v[2]}:/vol2 -v ${v[3]}:/vol3 \
                $IMAGE date
 
-    # List available volumes for pruning after using 1,2,3
+    # List available volumes for pruning after using 1,2,3 (without -a only anonymous are listed; we have none)
     run_podman volume prune <<< N
-    is "$(echo $(sort <<<${lines[*]:1:3}))" "${v[4]} ${v[5]} ${v[6]}" "volume prune, with 1,2,3 in use, lists 4,5,6"
+    is "${lines[1]}" "No dangling anonymous volumes found" "volume prune without -a lists no volumes when only named volumes exist"
 
-    # List available volumes for pruning after using 1,2,3 and filtering; see #8913
+    # List available volumes for pruning after using 1,2,3 and filtering; see #8913 (without -a only anonymous; we have none)
     run_podman volume prune --filter label=mylabel <<< N
-    is "$(echo $(sort <<<${lines[*]:1:2}))" "${v[5]} ${v[6]}" "volume prune, with 1,2,3 in use and 4 filtered out, lists 5,6"
+    is "${lines[1]}" "No dangling anonymous volumes found" "volume prune without -a and filter: no anonymous volumes to list"
 
-    # prune should remove v4
-    run_podman volume prune --force
+    # prune with -a should remove named unused volumes v4, v5, v6
+    run_podman volume prune --force -a
     is "$(echo $(sort <<<$output))" "${v[4]} ${v[5]} ${v[6]}" \
        "volume prune, with 1, 2, 3 in use, deletes only 4, 5, 6"
 
     # Remove the container using v2 and v3. Prune should now remove those.
     # The 'echo sort' is to get the output sorted and in one line.
     run_podman rm c2
-    run_podman volume prune --force
+    run_podman volume prune --force -a
     is "$(echo $(sort <<<$output))" "${v[2]} ${v[3]}" \
        "volume prune, after rm c2, deletes volumes 2 and 3"
 
     # Remove the final container. Prune should now remove v1.
     run_podman rm c1
-    run_podman volume prune --force
+    run_podman volume prune --force -a
     is "$output"  "${v[1]}" "volume prune, after rm c2 & c1, deletes volume 1"
 
     # Further prunes are NOPs
-    run_podman volume prune --force
+    run_podman volume prune --force -a
     is "$output"  "" "no more volumes to prune"
 }
 
-# bats test_tags=distro-integration
+@test "podman volume prune without -a keeps named volumes" {
+    local -a v=()
+    for i in 1 2 3;do
+        vol=myvol${i}$(random_string)
+        v[$i]=$vol
+        run_podman volume create $vol
+    done
+
+    run_podman run --name c1 --volume ${v[1]}:/vol1 $IMAGE date
+
+    run_podman volume prune <<< N
+    is "${lines[1]}" "No dangling anonymous volumes found" \
+       "volume prune without -a does not list named volumes"
+
+    run_podman volume prune --force
+    is "$output" "" "volume prune without -a does not delete named volumes"
+
+    run_podman volume exists ${v[2]}
+    run_podman volume exists ${v[3]}
+}
+
+@test "podman volume prune removes only anonymous unused volumes" {
+    # Start clean: create two named volumes and one anonymous (no name)
+    local suffix=$(random_string)
+    local named1=named1_${suffix}
+    local named2=named2_${suffix}
+
+    run_podman volume create $named1
+    is "$output" "$named1" "volume create named1"
+
+    run_podman volume create $named2
+    is "$output" "$named2" "volume create named2"
+
+    run_podman volume create
+    anon_vol=$(echo "$output" | tr -d '\n\r')
+    assert "$anon_vol" != "" "anonymous volume create returns a name"
+
+    run_podman volume ls --format '{{.Name}}'
+    assert "$output" =~ "$named1" "volume ls includes named1"
+    assert "$output" =~ "$named2" "volume ls includes named2"
+    assert "$output" =~ "$anon_vol" "volume ls includes anonymous volume"
+
+    run_podman volume prune --force
+    assert "$output" =~ "$anon_vol" "volume prune removes the anonymous volume"
+
+    run_podman volume ls --format '{{.Name}}'
+    assert "$output" =~ "$named1" "after prune: named1 still present"
+    assert "$output" =~ "$named2" "after prune: named2 still present"
+    assert "$output" !~ "$anon_vol" "after prune: anonymous volume removed"
+}
+
 @test "podman volume type=bind" {
     myvoldir=${PODMAN_TMPDIR}/volume_$(random_string)
     mkdir $myvoldir
@@ -516,7 +563,6 @@ NeedsChown    | true
 FROM $IMAGE
 VOLUME /data
 EOF
-    fs=$(stat -f -c %T .)
     run_podman build -t volume_image $tmpdir
 
     containersconf=$tmpdir/containers.conf
@@ -534,15 +580,16 @@ EOF
     CONTAINERS_CONF_OVERRIDE="$containersconf" run_podman run --rm volume_image stat -f -c %T /data
     is "$output" "tmpfs" "Should be tmpfs"
 
-    # get the hostfs first so we can match it below
+    # Get the hostfs first so we can match it below. The important check is
+    # the HEX filesystem type (%t); readable one (%T) is for ease of debugging.
+    # We can't compare %T because our alpine-based testimage doesn't grok btrfs.
     run_podman info --format {{.Store.GraphRoot}}
-    hostfs=$(stat -f -c %T $output)
+    hostfs=$(stat -f -c '%t %T' $output)
+    echo "# for debug: stat( $output ) = '$hostfs'"
 
-    # stat -f -c %T seems to just return unknown for our normal bind mount for some reason.
-    # Therefore manually parse /proc/mounts to get the real fs for the bind mount.
-    CONTAINERS_CONF_OVERRIDE="$containersconf" run_podman run --image-volume anonymous --rm volume_image \
-        sh -c "grep ' /data ' /proc/mounts | cut -f3 -d' '"
-    assert "$output" == "$hostfs" "Should match hosts graphroot fs"
+    # "${foo%% *}" strips everything after the first space: "9123683e btrfs" -> "9123683e"
+    CONTAINERS_CONF_OVERRIDE="$containersconf" run_podman run --image-volume anonymous --rm volume_image stat -f -c '%t %T' /data
+    assert "${output%% *}" == "${hostfs%% *}" "/data fs type should match hosts graphroot"
 
     CONTAINERS_CONF_OVERRIDE="$containersconf" run_podman run --image-volume tmpfs --rm volume_image stat -f -c %T /data
     is "$output" "tmpfs" "Should be tmpfs"
@@ -617,6 +664,25 @@ EOF
     is "$owner" "${original_owner}" "The volume was chowned by podman volume create"
 
     run_podman volume rm $volume_name --force
+}
+
+@test "podman volume ls --format Labels is a string" {
+    rand_value=$(random_string 10)
+    volume_name="v-$(safename)"
+
+    run_podman volume create --label mylabel=$rand_value $volume_name
+
+    # {{json .Labels}} should produce a JSON string, not a JSON object
+    run_podman volume ls --format '{{json .Labels}}'
+    assert "$output" =~ "\".*mylabel=${rand_value}.*\"" "json .Labels should be a quoted string, not a JSON object"
+    assert "$output" !~ "{" "json .Labels should not contain braces (not a JSON object)"
+
+    # Plain {{.Labels}} should produce key=value format
+    run_podman volume ls --format '{{.Labels}}'
+    assert "$output" =~ "mylabel=${rand_value}" ".Labels should contain key=value pair"
+    assert "$output" !~ "map\[" ".Labels should not use Go map format"
+
+    run_podman volume rm $volume_name
 }
 
 # vim: filetype=sh

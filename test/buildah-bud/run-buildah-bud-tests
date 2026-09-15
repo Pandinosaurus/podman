@@ -7,6 +7,7 @@ ME=$(basename $0)
 
 # Buildah main repository; unlikely to change often
 BUILDAH_REPO=github.com/containers/buildah
+BUILDAH_MODULE=go.podman.io/buildah
 
 # Tag name used to identify the base checkout
 BASE_TAG=buildah-bud-in-podman
@@ -32,6 +33,7 @@ Flags, useful for manual debugging:
 # Parse command-line options (used in development only, not in CI)
 do_checkout=y
 do_test=y
+REMOTE=
 declare -a bats_filter=()
 for i; do
     value=$(expr "$i" : '[^=]*=\(.*\)')
@@ -39,7 +41,7 @@ for i; do
         --no-checkout)  do_checkout= ; shift;;
         --no-test)      do_test=     ; shift;;
         --filter=*)     bats_filter=("--filter" "$value"); shift;;
-        --remote)       PODBIN_NAME=remote;;
+        --remote)       REMOTE=1;;
        -h|--help)       echo "$usage"; exit 0;;
         *)              echo "$ME: Unrecognized option '$i'" >&2; exit 1;;
     esac
@@ -72,10 +74,8 @@ PATCHES=${BUD_TEST_DIR}/buildah-tests.diff
 BUD_TEST_DIR_REL=$(dirname $(git ls-files --full-name ${BASH_SOURCE[0]}))
 # Path to podman binary; again, do it before we cd
 PODMAN_BINARY=$(pwd)/bin/podman
-REMOTE=
 # If remote, start server & change path
-if [[ "${PODBIN_NAME:-}" = "remote" ]]; then
-    REMOTE=1
+if [[ -n "$REMOTE" ]]; then
     PODMAN_BINARY+="-remote"
 fi
 
@@ -89,8 +89,20 @@ function die() {
 failhint=
 trap 'if [[ $? != 0 ]]; then if [[ -n $failhint ]]; then echo;echo "***************************************";echo "$failhint";echo;echo "Please see $BUD_TEST_DIR_REL/README.md for advice";fi;fi' 0
 
-# Find the version of buildah we've vendored in, so we can run the right tests
-buildah_version=$(awk "\$1 == \"$BUILDAH_REPO\" { print \$2 }" <go.mod)
+# Find the version of buildah we've vendored in, so we can run the right tests.
+# Note first check if buildah is being replaced with a different version in which case we need to use that one.
+buildah_replace=$(go list -m -f '{{if .Replace}}{{.Replace}}{{end}}' $BUILDAH_MODULE)
+buildah_checkout_repo="$BUILDAH_REPO"
+
+if [[ -z "$buildah_replace" ]]; then
+    # No replace this is fine, check the main version
+    buildah_version=$(go list -m -f '{{.Version}}' $BUILDAH_MODULE)
+else
+    # replace string is "REPO VERSION" so split this into our two vars
+    buildah_checkout_repo="${buildah_replace% *}"
+    buildah_version="${buildah_replace#* }"
+fi
+
 
 if [[ -z "$buildah_version" ]]; then
     # This should not happen
@@ -122,7 +134,7 @@ if [[ -n $CIRRUS_CHANGE_IN_REPO ]]; then
         base=$(set -x;git merge-base ${DEST_BRANCH} $head)
         changes=$(set -x;git diff --name-status $base $head)
         if [[ -n $changes ]]; then
-            if [[ $changes =~ vendor/$BUILDAH_REPO ]]; then
+            if [[ $changes =~ vendor/$BUILDAH_MODULE ]]; then
                 is_revendor=y
             fi
         fi
@@ -140,14 +152,14 @@ if [[ -n $do_checkout ]]; then
     # will need a special unreleased version (go calls then "pseudoversions").
     # In the usual case, we can do a shallow git clone:
     shallow_checkout="--branch $buildah_version"
-    if [[ $buildah_version =~ .*-.*\.[0-9]{14}-.* ]]; then
+    if [[ $buildah_version =~ .*[0-9]{14}-.* ]] ; then
         # ...but with a pseudoversion, we must git-clone the entire repo,
         # then do a git checkout within it
         shallow_checkout=
     fi
 
     failhint="'git clone' failed - this should never happen!"
-    (set -x;git clone -q $shallow_checkout https://$BUILDAH_REPO $buildah_dir)
+    (set -x;git clone -q $shallow_checkout https://$buildah_checkout_repo $buildah_dir)
 
     # Recent versions of git (like `2.39`) disallow some operations (like `am`)
     # without an identity being set.  In this case, git will throw an error
@@ -177,17 +189,23 @@ if [[ -n $do_checkout ]]; then
     # the set of patches
     (set -x;git tag $BASE_TAG)
 
-    # Build buildah and the copy helper
+    # Build buildah and the copy, inet, dumpspec, and passwd test helpers
     failhint="error building buildah. This should never happen."
     (set -x;make bin/buildah)
     failhint="error building buildah's copy helper. This should never happen."
     (set -x;make bin/copy)
+    failhint="error building buildah's inet helper. This should never happen."
+    (set -x;make bin/inet)
+    failhint="error building buildah's dumpspec helper. This should never happen."
+    (set -x;make bin/dumpspec)
+    failhint="error building buildah's passwd helper. This should never happen."
+    (set -x;make bin/passwd)
 
     # The upcoming patch may fail. Before we try it, create a helper script
     # for a developer to push a new set of diffs to podman-land.
     failhint=
     sed -e "s,\[BASETAG\],${BASE_TAG},g" \
-        -e "s,\[BUILDAHREPO\],${BUILDAH_REPO},g" \
+        -e "s,\[BUILDAHREPO\],${buildah_checkout_repo},g" \
         < ${BUD_TEST_DIR}/make-new-buildah-diffs \
         > make-new-buildah-diffs
     chmod 755 make-new-buildah-diffs
@@ -199,11 +217,20 @@ if [[ -n $do_checkout ]]; then
 Error applying patch file. This can happen when you vendor in a new buildah.
 You will want to:
 
-  - look for 'test/*.rej'
+  *** START A NEW TERMINAL WINDOW!              ***
+  *** ...so you can refer to these instructions ***
+
+  - cd test-buildah-*   (into the buildah-bud test directory)
+
+  - look for 'tests/*.rej'
   - resolve conflicts manually
-  - git add test/helpers.bash
+  - git add tests/helpers.bash
   - git am --continue
   - ./make-new-buildah-diffs
+
+  - cd .. (back to podman source dir)
+
+...and git-commit the new .diff file as part of your podman PR.
 "
     (set -x;git am --reject <$PATCHES)
 
@@ -250,5 +277,8 @@ review the test failure and double-check your changes.
                  REMOTE=$REMOTE \
                  BUILDAH_BINARY=$(pwd)/bin/buildah \
                  COPY_BINARY=$(pwd)/bin/copy \
-                 bats "${bats_filter[@]}" tests/bud.bats)
+                 INET_BINARY=$(pwd)/bin/inet \
+                 DUMPSPEC_BINARY=$(pwd)/bin/dumpspec \
+                 PASSWD_BINARY=$(pwd)/bin/passwd \
+                 bats -j $(nproc) "${bats_filter[@]}" tests/bud.bats)
 fi

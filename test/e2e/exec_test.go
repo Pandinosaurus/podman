@@ -7,15 +7,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
-	. "github.com/containers/podman/v5/test/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	. "github.com/onsi/gomega/gexec"
+	. "go.podman.io/podman/v6/test/utils"
 )
 
 var _ = Describe("Podman exec", func() {
-
 	It("podman exec into bogus container", func() {
 		session := podmanTest.Podman([]string{"exec", "foobar", "ls"})
 		session.WaitWithDefaultTimeout()
@@ -58,6 +58,38 @@ var _ = Describe("Podman exec", func() {
 		session := podmanTest.Podman([]string{"exec", cid, "ls"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
+	})
+
+	It("podman exec simple command using cidfile", func() {
+		cidFile := filepath.Join(tempdir, "cid")
+		session := podmanTest.RunTopContainerWithArgs("test1", []string{"--cidfile", cidFile})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+		Expect(podmanTest.NumberOfContainers()).To(Equal(1))
+
+		result := podmanTest.Podman([]string{"exec", "--cidfile", cidFile, "ls"})
+		result.WaitWithDefaultTimeout()
+		Expect(result).Should(ExitCleanly())
+	})
+
+	It("podman exec latest and cidfile", func() {
+		SkipIfRemote("--latest flag n/a")
+
+		cidFile := filepath.Join(tempdir, "cid")
+		session := podmanTest.RunTopContainerWithArgs("test1", []string{"--cidfile", cidFile})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+		Expect(podmanTest.NumberOfContainers()).To(Equal(1))
+
+		result := podmanTest.Podman([]string{"exec", "--cidfile", cidFile, "--latest", "ls"})
+		result.WaitWithDefaultTimeout()
+		Expect(result).Should(ExitWithError(125, `--latest and --cidfile can not be used together`))
+	})
+
+	It("podman exec nonextant cidfile", func() {
+		session := podmanTest.Podman([]string{"exec", "--cidfile", "foobar", "ls"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitWithError(125, `reading CIDFile: open foobar: no such file or directory`))
 	})
 
 	It("podman exec environment test", func() {
@@ -163,7 +195,6 @@ var _ = Describe("Podman exec", func() {
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 		Expect(session.OutputToString()).To(ContainSubstring(bndPerms))
-
 	})
 
 	It("podman exec --privileged", func() {
@@ -311,12 +342,13 @@ var _ = Describe("Podman exec", func() {
 
 	// #10927 ("no logs from conmon"), one of our nastiest flakes
 	It("podman exec terminal doesn't hang", FlakeAttempts(3), func() {
-		setup := podmanTest.Podman([]string{"run", "-dti", "--name", "test1", fedoraMinimal, "sleep", "+Inf"})
+		setup := podmanTest.Podman([]string{"run", "-ti", "--rm", "--name", "test1", FEDORA_MINIMAL, "true"})
 		setup.WaitWithDefaultTimeout()
 		Expect(setup).Should(Exit(0))
 		Expect(setup.ErrorToString()).To(ContainSubstring("The input device is not a TTY. The --tty and --interactive flags might not work properly"))
 
-		for i := 0; i < 5; i++ {
+		podmanTest.PodmanExitCleanly("run", "-dti", "--name", "test1", FEDORA_MINIMAL, "sleep", "+Inf")
+		for range 5 {
 			session := podmanTest.Podman([]string{"exec", "-ti", "test1", "true"})
 			session.WaitWithDefaultTimeout()
 			Expect(session).Should(ExitCleanly())
@@ -324,7 +356,7 @@ var _ = Describe("Podman exec", func() {
 	})
 
 	It("podman exec pseudo-terminal sanity check", func() {
-		setup := podmanTest.Podman([]string{"run", "--detach", "--name", "test1", fedoraMinimal, "sleep", "+Inf"})
+		setup := podmanTest.Podman([]string{"run", "--detach", "--name", "test1", FEDORA_MINIMAL, "sleep", "+Inf"})
 		setup.WaitWithDefaultTimeout()
 		Expect(setup).Should(ExitCleanly())
 
@@ -400,17 +432,14 @@ var _ = Describe("Podman exec", func() {
 		setup.WaitWithDefaultTimeout()
 		Expect(setup).Should(ExitCleanly())
 
-		expect := "chdir to `/missing`: No such file or directory"
-		if podmanTest.OCIRuntime == "runc" {
-			expect = "chdir to cwd"
-		}
+		expect := ".*(chdir to cwd|chdir to `/missing`: No such file or directory).*"
 		session := podmanTest.Podman([]string{"exec", "--workdir", "/missing", "test1", "pwd"})
 		session.WaitWithDefaultTimeout()
-		Expect(session).To(ExitWithError(127, expect))
+		Expect(session).To(ExitWithErrorRegex(127, expect))
 
 		session = podmanTest.Podman([]string{"exec", "-w", "/missing", "test1", "pwd"})
 		session.WaitWithDefaultTimeout()
-		Expect(session).To(ExitWithError(127, expect))
+		Expect(session).To(ExitWithErrorRegex(127, expect))
 	})
 
 	It("podman exec cannot be invoked", func() {
@@ -421,19 +450,20 @@ var _ = Describe("Podman exec", func() {
 		session := podmanTest.Podman([]string{"exec", "test1", "/etc"})
 		session.WaitWithDefaultTimeout()
 
-		// crun (and, we hope, any other future runtimes)
-		expectedStatus := 126
-		expectedMessage := "open executable: Operation not permitted: OCI permission denied"
-
 		// ...but it's much more complicated under runc (#19552)
 		if podmanTest.OCIRuntime == "runc" {
-			expectedMessage = `exec failed: unable to start container process: exec: "/etc": is a directory`
-			expectedStatus = 255
+			expectedMessage := `exec failed: unable to start container process: exec: "/etc": is a directory`
+			expectedStatus := 255
 			if IsRemote() {
 				expectedStatus = 125
 			}
+			Expect(session).Should(ExitWithError(expectedStatus, expectedMessage))
+		} else {
+			// crun (and, we hope, any other future runtimes)
+			expectedStatus := 126
+			expectedMessage := ".*(open executable|the path `/etc` is not a regular file): Operation not permitted: OCI permission denied.*"
+			Expect(session).Should(ExitWithErrorRegex(expectedStatus, expectedMessage))
 		}
-		Expect(session).Should(ExitWithError(expectedStatus, expectedMessage))
 	})
 
 	It("podman exec command not found", func() {
@@ -457,16 +487,16 @@ var _ = Describe("Podman exec", func() {
 		files := []*os.File{
 			devNull,
 		}
-		session := podmanTest.PodmanExtraFiles([]string{"exec", "--preserve-fds", "1", "test1", "ls"}, files)
-		session.WaitWithDefaultTimeout()
-		Expect(session).Should(ExitCleanly())
+		podmanTest.PodmanExitCleanlyWithOptions(PodmanExecOptions{
+			ExtraFiles: files,
+		}, "exec", "--preserve-fds", "1", "test1", "ls")
 	})
 
 	It("podman exec preserves --group-add groups", func() {
 		groupName := "group1"
 		gid := "4444"
 		ctrName1 := "ctr1"
-		ctr1 := podmanTest.Podman([]string{"run", "--name", ctrName1, fedoraMinimal, "groupadd", "-g", gid, groupName})
+		ctr1 := podmanTest.Podman([]string{"run", "--name", ctrName1, FEDORA_MINIMAL, "groupadd", "-g", gid, groupName})
 		ctr1.WaitWithDefaultTimeout()
 		Expect(ctr1).Should(ExitCleanly())
 
@@ -490,7 +520,7 @@ var _ = Describe("Podman exec", func() {
 		dockerfile := fmt.Sprintf(`FROM %s
 RUN groupadd -g 4000 first
 RUN groupadd -g 4001 second
-RUN useradd -u 1000 auser`, fedoraMinimal)
+RUN useradd -u 1000 auser`, FEDORA_MINIMAL)
 		imgName := "testimg"
 		podmanTest.BuildImage(dockerfile, imgName, "false")
 
@@ -541,7 +571,7 @@ RUN useradd -u 1000 auser`, fedoraMinimal)
 	It("podman exec with env var secret", func() {
 		secretsString := "somesecretdata"
 		secretFilePath := filepath.Join(podmanTest.TempDir, "secret")
-		err := os.WriteFile(secretFilePath, []byte(secretsString), 0755)
+		err := os.WriteFile(secretFilePath, []byte(secretsString), 0o755)
 		Expect(err).ToNot(HaveOccurred())
 
 		session := podmanTest.Podman([]string{"secret", "create", "mysecret", secretFilePath})
@@ -587,5 +617,73 @@ RUN useradd -u 1000 auser`, fedoraMinimal)
 		Expect(session2).Should(ExitCleanly())
 		Expect(session).Should(ExitCleanly())
 		Expect(session.OutputToString()).To(Equal("root"))
+	})
+
+	It("podman exec with --no-session flag", func() {
+		SkipIfRemote("The --no-session flag is not supported for remote clients")
+		session := podmanTest.RunTopContainer("no_session_test")
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+
+		execResult := podmanTest.Podman([]string{"exec", "--no-session", "no_session_test", "echo", "hello"})
+		execResult.WaitWithDefaultTimeout()
+		Expect(execResult).Should(ExitCleanly())
+		Expect(execResult.OutputToString()).To(Equal("hello"))
+	})
+
+	It("podman stop is not blocked by a long-running --no-session exec", func() {
+		SkipIfRemote("The --no-session flag is not supported for remote clients")
+
+		ctrName := "no_session_lock_test"
+		session := podmanTest.RunTopContainer(ctrName)
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+
+		execSession := podmanTest.Podman([]string{"exec", "--no-session", ctrName, "sleep", "30"})
+		stopSession := podmanTest.Podman([]string{"stop", "-t", "5", ctrName})
+		stopSession.WaitWithDefaultTimeout()
+		Expect(stopSession).Should(ExitCleanly())
+		Eventually(execSession, "5s").Should(Not(Exit(0)))
+	})
+
+	It("podman exec --no-session exit codes", func() {
+		SkipIfRemote("The --no-session flag is not supported for remote clients")
+
+		ctrName := "no_session_exit_code_test"
+		session := podmanTest.RunTopContainer(ctrName)
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+
+		execResult := podmanTest.Podman([]string{"exec", "--no-session", ctrName, "sh", "-c", "exit 42"})
+		execResult.WaitWithDefaultTimeout()
+		Expect(execResult).Should(ExitWithError(42, ""))
+
+		execResult = podmanTest.Podman([]string{"exec", "--no-session", ctrName, "nonexistentcommand"})
+		execResult.WaitWithDefaultTimeout()
+		Expect(execResult).Should(ExitWithError(127, "OCI runtime attempted to invoke a command that was not found"))
+
+		execSession := podmanTest.Podman([]string{"exec", "--no-session", ctrName, "sleep", "30"})
+		time.Sleep(2 * time.Second) // Give time for the first exec to start (CI is slow)
+		killSession := podmanTest.Podman([]string{"exec", ctrName, "sh", "-c", "kill -9 $(pgrep sleep)"})
+		killSession.WaitWithDefaultTimeout()
+		Expect(killSession).Should(ExitCleanly())
+
+		execSession.WaitWithDefaultTimeout()
+		Expect(execSession).Should(ExitWithError(137, ""))
+	})
+
+	It("podman exec command not in $PATH error", func() {
+		session := podmanTest.RunTopContainer("testctr")
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+
+		execResult := podmanTest.Podman([]string{"exec", "testctr", "kjhasdf"})
+		execResult.WaitWithDefaultTimeout()
+		Expect(execResult).Should(ExitWithError(127, "not found in $PATH"))
+
+		// Test again with log level debug, this must produce the same error
+		execResult = podmanTest.Podman([]string{"--log-level=debug", "exec", "testctr", "kjhasdf"})
+		execResult.WaitWithDefaultTimeout()
+		Expect(execResult).Should(ExitWithError(127, "not found in $PATH"))
 	})
 })

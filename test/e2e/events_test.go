@@ -9,15 +9,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/containers/podman/v5/cmd/podman/system"
-	. "github.com/containers/podman/v5/test/utils"
-	"github.com/containers/storage/pkg/stringid"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.podman.io/podman/v6/cmd/podman/system"
+	. "go.podman.io/podman/v6/test/utils"
+	"go.podman.io/storage/pkg/stringid"
 )
 
 var _ = Describe("Podman events", func() {
-
 	// For most, all, of these tests we do not "live" test following a log because it may make a fragile test
 	// system more complex.  Instead we run the "events" and then verify that the events are processed correctly.
 	// Perhaps a future version of this test would put events in a go func and send output back over a channel
@@ -242,7 +241,8 @@ var _ = Describe("Podman events", func() {
 
 	It("podman events network connection", func() {
 		network := stringid.GenerateRandomID()
-		result := podmanTest.Podman([]string{"create", "--network", "bridge", ALPINE, "top"})
+		networkDriver := "bridge"
+		result := podmanTest.Podman([]string{"create", "--network", networkDriver, ALPINE, "top"})
 		result.WaitWithDefaultTimeout()
 		Expect(result).Should(ExitCleanly())
 		ctrID := result.OutputToString()
@@ -259,11 +259,16 @@ var _ = Describe("Podman events", func() {
 		result.WaitWithDefaultTimeout()
 		Expect(result).Should(ExitCleanly())
 
+		result = podmanTest.Podman([]string{"network", "rm", network})
+		result.WaitWithDefaultTimeout()
+		Expect(result).Should(ExitCleanly())
+
 		result = podmanTest.Podman([]string{"events", "--stream=false", "--since", "30s"})
 		result.WaitWithDefaultTimeout()
 		Expect(result).Should(ExitCleanly())
 
 		eventDetails := fmt.Sprintf(" %s (container=%s, name=%s)", ctrID, ctrID, network)
+		networkCreateRemoveDetails := fmt.Sprintf("(name=%s, type=%s)", network, networkDriver)
 		// Workaround for #23634, event order not guaranteed when remote.
 		// Although the issue is closed, the bug is a real one. It seems
 		// unlikely ever to be fixed.
@@ -274,9 +279,11 @@ var _ = Describe("Podman events", func() {
 			Expect(lines).To(MatchRegexp(" network connect .* network disconnect "))
 		} else {
 			lines := result.OutputToStringArray()
-			Expect(lines).To(HaveLen(5))
-			Expect(lines[3]).To(ContainSubstring("network connect" + eventDetails))
-			Expect(lines[4]).To(ContainSubstring("network disconnect" + eventDetails))
+			Expect(lines).To(HaveLen(7))
+			Expect(lines[3]).To(And(ContainSubstring("network create"), ContainSubstring(networkCreateRemoveDetails)))
+			Expect(lines[4]).To(ContainSubstring("network connect" + eventDetails))
+			Expect(lines[5]).To(ContainSubstring("network disconnect" + eventDetails))
+			Expect(lines[6]).To(And(ContainSubstring("network remove"), ContainSubstring(networkCreateRemoveDetails)))
 		}
 	})
 
@@ -285,7 +292,7 @@ var _ = Describe("Podman events", func() {
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 
-		for i := 0; i < 5; i++ {
+		for i := range 5 {
 			hc := podmanTest.Podman([]string{"healthcheck", "run", "test-hc"})
 			hc.WaitWithDefaultTimeout()
 			exitCode := hc.ExitCode()
@@ -301,4 +308,66 @@ var _ = Describe("Podman events", func() {
 		Expect(result.OutputToStringArray()).ToNot(BeEmpty(), "Number of health_status events")
 	})
 
+	It("podman events for artifacts", func() {
+		artifactFile, err := createArtifactFile(1024)
+		Expect(err).ToNot(HaveOccurred())
+
+		lock, port, err := setupRegistry(nil)
+		if err == nil {
+			defer lock.Unlock()
+		}
+		Expect(err).ToNot(HaveOccurred())
+
+		artifactName := fmt.Sprintf("localhost:%s/test/events-artifact-remote:latest", port)
+		add := podmanTest.Podman([]string{"artifact", "add", artifactName, artifactFile})
+		add.WaitWithDefaultTimeout()
+		Expect(add).Should(ExitCleanly())
+
+		push := podmanTest.Podman([]string{"artifact", "push", "-q", "--tls-verify=false", artifactName})
+		push.WaitWithDefaultTimeout()
+		Expect(push).Should(ExitCleanly())
+
+		rm := podmanTest.Podman([]string{"artifact", "rm", artifactName})
+		rm.WaitWithDefaultTimeout()
+		Expect(rm).Should(ExitCleanly())
+
+		pull := podmanTest.Podman([]string{"artifact", "pull", "-q", "--tls-verify=false", artifactName})
+		pull.WaitWithDefaultTimeout()
+		Expect(pull).Should(ExitCleanly())
+
+		var events []string
+		Eventually(func() int {
+			result := podmanTest.Podman([]string{"events", "--stream=false", "--filter", "type=artifact", "--filter", "artifact=" + artifactName})
+			result.WaitWithDefaultTimeout()
+			Expect(result).Should(ExitCleanly())
+			events = result.OutputToStringArray()
+			return len(events)
+		}, defaultWaitTimeout, 2).Should(BeNumerically("==", 4), "number of artifact events")
+
+		Expect(events).To(HaveLen(4), "number of artifact events")
+		Expect(events[0]).To(And(ContainSubstring("artifact create"), ContainSubstring(artifactName)), "event log includes artifact create")
+		Expect(events[1]).To(And(ContainSubstring("artifact push"), ContainSubstring(artifactName)), "event log includes artifact push")
+		Expect(events[2]).To(And(ContainSubstring("artifact remove"), ContainSubstring(artifactName)), "event log includes artifact remove")
+		Expect(events[3]).To(And(ContainSubstring("artifact pull"), ContainSubstring(artifactName)), "event log includes artifact pull")
+	})
+	It("podman events with a network filter", func() {
+		netName := "net-" + stringid.GenerateRandomID()[:10]
+		session := podmanTest.Podman([]string{"network", "create", netName})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+
+		rm := podmanTest.Podman([]string{"network", "rm", netName})
+		rm.WaitWithDefaultTimeout()
+		Expect(rm).Should(ExitCleanly())
+
+		result := podmanTest.Podman([]string{"events", "--stream=false", "--since", "1m", "--filter", "network=" + netName})
+		result.WaitWithDefaultTimeout()
+		Expect(result).Should(ExitCleanly())
+		events := result.OutputToStringArray()
+		Expect(events).To(HaveLen(2), "number of network events")
+		Expect(events[0]).To(ContainSubstring("network create"), "first event is network create")
+		Expect(events[0]).To(ContainSubstring(netName), "create event includes network name")
+		Expect(events[1]).To(ContainSubstring("network remove"), "second event is network remove")
+		Expect(events[1]).To(ContainSubstring(netName), "remove event includes network name")
+	})
 })

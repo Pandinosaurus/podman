@@ -5,7 +5,7 @@ package libpod
 import (
 	"bufio"
 	"bytes"
-	"context"
+	stdjson "encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,21 +22,22 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/common/pkg/detach"
-	"github.com/containers/common/pkg/resize"
-	"github.com/containers/common/pkg/version"
-	conmonConfig "github.com/containers/conmon/runner/config"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/libpod/logs"
-	"github.com/containers/podman/v5/pkg/checkpoint/crutils"
-	"github.com/containers/podman/v5/pkg/errorhandling"
-	"github.com/containers/podman/v5/pkg/rootless"
-	"github.com/containers/podman/v5/pkg/specgenutil"
-	"github.com/containers/podman/v5/pkg/util"
-	"github.com/containers/podman/v5/utils"
 	spec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/common/pkg/detach"
+	"go.podman.io/common/pkg/resize"
+	"go.podman.io/common/pkg/version"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/libpod/logs"
+	"go.podman.io/podman/v6/pkg/checkpoint/crutils"
+	"go.podman.io/podman/v6/pkg/errorhandling"
+	"go.podman.io/podman/v6/pkg/rootless"
+	"go.podman.io/podman/v6/pkg/specgenutil"
+	"go.podman.io/podman/v6/pkg/util"
+	"go.podman.io/podman/v6/utils"
+	"go.podman.io/storage/pkg/idtools"
+	"go.podman.io/storage/pkg/regexp"
 	"golang.org/x/sys/unix"
 )
 
@@ -44,7 +46,7 @@ const (
 	// directly from the Go code, so const it here
 	// Important: The conmon attach socket uses an extra byte at the beginning of each
 	// message to specify the STREAM so we have to increase the buffer size by one
-	bufferSize = conmonConfig.BufSize + 1
+	conmonAttachBufferSize = 8193
 )
 
 // ConmonOCIRuntime is an OCI runtime managed by Conmon.
@@ -65,6 +67,7 @@ type ConmonOCIRuntime struct {
 	supportsNoCgroups bool
 	enableKeyring     bool
 	persistDir        string
+	featuresProvider  func() string
 }
 
 // Make a new Conmon-based OCI runtime with the given options.
@@ -78,18 +81,12 @@ func newConmonOCIRuntime(name string, paths []string, conmonPath string, runtime
 		return nil, fmt.Errorf("the OCI runtime must be provided a non-empty name: %w", define.ErrInvalidArg)
 	}
 
-	// Make lookup tables for runtime support
-	supportsJSON := make(map[string]bool, len(runtimeCfg.Engine.RuntimeSupportsJSON.Get()))
-	supportsNoCgroups := make(map[string]bool, len(runtimeCfg.Engine.RuntimeSupportsNoCgroups.Get()))
-	supportsKVM := make(map[string]bool, len(runtimeCfg.Engine.RuntimeSupportsKVM.Get()))
-	for _, r := range runtimeCfg.Engine.RuntimeSupportsJSON.Get() {
-		supportsJSON[r] = true
-	}
-	for _, r := range runtimeCfg.Engine.RuntimeSupportsNoCgroups.Get() {
-		supportsNoCgroups[r] = true
-	}
-	for _, r := range runtimeCfg.Engine.RuntimeSupportsKVM.Get() {
-		supportsKVM[r] = true
+	configIndex := filepath.Base(name)
+
+	if len(runtimeFlags) == 0 {
+		for _, arg := range runtimeCfg.Engine.OCIRuntimesFlags[configIndex] {
+			runtimeFlags = append(runtimeFlags, "--"+arg)
+		}
 	}
 
 	runtime := new(ConmonOCIRuntime)
@@ -107,16 +104,15 @@ func newConmonOCIRuntime(name string, paths []string, conmonPath string, runtime
 	// TODO: probe OCI runtime for feature and enable automatically if
 	// available.
 
-	base := filepath.Base(name)
-	runtime.supportsJSON = supportsJSON[base]
-	runtime.supportsNoCgroups = supportsNoCgroups[base]
-	runtime.supportsKVM = supportsKVM[base]
+	runtime.supportsJSON = slices.Contains(runtimeCfg.Engine.RuntimeSupportsJSON.Get(), configIndex)
+	runtime.supportsNoCgroups = slices.Contains(runtimeCfg.Engine.RuntimeSupportsNoCgroups.Get(), configIndex)
+	runtime.supportsKVM = slices.Contains(runtimeCfg.Engine.RuntimeSupportsKVM.Get(), configIndex)
 
 	foundPath := false
 	for _, path := range paths {
 		stat, err := os.Stat(path)
 		if err != nil {
-			if os.IsNotExist(err) {
+			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
 			return nil, fmt.Errorf("cannot stat OCI runtime %s path: %w", name, err)
@@ -143,15 +139,31 @@ func newConmonOCIRuntime(name string, paths []string, conmonPath string, runtime
 		return nil, fmt.Errorf("no valid executable found for OCI runtime %s: %w", name, define.ErrInvalidArg)
 	}
 
+	// Exec the "features" command lazily once.
+	runtime.featuresProvider = sync.OnceValue(func() string {
+		features, err := utils.ExecCmd(runtime.path, "features")
+		if err != nil {
+			logrus.Debugf("Failed to get features for OCI runtime %s: %v", name, err)
+			return ""
+		}
+		// Remove new lines and whitespace to match Docker output.
+		var buf bytes.Buffer
+		if err := stdjson.Compact(&buf, []byte(features)); err != nil {
+			logrus.Debugf("Failed to compact features output for OCI runtime %s: %v", name, err)
+			return ""
+		}
+		return buf.String()
+	})
+
 	runtime.exitsDir = filepath.Join(runtime.tmpDir, "exits")
 	// The persist-dir is where conmon writes the exit file and oom file (if oom killed), we join the container ID to this path later on
 	runtime.persistDir = filepath.Join(runtime.tmpDir, "persist")
 
 	// Create the exit files and attach sockets directories
-	if err := os.MkdirAll(runtime.exitsDir, 0750); err != nil {
+	if err := os.MkdirAll(runtime.exitsDir, 0o750); err != nil {
 		return nil, fmt.Errorf("creating OCI runtime exit files directory: %w", err)
 	}
-	if err := os.MkdirAll(runtime.persistDir, 0750); err != nil {
+	if err := os.MkdirAll(runtime.persistDir, 0o750); err != nil {
 		return nil, fmt.Errorf("creating OCI runtime persist directory: %w", err)
 	}
 	return runtime, nil
@@ -167,18 +179,26 @@ func (r *ConmonOCIRuntime) Path() string {
 	return r.path
 }
 
+// RuntimeFeatures returns the raw output of the runtime's "features"
+// command or an empty string if the runtime does not support it.
+func (r *ConmonOCIRuntime) RuntimeFeatures() string {
+	return r.featuresProvider()
+}
+
 // hasCurrentUserMapped checks whether the current user is mapped inside the container user namespace
 func hasCurrentUserMapped(ctr *Container) bool {
 	if len(ctr.config.IDMappings.UIDMap) == 0 && len(ctr.config.IDMappings.GIDMap) == 0 {
 		return true
 	}
-	uid := os.Geteuid()
-	for _, m := range ctr.config.IDMappings.UIDMap {
-		if uid >= m.HostID && uid < m.HostID+m.Size {
-			return true
+	containsID := func(id int, mappings []idtools.IDMap) bool {
+		for _, m := range mappings {
+			if id >= m.HostID && id < m.HostID+m.Size {
+				return true
+			}
 		}
+		return false
 	}
-	return false
+	return containsID(os.Geteuid(), ctr.config.IDMappings.UIDMap) && containsID(os.Getegid(), ctr.config.IDMappings.GIDMap)
 }
 
 // CreateContainer creates a container.
@@ -236,9 +256,8 @@ func (r *ConmonOCIRuntime) UpdateContainer(ctr *Container, resources *spec.Linux
 }
 
 func generateResourceFile(res *spec.LinuxResources) (string, []string, error) {
-	flags := []string{}
 	if res == nil {
-		return "", flags, nil
+		return "", nil, nil
 	}
 
 	f, err := os.CreateTemp("", "podman")
@@ -256,7 +275,7 @@ func generateResourceFile(res *spec.LinuxResources) (string, []string, error) {
 		return "", nil, err
 	}
 
-	flags = append(flags, "--resources="+f.Name())
+	flags := []string{"--resources=" + f.Name()}
 	return f.Name(), flags, nil
 }
 
@@ -326,7 +345,7 @@ func (r *ConmonOCIRuntime) StopContainer(ctr *Container, timeout uint, all bool)
 	// Ping the container to see if it's alive
 	// If it's not, it's already stopped, return
 	err := unix.Kill(ctr.state.PID, 0)
-	if err == unix.ESRCH {
+	if errors.Is(err, unix.ESRCH) {
 		return nil
 	}
 
@@ -360,8 +379,7 @@ func (r *ConmonOCIRuntime) StopContainer(ctr *Container, timeout uint, all bool)
 
 		// Before handling error from KillContainer, convert STDERR to a []string
 		// (one string per line of output) and print it.
-		stderrLines := strings.Split(stderr.String(), "\n")
-		for _, line := range stderrLines {
+		for line := range strings.SplitSeq(stderr.String(), "\n") {
 			if line != "" {
 				fmt.Fprintf(os.Stderr, "%s\n", line)
 			}
@@ -601,7 +619,7 @@ func (r *ConmonOCIRuntime) HTTPAttach(ctr *Container, req *http.Request, w http.
 			}
 			errChan <- err
 		}()
-		if err := ctr.ReadLog(context.Background(), logOpts, logChan, 0); err != nil {
+		if err := ctr.ReadLog(req.Context(), logOpts, logChan, 0); err != nil {
 			return err
 		}
 		go func() {
@@ -678,8 +696,7 @@ func (r *ConmonOCIRuntime) HTTPAttach(ctr *Container, req *http.Request, w http.
 // isRetryable returns whether the error was caused by a blocked syscall or the
 // specified operation on a non blocking file descriptor wasn't ready for completion.
 func isRetryable(err error) bool {
-	var errno syscall.Errno
-	if errors.As(err, &errno) {
+	if errno, ok := errors.AsType[syscall.Errno](err); ok {
 		return errno == syscall.EINTR || errno == syscall.EAGAIN
 	}
 	return false
@@ -688,7 +705,7 @@ func isRetryable(err error) bool {
 // openControlFile opens the terminal control file.
 func openControlFile(ctr *Container, parentDir string) (*os.File, error) {
 	controlPath := filepath.Join(parentDir, "ctl")
-	for i := 0; i < 600; i++ {
+	for range 600 {
 		controlFile, err := os.OpenFile(controlPath, unix.O_WRONLY|unix.O_NONBLOCK, 0)
 		if err == nil {
 			return controlFile, nil
@@ -859,6 +876,11 @@ func (r *ConmonOCIRuntime) OOMFilePath(ctr *Container) (string, error) {
 	return filepath.Join(r.persistDir, ctr.ID(), "oom"), nil
 }
 
+// PersistDirectoryPath is the path to the container's persist directory.
+func (r *ConmonOCIRuntime) PersistDirectoryPath(ctr *Container) (string, error) {
+	return filepath.Join(r.persistDir, ctr.ID()), nil
+}
+
 // RuntimeInfo provides information on the runtime.
 func (r *ConmonOCIRuntime) RuntimeInfo() (*define.ConmonInfo, *define.OCIRuntimeInfo, error) {
 	runtimePackage := version.Package(r.path)
@@ -878,10 +900,11 @@ func (r *ConmonOCIRuntime) RuntimeInfo() (*define.ConmonInfo, *define.OCIRuntime
 		Version: conmonVersion,
 	}
 	ocirt := define.OCIRuntimeInfo{
-		Name:    r.name,
-		Path:    r.path,
-		Package: runtimePackage,
-		Version: runtimeVersion,
+		Name:     r.name,
+		Path:     r.path,
+		Package:  runtimePackage,
+		Version:  runtimeVersion,
+		Features: r.featuresProvider(),
 	}
 	return &conmon, &ocirt, nil
 }
@@ -911,26 +934,51 @@ func waitPidStop(pid int, timeout time.Duration) error {
 	}
 }
 
-func (r *ConmonOCIRuntime) getLogTag(ctr *Container) (string, error) {
+func (r *ConmonOCIRuntime) getLogData(ctr *Container) (string, map[string]string, error) {
 	logTag := ctr.LogTag()
-	if logTag == "" {
-		return "", nil
+	logLabels := ctr.LogLabels()
+
+	// inspectLocked is expensive, skip it if possible
+	if logTag == "" && len(logLabels) == 0 {
+		return "", nil, nil
 	}
+
 	data, err := ctr.inspectLocked(false)
 	if err != nil {
 		// FIXME: this error should probably be returned
-		return "", nil //nolint: nilerr
+		return "", nil, nil //nolint: nilerr
 	}
-	tmpl, err := template.New("container").Parse(logTag)
-	if err != nil {
-		return "", fmt.Errorf("template parsing error %s: %w", logTag, err)
+
+	var parsedLogTag string
+	if logTag != "" {
+		tmpl, err := template.New("container").Parse(logTag)
+		if err != nil {
+			return "", nil, fmt.Errorf("template parsing error %s: %w", logTag, err)
+		}
+		var b bytes.Buffer
+		err = tmpl.Execute(&b, data)
+		if err != nil {
+			return "", nil, err
+		}
+		parsedLogTag = b.String()
 	}
-	var b bytes.Buffer
-	err = tmpl.Execute(&b, data)
-	if err != nil {
-		return "", err
+
+	parsedLogLabels := make(map[string]string)
+	for labelKey, labelValue := range logLabels {
+		tmpl, err := template.New("container").Parse(labelValue)
+		if err != nil {
+			return "", nil, fmt.Errorf("template parsing error %s (label %s): %w", labelValue, labelKey, err)
+		}
+
+		var b bytes.Buffer
+		err = tmpl.Execute(&b, data)
+		if err != nil {
+			return "", nil, err
+		}
+		parsedLogLabels[labelKey] = b.String()
 	}
-	return b.String(), nil
+
+	return parsedLogTag, parsedLogLabels, nil
 }
 
 func getPreserveFdExtraFiles(preserveFD []uint, preserveFDs uint) (uint, []*os.File, []*os.File, error) {
@@ -984,11 +1032,11 @@ func (r *ConmonOCIRuntime) createOCIContainer(ctr *Container, restoreOptions *Co
 	defer errorhandling.CloseQuiet(parentStartPipe)
 
 	var ociLog string
-	if logrus.GetLevel() != logrus.DebugLevel && r.supportsJSON {
+	if r.supportsJSON {
 		ociLog = filepath.Join(ctr.state.RunDir, "oci-log")
 	}
 
-	logTag, err := r.getLogTag(ctr)
+	logTag, logLabels, err := r.getLogData(ctr)
 	if err != nil {
 		return 0, err
 	}
@@ -1005,7 +1053,7 @@ func (r *ConmonOCIRuntime) createOCIContainer(ctr *Container, restoreOptions *Co
 	}
 
 	persistDir := filepath.Join(r.persistDir, ctr.ID())
-	args, err := r.sharedConmonArgs(ctr, ctr.ID(), ctr.bundlePath(), pidfile, ctr.LogPath(), r.exitsDir, persistDir, ociLog, ctr.LogDriver(), logTag)
+	args, err := r.sharedConmonArgs(ctr, ctr.ID(), ctr.bundlePath(), pidfile, ctr.LogPath(), r.exitsDir, persistDir, ociLog, ctr.LogDriver(), logTag, logLabels)
 	if err != nil {
 		return 0, err
 	}
@@ -1073,6 +1121,9 @@ func (r *ConmonOCIRuntime) createOCIContainer(ctr *Container, restoreOptions *Co
 		args = append(args, "--restore", ctr.CheckpointPath())
 		if restoreOptions.TCPEstablished {
 			args = append(args, "--runtime-opt", "--tcp-established")
+		}
+		if restoreOptions.TCPClose {
+			args = append(args, "--runtime-opt", "--tcp-close")
 		}
 		if restoreOptions.FileLocks {
 			args = append(args, "--runtime-opt", "--file-locks")
@@ -1146,37 +1197,30 @@ func (r *ConmonOCIRuntime) createOCIContainer(ctr *Container, restoreOptions *Co
 		// by the container and conmon will keep the ports busy so that another
 		// process cannot use them.
 		cmd.ExtraFiles = append(cmd.ExtraFiles, ports...)
+
+		// For rootless port forwarding via rootlessport, create sync pipe and
+		// leak write end to conmon. Pasta forwarding mode does not use
+		// rootlessport, so no pipe is needed.
+		if rootless.IsRootless() && len(ctr.config.PortMappings) > 0 &&
+			ctr.runtime.config.Network.RootlessPortForwarder == config.RootlessPortForwarderRootlessport {
+			ctr.rootlessPortSyncR, ctr.rootlessPortSyncW, err = os.Pipe()
+			if err != nil {
+				return 0, fmt.Errorf("failed to create rootless port sync pipe: %w", err)
+			}
+			defer errorhandling.CloseQuiet(ctr.rootlessPortSyncW)
+			// Leak one end in conmon, the other one will be used by rootlessport
+			cmd.ExtraFiles = append(cmd.ExtraFiles, ctr.rootlessPortSyncW)
+		}
 	} else {
 		// ports were bound in ctr.prepare() as we must do it before the netns setup
 		filesToClose = append(filesToClose, ctr.reservedPorts...)
 		cmd.ExtraFiles = append(cmd.ExtraFiles, ctr.reservedPorts...)
 		ctr.reservedPorts = nil
-	}
 
-	if ctr.config.NetMode.IsSlirp4netns() || rootless.IsRootless() {
-		if ctr.config.PostConfigureNetNS {
-			havePortMapping := len(ctr.config.PortMappings) > 0
-			if havePortMapping {
-				ctr.rootlessPortSyncR, ctr.rootlessPortSyncW, err = os.Pipe()
-				if err != nil {
-					return 0, fmt.Errorf("failed to create rootless port sync pipe: %w", err)
-				}
-			}
-			ctr.rootlessSlirpSyncR, ctr.rootlessSlirpSyncW, err = os.Pipe()
-			if err != nil {
-				return 0, fmt.Errorf("failed to create rootless network sync pipe: %w", err)
-			}
-		}
-
-		if ctr.rootlessSlirpSyncW != nil {
-			defer errorhandling.CloseQuiet(ctr.rootlessSlirpSyncW)
-			// Leak one end in conmon, the other one will be leaked into slirp4netns
-			cmd.ExtraFiles = append(cmd.ExtraFiles, ctr.rootlessSlirpSyncW)
-		}
-
+		// For rootless port forwarding, leak write end to conmon
+		// The pipes were created in setupRootlessPortMappingViaRLK() during network setup
 		if ctr.rootlessPortSyncW != nil {
 			defer errorhandling.CloseQuiet(ctr.rootlessPortSyncW)
-			// Leak one end in conmon, the other one will be leaked into rootlessport
 			cmd.ExtraFiles = append(cmd.ExtraFiles, ctr.rootlessPortSyncW)
 		}
 	}
@@ -1268,14 +1312,20 @@ func (r *ConmonOCIRuntime) configureConmonEnv() ([]string, error) {
 	return res, nil
 }
 
+var journaldFieldNameRegexp = regexp.Delayed(`^[A-Z0-9_]+$`)
+
+func validJournaldFieldName(s string) bool {
+	return journaldFieldNameRegexp.MatchString(s)
+}
+
 // sharedConmonArgs takes common arguments for exec and create/restore and formats them for the conmon CLI
-// func (r *ConmonOCIRuntime) sharedConmonArgs(ctr *Container, cuuid, bundlePath, pidPath, logPath, exitDir, persistDir, ociLogPath, logDriver, logTag string) ([]string, error) {
-func (r *ConmonOCIRuntime) sharedConmonArgs(ctr *Container, cuuid, bundlePath, pidPath, logPath, exitDir, persistDir, ociLogPath, logDriver, logTag string) ([]string, error) {
+// func (r *ConmonOCIRuntime) sharedConmonArgs(ctr *Container, cuuid, bundlePath, pidPath, logPath, exitDir, persistDir, ociLogPath, logDriver, logTag string, logLabels map[string]string) ([]string, error) {
+func (r *ConmonOCIRuntime) sharedConmonArgs(ctr *Container, cuuid, bundlePath, pidPath, logPath, exitDir, persistDir, ociLogPath, logDriver, logTag string, logLabels map[string]string) ([]string, error) {
 	// Make the persists directory for the container after the ctr ID is appended to it in the caller
 	// This is needed as conmon writes the exit and oom file in the given persist directory path as just "exit" and "oom"
 	// So creating a directory with the container ID under the persist dir will help keep track of which container the
 	// exit and oom files belong to.
-	if err := os.MkdirAll(persistDir, 0750); err != nil {
+	if err := os.MkdirAll(persistDir, 0o750); err != nil {
 		return nil, fmt.Errorf("creating OCI runtime oom files directory for ctr %q: %w", ctr.ID(), err)
 	}
 
@@ -1334,10 +1384,7 @@ func (r *ConmonOCIRuntime) sharedConmonArgs(ctr *Container, cuuid, bundlePath, p
 	logrus.Debugf("%s messages will be logged to syslog", r.conmonPath)
 	args = append(args, "--syslog")
 
-	size := r.logSizeMax
-	if ctr.config.LogSize > 0 {
-		size = ctr.config.LogSize
-	}
+	size := ctr.LogSizeMax()
 	if size > 0 {
 		args = append(args, "--log-size-max", strconv.FormatInt(size, 10))
 	}
@@ -1348,6 +1395,17 @@ func (r *ConmonOCIRuntime) sharedConmonArgs(ctr *Container, cuuid, bundlePath, p
 	if logTag != "" {
 		args = append(args, "--log-tag", logTag)
 	}
+	if logDriverArg == define.JournaldLogging {
+		for label, value := range logLabels {
+			if !validJournaldFieldName(label) {
+				return nil, fmt.Errorf("log label %q contains invalid characters, only uppercase letters, digits, and underscores are allowed", label)
+			}
+			args = append(args, "--log-label", fmt.Sprintf("%s=%s", label, value))
+		}
+	} else if len(logLabels) > 0 {
+		return nil, fmt.Errorf("log labels can only be used with journald log driver")
+	}
+
 	if ctr.config.NoCgroups {
 		logrus.Debugf("Running with no Cgroups")
 		args = append(args, "--runtime-arg", "--cgroup-manager", "--runtime-arg", "disabled")
@@ -1492,7 +1550,7 @@ func (r *ConmonOCIRuntime) getOCIRuntimeVersion() (string, error) {
 // the HTTP connection. cid is the ID of the container the attach session is
 // running for (used solely for error messages).
 func httpAttachTerminalCopy(container *net.UnixConn, http *bufio.ReadWriter, cid string) error {
-	buf := make([]byte, bufferSize)
+	buf := make([]byte, conmonAttachBufferSize)
 	for {
 		numR, err := container.Read(buf)
 		logrus.Debugf("Read fd(%d) %d/%d bytes for container %s", int(buf[0]), numR, len(buf), cid)
@@ -1525,7 +1583,7 @@ func httpAttachTerminalCopy(container *net.UnixConn, http *bufio.ReadWriter, cid
 			}
 		}
 		if err != nil {
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				return nil
 			}
 			return err
@@ -1536,7 +1594,7 @@ func httpAttachTerminalCopy(container *net.UnixConn, http *bufio.ReadWriter, cid
 // Copy data from a container to an HTTP connection, for non-terminal attach.
 // Appends a header to multiplex input.
 func httpAttachNonTerminalCopy(container *net.UnixConn, http *bufio.ReadWriter, cid string, stdin, stdout, stderr bool) error {
-	buf := make([]byte, bufferSize)
+	buf := make([]byte, conmonAttachBufferSize)
 	for {
 		numR, err := container.Read(buf)
 		if numR > 0 {
@@ -1611,7 +1669,7 @@ func httpAttachNonTerminalCopy(container *net.UnixConn, http *bufio.ReadWriter, 
 			}
 		}
 		if err != nil {
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				return nil
 			}
 

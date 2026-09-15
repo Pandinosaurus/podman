@@ -7,16 +7,19 @@ import (
 	"slices"
 	"time"
 
-	"github.com/containers/common/libnetwork/types"
-	"github.com/containers/podman/v5/pkg/bindings"
-	"github.com/containers/podman/v5/pkg/bindings/containers"
-	"github.com/containers/podman/v5/pkg/bindings/network"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/gexec"
+	"go.podman.io/common/libnetwork/types"
+	"go.podman.io/podman/v6/pkg/bindings"
+	"go.podman.io/podman/v6/pkg/bindings/containers"
+	"go.podman.io/podman/v6/pkg/bindings/network"
 )
 
-var _ = Describe("Podman networks", func() {
+// Serial because the network config dir is shared between all the services
+// these tests start, so the prune in BeforeEach and the list assertions below
+// would see networks belonging to another test.
+var _ = Describe("Podman networks", Serial, func() {
 	var (
 		bt       *bindingTest
 		s        *gexec.Session
@@ -25,7 +28,6 @@ var _ = Describe("Podman networks", func() {
 	)
 
 	BeforeEach(func() {
-
 		bt = newBindingTest()
 		bt.RestoreImagesFromCache()
 		s = bt.startAPIService()
@@ -137,7 +139,7 @@ var _ = Describe("Podman networks", func() {
 	It("list networks", func() {
 		// create a bunch of named networks and make verify with list
 		netNames := []string{"homer", "bart", "lisa", "maggie", "marge"}
-		for i := 0; i < 5; i++ {
+		for i := range 5 {
 			net := types.Network{
 				Name: netNames[i],
 			}
@@ -179,6 +181,12 @@ var _ = Describe("Podman networks", func() {
 		Expect(err).ToNot(HaveOccurred())
 		Expect(code).To(BeNumerically("==", http.StatusNotFound))
 
+		// removing a noName network with ignore should succeed
+		options := new(network.RemoveOptions).WithIgnore(true)
+		report, err := network.Remove(connText, "noName", options)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(report).To(BeEmpty())
+
 		// Removing an unused network should work
 		name := "unused"
 		net := types.Network{
@@ -186,7 +194,7 @@ var _ = Describe("Podman networks", func() {
 		}
 		_, err = network.Create(connText, &net)
 		Expect(err).ToNot(HaveOccurred())
-		report, err := network.Remove(connText, name, nil)
+		report, err = network.Remove(connText, name, nil)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(report[0].Name).To(Equal(name))
 
@@ -212,7 +220,7 @@ var _ = Describe("Podman networks", func() {
 		// Removing with a network in use with force should work with a stopped container
 		err = containers.Stop(connText, container, new(containers.StopOptions).WithTimeout(0))
 		Expect(err).ToNot(HaveOccurred())
-		options := new(network.RemoveOptions).WithForce(true)
+		options = new(network.RemoveOptions).WithForce(true)
 		report, err = network.Remove(connText, name, options)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(report[0].Name).To(Equal(name))

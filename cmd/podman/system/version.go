@@ -5,14 +5,14 @@ import (
 	"os"
 	"strings"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/common/pkg/report"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/validate"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/common/pkg/report"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/validate"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 var (
@@ -40,11 +40,16 @@ func init() {
 	_ = versionCommand.RegisterFlagCompletionFunc(formatFlagName, common.AutocompleteFormat(&entities.SystemVersionReport{}))
 }
 
-func version(cmd *cobra.Command, args []string) error {
+func version(cmd *cobra.Command, _ []string) error {
 	versions, err := registry.ContainerEngine().Version(registry.Context())
 	if err != nil {
 		return err
 	}
+	return PrintVersion(cmd, versions)
+}
+
+func PrintVersion(cmd *cobra.Command, versions *entities.SystemVersionReport) error {
+	var err error
 
 	if report.IsJSON(versionFormat) {
 		s, err := json.MarshalToString(versions)
@@ -97,6 +102,7 @@ API Version:\t{{.APIVersion}}
 Go Version:\t{{.GoVersion}}
 {{if .GitCommit -}}Git Commit:\t{{.GitCommit}}\n{{end -}}
 Built:\t{{.BuiltTime}}
+{{if .BuildOrigin -}}Build Origin:\t{{.BuildOrigin}}\n{{end -}}
 OS/Arch:\t{{.OsArch}}
 {{- end}}
 
@@ -108,6 +114,7 @@ API Version:\t{{.APIVersion}}
 Go Version:\t{{.GoVersion}}
 {{if .GitCommit -}}Git Commit:\t{{.GitCommit}}\n{{end -}}
 Built:\t{{.BuiltTime}}
+{{if .BuildOrigin -}}Build Origin:\t{{.BuildOrigin}}\n{{end -}}
 OS/Arch:\t{{.OsArch}}
 {{- end}}{{- end}}
 `

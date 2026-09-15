@@ -117,12 +117,6 @@ RELABEL="system_u:object_r:container_file_t:s0"
        is "$output" "${RELABEL} $TESTDIR" "selinux relabel should have happened"
     fi
 
-    # Make sure that the K8s pause image isn't pulled but the local podman-pause is built.
-    run_podman images
-    run_podman 1 image exists k8s.gcr.io/pause
-    run_podman 1 image exists registry.k8s.io/pause
-    run_podman image exists $(pause_image)
-
     run_podman pod rm -t 0 -f $PODNAME
 }
 
@@ -158,7 +152,7 @@ RELABEL="system_u:object_r:container_file_t:s0"
     # Run `play kube` in the background as it will wait for the service
     # container to exit.
     timeout --foreground -v --kill=10 60 \
-        $PODMAN play kube --service-container=true --log-driver journald $TESTYAML &>/dev/null &
+        "${PODMAN_CMD[@]}" play kube --service-container=true --log-driver journald $TESTYAML &>/dev/null &
 
     # Wait for the container to be running
     container_a=$PODCTRNAME
@@ -231,14 +225,6 @@ RELABEL="system_u:object_r:container_file_t:s0"
     run_podman pod inspect --format "{{.InfraConfig.HostNetwork}}" $PODNAME
     is "$output" "true" ".InfraConfig.HostNetwork"
     run_podman pod rm -t 0 -f $PODNAME
-
-    if has_slirp4netns; then
-        run_podman kube play --network slirp4netns:port_handler=slirp4netns $TESTYAML
-        run_podman pod inspect --format {{.InfraContainerID}} "${lines[1]}"
-        infraID="$output"
-        run_podman container inspect --format "{{.HostConfig.NetworkMode}}" $infraID
-        is "$output" "slirp4netns" "network mode slirp4netns is set for the container"
-    fi
 
     run_podman pod rm -t 0 -f $PODNAME
 
@@ -575,7 +561,7 @@ EOF
     # Run `play kube` in the background as it will wait for the service
     # container to exit.
     timeout --foreground -v --kill=10 60 \
-        $PODMAN play kube --service-container=true --log-driver journald $TESTYAML &>/dev/null &
+        "${PODMAN_CMD[@]}" play kube --service-container=true --log-driver journald $TESTYAML &>/dev/null &
 
     # The name of the service container is predictable: the first 12 characters
     # of the hash of the YAML file followed by the "-service" suffix
@@ -660,17 +646,35 @@ spec:
       image: $IMAGE
       command:
       - top
+      - -b
 " > $fname
 
-    # force a timeout to happen so that the kube play command is killed
-    # and expect the timeout code 124 to happen so that we can clean up
+    # Run in background, then wait for pod to start running.
+    # This guarantees that when we send the signal (below) we do so
+    # on a running container; signaling during initialization
+    # results in undefined behavior.
+    logfile=$PODMAN_TMPDIR/kube-play.log
+    "${PODMAN_CMD[@]}" kube play --wait $fname &> $logfile &
+    local kidpid=$!
+
+    for try in {1..10}; do
+        run_podman '?' container inspect --format '{{.State.Running}}' "$podname-$ctrname"
+        if [[ $status -eq 0 ]] && [[ "$output" = "true" ]]; then
+            break
+        fi
+        sleep 1
+    done
+    wait_for_output "Mem:" "$podname-$ctrname"
+
+    # Send SIGINT to container, and see how long it takes to exit.
     local t0=$SECONDS
-    PODMAN_TIMEOUT=2 run_podman 124 kube play --wait $fname
+    kill -2 $kidpid
+    wait $kidpid
     local t1=$SECONDS
     local delta_t=$((t1 - t0))
 
     # Expectation (in seconds) of when we should time out. When running
-    # parallel, allow 4 more seconds due to system load
+    # parallel, allow longer time due to system load
     local expect=4
     if [[ -n "$PARALLEL_JOBSLOT" ]]; then
         expect=$((expect + 4))
@@ -678,7 +682,8 @@ spec:
     assert $delta_t -le $expect \
            "podman kube play did not get killed within $expect seconds"
     # Make sure we actually got SIGTERM and podman printed its message.
-    assert "$output" =~ "Cleaning up containers, pods, and volumes" "kube play printed sigterm message"
+    assert "$(< $logfile)" =~ "Cleaning up containers, pods, and volumes" \
+           "kube play printed sigterm message"
 
     # there should be no containers running or created
     run_podman ps -a --noheading
@@ -951,6 +956,56 @@ EOF
     done
 }
 
+# bats test_tags=ci:parallel
+@test "podman kube play healthcheck should wait initialDelaySeconds before executing healthcheck" {
+
+    # GIVEN a container with a liveness exec healthcheck with initialDelaySeconds that is quite long
+    podname="liveness-exec-$(safename)"
+    ctrname="liveness-ctr-$(safename)"
+
+    fname="$PODMAN_TMPDIR/play_kube_$(random_string 6).yaml"
+    cat <<EOF >$fname
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+  name: $podname
+spec:
+  containers:
+  - name: $ctrname
+    image: $IMAGE
+    args:
+    - /bin/sh
+    - -c
+    - sleep 100
+    livenessProbe:
+      exec:
+        # /tmp/healthy will exist in healthy container
+        command:
+        - /bin/sh
+        - -c
+        - touch /tmp/healthcheck.log
+      initialDelaySeconds: 100
+      failureThreshold: 1
+      periodSeconds: 1
+EOF
+
+    run_podman kube play $fname
+    ctrName="$podname-$ctrname"
+
+    # WHEN then healthcheck is executed
+    run_podman 1 healthcheck run $ctrName
+
+    # THEN the execution of the liveness probe should be skipped because initialDelaySeconds has not yet elapsed
+    run_podman 1 exec $ctrName test -e /tmp/healthcheck.log
+
+    # The sleep command does not respond to SIGTERM, so we have to use stop here.
+    # This is done to save time in the test suite.
+    run_podman stop -t0 $ctrName
+
+    run_podman kube down $fname
+}
+
 # CANNOT BE PARALLELIZED (YET): buildah#5674, parallel builds fail
 # ...workaround is --layers=false, but there's no way to do that in kube
 @test "podman play --build private registry" {
@@ -981,6 +1036,14 @@ _EOF
 
     # Remove the local image to make sure it will be pulled again
     run_podman image rm --ignore $from_image
+
+    # The error below assumes unqualified-search registries exist, however the default
+    # distro config may not set some and thus resulting in a different error message.
+    # We could try to match a third or or simply force a know static config to trigger
+    # the right error.
+    local CONTAINERS_REGISTRIES_CONF="$PODMAN_TMPDIR/registries.conf"
+    echo 'unqualified-search-registries = ["quay.io"]' > "$CONTAINERS_REGISTRIES_CONF"
+    export CONTAINERS_REGISTRIES_CONF
 
     _write_test_yaml command=id image=$userimage
     run_podman 125 play kube --build --start=false $TESTYAML
@@ -1262,4 +1325,24 @@ EOF
     assert "$output" == "auto" "user namespace should be kept"
 
     run_podman pod rm -f $podname
+}
+
+# bats test_tags=ci:parallel
+@test "podman kube play - publish with default_host_ips" {
+    skip_if_remote "CONTAINERS_CONF_OVERRIDE redirect does not work on remote"
+
+    HOST_PORT=$(random_free_port)
+
+    containersconf=$PODMAN_TMPDIR/containers.conf
+    cat >$containersconf <<EOF
+[network]
+  default_host_ips = ["127.0.0.1"]
+EOF
+
+    _write_test_yaml command=top
+
+    CONTAINERS_CONF_OVERRIDE=$containersconf run_podman kube play --publish $HOST_PORT:80 $TESTYAML
+    CONTAINERS_CONF_OVERRIDE=$containersconf run_podman pod inspect $PODNAME --format "{{.InfraConfig.PortBindings}}"
+    assert "$output" =~ "127.0.0.1 $HOST_PORT" "HostIP should be 127.0.0.1 from config"
+    CONTAINERS_CONF_OVERRIDE=$containersconf run_podman kube down $TESTYAML
 }

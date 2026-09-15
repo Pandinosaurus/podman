@@ -4,14 +4,14 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/utils"
-	"github.com/containers/podman/v5/cmd/podman/validate"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/specgenutil"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/utils"
+	"go.podman.io/podman/v6/cmd/podman/validate"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/specgenutil"
 )
 
 // allows for splitting API and CLI-only options
@@ -35,7 +35,7 @@ var (
 		},
 		ValidArgsFunction: common.AutocompletePods,
 		Example: `podman pod start podID
-  podman pod start --all`,
+podman pod start --all`,
 	}
 )
 
@@ -57,7 +57,7 @@ func init() {
 	validate.AddLatestFlag(startCommand, &startOptions.Latest)
 }
 
-func start(cmd *cobra.Command, args []string) error {
+func start(_ *cobra.Command, args []string) error {
 	var errs utils.OutputErrors
 
 	ids, err := specgenutil.ReadPodIDFiles(startOptions.PodIDFiles)

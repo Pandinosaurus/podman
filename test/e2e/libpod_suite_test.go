@@ -8,32 +8,28 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	. "go.podman.io/podman/v6/test/utils"
 )
 
 func IsRemote() bool {
 	return false
 }
 
-// Podman is the exec call to podman on the filesystem
+// Podman executes podman on the filesystem with default options.
 func (p *PodmanTestIntegration) Podman(args []string) *PodmanSessionIntegration {
-	podmanSession := p.PodmanBase(args, false, false)
+	return p.PodmanWithOptions(PodmanExecOptions{}, args...)
+}
+
+// PodmanWithOptions executes podman on the filesystem with the supplied options.
+func (p *PodmanTestIntegration) PodmanWithOptions(options PodmanExecOptions, args ...string) *PodmanSessionIntegration {
+	podmanSession := p.PodmanExecBaseWithOptions(args, options)
 	return &PodmanSessionIntegration{podmanSession}
 }
 
-// PodmanSystemdScope runs the podman command in a new systemd scope
-func (p *PodmanTestIntegration) PodmanSystemdScope(args []string) *PodmanSessionIntegration {
-	wrapper := []string{"systemd-run", "--scope"}
-	if isRootless() {
-		wrapper = []string{"systemd-run", "--scope", "--user"}
-	}
-	podmanSession := p.PodmanAsUserBase(args, 0, 0, "", nil, false, false, wrapper, nil)
-	return &PodmanSessionIntegration{podmanSession}
-}
-
-// PodmanExtraFiles is the exec call to podman on the filesystem and passes down extra files
-func (p *PodmanTestIntegration) PodmanExtraFiles(args []string, extraFiles []*os.File) *PodmanSessionIntegration {
-	podmanSession := p.PodmanAsUserBase(args, 0, 0, "", nil, false, false, nil, extraFiles)
-	return &PodmanSessionIntegration{podmanSession}
+func PodmanTestCreate(tempDir string) *PodmanTestIntegration {
+	pti := PodmanTestCreateUtil(tempDir, PodmanTestCreateUtilTargetLocal)
+	pti.StartRemoteService()
+	return pti
 }
 
 func (p *PodmanTestIntegration) setDefaultRegistriesConfigEnv() {
@@ -49,16 +45,12 @@ func (p *PodmanTestIntegration) setDefaultRegistriesConfigEnv() {
 func (p *PodmanTestIntegration) setRegistriesConfigEnv(b []byte) {
 	outfile := filepath.Join(p.TempDir, "registries.conf")
 	os.Setenv("CONTAINERS_REGISTRIES_CONF", outfile)
-	err := os.WriteFile(outfile, b, 0644)
+	err := os.WriteFile(outfile, b, 0o644)
 	Expect(err).ToNot(HaveOccurred())
 }
 
 func resetRegistriesConfigEnv() {
 	os.Setenv("CONTAINERS_REGISTRIES_CONF", "")
-}
-
-func PodmanTestCreate(tempDir string) *PodmanTestIntegration {
-	return PodmanTestCreateUtil(tempDir, false)
 }
 
 // RestoreArtifact puts the cached image into our test store
@@ -79,6 +71,6 @@ func (p *PodmanTestIntegration) StartRemoteService() {
 }
 
 // Just a stub for compiling with `!remote`.
-func getRemoteOptions(p *PodmanTestIntegration, args []string) []string {
+func getRemoteOptions(_ *PodmanTestIntegration, _ []string) []string {
 	return nil
 }

@@ -10,8 +10,8 @@ import (
 	"os/exec"
 	"path/filepath"
 
-	"github.com/containers/storage/pkg/fileutils"
 	"github.com/spf13/cobra"
+	"go.podman.io/storage/pkg/fileutils"
 )
 
 var uninstallCmd = &cobra.Command{
@@ -27,7 +27,7 @@ func init() {
 	rootCmd.AddCommand(uninstallCmd)
 }
 
-func uninstall(cmd *cobra.Command, args []string) error {
+func uninstall(_ *cobra.Command, _ []string) error {
 	userName, _, homeDir, err := getUser()
 	if err != nil {
 		return err
@@ -40,7 +40,8 @@ func uninstall(cmd *cobra.Command, args []string) error {
 		// Try removing the service by label in case the service is half uninstalled
 		if rerr := runDetectErr("launchctl", "remove", labelName); rerr != nil {
 			// Exit code 3 = no service to remove
-			if exitErr, ok := rerr.(*exec.ExitError); !ok || exitErr.ExitCode() != 3 {
+			var exitErr *exec.ExitError
+			if !errors.As(rerr, &exitErr) || exitErr.ExitCode() != 3 {
 				fmt.Fprintf(os.Stderr, "Warning: service unloading failed: %s\n", err.Error())
 				fmt.Fprintf(os.Stderr, "Warning: remove also failed: %s\n", rerr.Error())
 			}
@@ -48,7 +49,7 @@ func uninstall(cmd *cobra.Command, args []string) error {
 	}
 
 	if err := os.Remove(fileName); err != nil {
-		if !os.IsNotExist(err) {
+		if !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("could not remove plist file: %s", fileName)
 		}
 	}
@@ -65,11 +66,11 @@ func uninstall(cmd *cobra.Command, args []string) error {
 			return nil
 		}
 		// Return an error if unable to get the file information
-		return fmt.Errorf("could not stat dockerSock: %v", err)
+		return fmt.Errorf("could not stat dockerSock: %w", err)
 	}
 	if target, err := os.Readlink(dockerSock); err != nil {
 		// Return an error if unable to read the symlink
-		return fmt.Errorf("could not read dockerSock symlink: %v", err)
+		return fmt.Errorf("could not read dockerSock symlink: %w", err)
 	} else {
 		// Check if the target of the symlink matches the expected target
 		expectedTarget := filepath.Join(homeDir, ".local", "share", "containers", "podman", "machine", "podman.sock")
@@ -82,7 +83,7 @@ func uninstall(cmd *cobra.Command, args []string) error {
 		// Attempt to remove dockerSock
 		if err := os.Remove(dockerSock); err != nil {
 			if !errors.Is(err, fs.ErrNotExist) {
-				return fmt.Errorf("could not remove dockerSock file: %s", err)
+				return fmt.Errorf("could not remove dockerSock file: %w", err)
 			}
 		}
 	}

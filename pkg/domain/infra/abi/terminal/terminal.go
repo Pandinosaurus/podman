@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package terminal
 
@@ -8,15 +8,14 @@ import (
 	"os"
 	"os/signal"
 
-	"github.com/containers/common/pkg/resize"
-	lsignal "github.com/containers/podman/v5/pkg/signal"
 	"github.com/moby/term"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/pkg/resize"
+	lsignal "go.podman.io/podman/v6/pkg/signal"
 )
 
 // RawTtyFormatter ...
-type RawTtyFormatter struct {
-}
+type RawTtyFormatter struct{}
 
 // getResize returns a TerminalSize command matching stdin's current
 // size on success, and nil on errors.

@@ -4,6 +4,7 @@ package bindings_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -13,14 +14,14 @@ import (
 	"strconv"
 	"syscall"
 
-	"github.com/containers/podman/v5/pkg/bindings"
-	"github.com/containers/podman/v5/pkg/bindings/containers"
-	"github.com/containers/podman/v5/pkg/bindings/images"
-	"github.com/containers/podman/v5/pkg/bindings/pods"
-	"github.com/containers/podman/v5/pkg/bindings/system"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	. "github.com/onsi/gomega/gexec"
+	"go.podman.io/podman/v6/pkg/bindings"
+	"go.podman.io/podman/v6/pkg/bindings/containers"
+	"go.podman.io/podman/v6/pkg/bindings/images"
+	"go.podman.io/podman/v6/pkg/bindings/pods"
+	"go.podman.io/podman/v6/pkg/bindings/system"
 )
 
 var _ = Describe("Verify Podman resources", func() {
@@ -103,7 +104,7 @@ func readProc() ([]string, error) {
 				name += err.Error()
 			case d.Type()&fs.ModeSymlink != 0:
 				n, err := os.Readlink(path)
-				if err != nil && !os.IsNotExist(err) {
+				if err != nil && !errors.Is(err, os.ErrNotExist) {
 					return err
 				}
 				if n == "" {

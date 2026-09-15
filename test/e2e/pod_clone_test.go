@@ -5,13 +5,12 @@ package integration
 import (
 	"os"
 
-	. "github.com/containers/podman/v5/test/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	. "go.podman.io/podman/v6/test/utils"
 )
 
 var _ = Describe("Podman pod clone", func() {
-
 	hostname, _ := os.Hostname()
 
 	BeforeEach(func() {
@@ -82,7 +81,6 @@ var _ = Describe("Podman pod clone", func() {
 		Expect(podInspect).To(ExitCleanly())
 		data := podInspect.InspectPodToJSON()
 		Expect(data.State).To(ContainSubstring("Running"))
-
 	})
 
 	It("podman pod clone destroy test", func() {
@@ -135,9 +133,7 @@ var _ = Describe("Podman pod clone", func() {
 		run := podmanTest.Podman([]string{"run", "--pod", podClone.OutputToString(), ALPINE, "mount"})
 		run.WaitWithDefaultTimeout()
 		Expect(run).Should(ExitCleanly())
-		t, strings := run.GrepString("shm on /dev/shm type tmpfs")
-		Expect(t).To(BeTrue(), "found /dev/shm")
-		Expect(strings[0]).Should(ContainSubstring("size=10240k"))
+		Expect(run.OutputToStringArray()).To(ContainElement(MatchRegexp(`shm on /dev/shm type tmpfs.*size=10240k`)))
 	})
 
 	It("podman pod clone --uts test", func() {
@@ -174,5 +170,4 @@ var _ = Describe("Podman pod clone", func() {
 		podJSON := podInspect.InspectPodToJSON()
 		Expect(podJSON.InfraConfig).To(HaveField("UtsNS", ns))
 	})
-
 })

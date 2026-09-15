@@ -5,16 +5,18 @@
 
 load helpers
 
+# bats file_tags=ci:parallel
+
 ###############################################################################
 # BEGIN setup/teardown
 
-# Each test runs with its own PTY, managed by socat.
-PODMAN_TEST_PTY=$(mktemp -u --tmpdir=${BATS_TMPDIR:-/tmp} podman_pty.XXXXXX)
-PODMAN_DUMMY=$(mktemp -u --tmpdir=${BATS_TMPDIR:-/tmp} podman_dummy.XXXXXX)
-PODMAN_SOCAT_PID=
-
 function setup() {
     basic_setup
+
+    # Each test runs with its own PTY, managed by socat.
+    PODMAN_TEST_PTY=$PODMAN_TMPDIR/podman_pty
+    PODMAN_DUMMY=$PODMAN_TMPDIR/podman_dummy
+    PODMAN_SOCAT_PID=
 
     # Create a pty. Run under 'timeout' because BATS reaps child processes
     # and if we exit before killing socat, bats will hang forever.
@@ -68,14 +70,15 @@ function teardown() {
 
     run_podman rm -t 0 -f mystty
 
-    # FIXME: the checks below are flaking a lot (see #10710).
+    # The same must hold for podman exec. The exec pseudo-terminal is now sized
+    # at creation (honoring the requested ConsoleSize), so stty reads the right
+    # dimensions immediately instead of racing the asynchronous resize that
+    # previously followed attach (see #10710).
+    run_podman run -d --name mystty $IMAGE top
+    run_podman exec -it mystty stty size <$PODMAN_TEST_PTY
+    is "$output" "$rows $cols$CR" "stty under podman exec reads the correct dimensions"
 
-    # check that the same works for podman exec
-#    run_podman run -d --name mystty $IMAGE top
-#    run_podman exec -it mystty stty size <$PODMAN_TEST_PTY
-#    is "$output" "$rows $cols" "stty under podman exec reads the correct dimensions"
-#
-#    run_podman rm -t 0 -f mystty
+    run_podman rm -t 0 -f mystty
 }
 
 
@@ -120,6 +123,24 @@ function teardown() {
 
     run_podman run --rm -v/dev:/dev --log-driver=passthrough-tty $IMAGE tty <$PODMAN_TEST_PTY
     is "$output" "$expected_tty" "passthrough-tty: tty matches"
+}
+
+@test "podman volume export should fail when stdout is a tty" {
+    run_podman volume create testVol
+    run_podman run --rm -v testVol:/data $IMAGE sh -c "echo data > /data/file.txt"
+
+    # Positive Case
+    "${PODMAN_CMD[@]}" volume export testVol --output=/dev/null >$PODMAN_TEST_PTY ||
+        die "$PODMAN volume export testVol --output=/dev/null failed when connected to terminal."
+
+    # Negative Case
+    local rc=0
+    "${PODMAN_CMD[@]}" volume export testVol >$PODMAN_TEST_PTY 2>$PODMAN_TMPDIR/out || rc=$?
+
+    is "$rc" "125" "Exit code should be 125"
+    is "$(<$PODMAN_TMPDIR/out)" "Error: cannot write to terminal, use command-line redirection or the --output flag" "Should refuse to export to terminal."
+
+    run_podman volume rm testVol --force
 }
 
 # vim: filetype=sh

@@ -18,17 +18,6 @@ function setup() {
     basic_setup
 }
 
-# Returns true if we are able to podman-pause
-function _can_pause() {
-    # Even though we're just trying completion, not an actual unpause,
-    # podman barfs with:
-    #    Error: unpause is not supported for cgroupv1 rootless containers
-    if is_rootless && is_cgroupsv1; then
-        return 1
-    fi
-    return 0
-}
-
 function check_shell_completion() {
     local count=0
 
@@ -98,11 +87,6 @@ function check_shell_completion() {
                     ;;
 
                 *CONTAINER*)
-                    # podman unpause fails early on rootless cgroupsv1
-                    if [[ $cmd = "unpause" ]] && ! _can_pause; then
-                        continue 2
-                    fi
-
                     name=$random_container_name
                     # special case podman cp suggest containers names with a colon
                     if [[ $cmd = "cp" ]]; then
@@ -168,10 +152,10 @@ function check_shell_completion() {
 
                 *REGISTRY*)
                     run_completion "$@" $cmd "${extra_args[@]}" ""
-                    ### FIXME how can we get the configured registries?
                     _check_completion_end NoFileComp
-                    ### FIXME this fails if no registries are configured
                     assert "${#lines[@]}" -gt 2 "$* $cmd: No REGISTRIES found in suggestions"
+                    # We can assume quay.io as we force our own CONTAINERS_REGISTRIES_CONF below.
+                    assert "${lines[0]}" == "quay.io" "unqualified-search-registries from registries.conf listed"
 
                     match=true
                     # resume
@@ -196,7 +180,10 @@ function check_shell_completion() {
                         _check_completion_end NoSpace
                     else
                         _check_completion_end Default
-                        _check_no_suggestions
+                        # machine os apply is special and offers images and normal shell completion
+                        if [[ "$cmd" != "apply"  ]]; then
+                            _check_no_suggestions
+                        fi
                     fi
                     ;;
 
@@ -281,9 +268,7 @@ function _check_no_suggestions() {
     run_podman create --name created-$random_container_name $IMAGE
     run_podman run --name running-$random_container_name -d $IMAGE top
     run_podman run --name pause-$random_container_name -d $IMAGE top
-    if _can_pause; then
-        run_podman pause pause-$random_container_name
-    fi
+    run_podman pause pause-$random_container_name
     run_podman run --name exited-$random_container_name -d $IMAGE echo exited
 
     # create pods for each state
@@ -309,6 +294,11 @@ function _check_no_suggestions() {
 
     # create secret
     run_podman secret create $random_secret_name $secret_file
+
+    # create our own registries.conf so we know what registry is set
+    local CONTAINERS_REGISTRIES_CONF="$PODMAN_TMPDIR/registries.conf"
+    echo 'unqualified-search-registries = ["quay.io"]' > "$CONTAINERS_REGISTRIES_CONF"
+    export CONTAINERS_REGISTRIES_CONF
 
     # Called with no args -- start with 'podman --help'. check_shell_completion() will
     # recurse for any subcommands.
@@ -404,4 +394,24 @@ function _check_no_suggestions() {
 
     # cleanup container
     run_podman rm $ctrname
+}
+
+# bats test_tags=ci:parallel
+@test "podman run --sysctl completion for sysctl" {
+    skip_if_remote "sysctl option not working via remote"
+
+    run_completion run --sysctl net.
+
+    assert "$output" =~ "^net\." \
+      "Only suggestions with 'net.' should be present for podman run --sysctl net."
+
+    _check_completion_end NoFileComp
+}
+
+@test "podman network create --interface-name" {
+    run_completion network create --interface-name l
+
+    assert "$output" =~ '.*lo.*' "Loopback interface should be present by default"
+
+    _check_completion_end NoFileComp
 }

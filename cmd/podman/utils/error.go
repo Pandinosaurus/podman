@@ -8,21 +8,21 @@ import (
 	"strconv"
 	"strings"
 
-	buildahCLI "github.com/containers/buildah/pkg/cli"
-	"github.com/containers/podman/v5/cmd/podman/registry"
+	buildahCLI "go.podman.io/buildah/pkg/cli"
+	"go.podman.io/podman/v6/cmd/podman/registry"
 )
 
 type OutputErrors []error
 
 func (o OutputErrors) PrintErrors() (lastError error) {
 	if len(o) == 0 {
-		return
+		return lastError
 	}
 	lastError = o[len(o)-1]
 	for e := 0; e < len(o)-1; e++ {
 		fmt.Fprintf(os.Stderr, "Error: %s\n", o[e])
 	}
-	return
+	return lastError
 }
 
 /*
@@ -60,8 +60,7 @@ func HandleOSExecError(err error) error {
 	if err == nil {
 		return nil
 	}
-	var exitError *exec.ExitError
-	if errors.As(err, &exitError) {
+	if exitError, ok := errors.AsType[*exec.ExitError](err); ok {
 		// the user command inside the unshare/ssh env has failed
 		// we set the exit code, do not return the error to the user
 		// otherwise "exit status X" will be printed

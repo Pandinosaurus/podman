@@ -1,25 +1,25 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package compat
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"time"
 
-	"github.com/containers/podman/v5/libpod"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/api/handlers"
-	"github.com/containers/podman/v5/pkg/api/handlers/utils"
-	api "github.com/containers/podman/v5/pkg/api/types"
-	"github.com/containers/podman/v5/pkg/domain/filters"
-	"github.com/containers/podman/v5/pkg/domain/infra/abi/parse"
-	"github.com/containers/podman/v5/pkg/util"
-	"github.com/docker/docker/api/types/volume"
+	"github.com/moby/moby/api/types/volume"
+	"github.com/moby/moby/client"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/api/handlers"
+	"go.podman.io/podman/v6/pkg/api/handlers/utils"
+	api "go.podman.io/podman/v6/pkg/api/types"
+	"go.podman.io/podman/v6/pkg/domain/filters"
+	"go.podman.io/podman/v6/pkg/domain/infra/abi/parse"
+	"go.podman.io/podman/v6/pkg/util"
 )
 
 func ListVolumes(w http.ResponseWriter, r *http.Request) {
@@ -60,6 +60,9 @@ func ListVolumes(w http.ResponseWriter, r *http.Request) {
 	for _, v := range vols {
 		mp, err := v.MountPoint()
 		if err != nil {
+			if errors.Is(err, define.ErrNoSuchVolume) {
+				continue
+			}
 			utils.InternalServerError(w, err)
 			return
 		}
@@ -74,8 +77,16 @@ func ListVolumes(w http.ResponseWriter, r *http.Request) {
 		}
 		volumeConfigs = append(volumeConfigs, &config)
 	}
+
+	volVals := make([]volume.Volume, 0, len(vols))
+	for _, v := range volumeConfigs {
+		if v != nil {
+			volVals = append(volVals, *v)
+		}
+	}
+
 	response := volume.ListResponse{
-		Volumes:  volumeConfigs,
+		Volumes:  volVals,
 		Warnings: []string{},
 	}
 	utils.WriteResponse(w, http.StatusOK, response)
@@ -95,9 +106,9 @@ func CreateVolume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// decode params from body
-	input := volume.CreateOptions{}
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		utils.Error(w, http.StatusInternalServerError, fmt.Errorf("Decode(): %w", err))
+	input := client.VolumeCreateOptions{}
+	if err := utils.ReadJSONFromBody(r, &input); err != nil {
+		utils.Error(w, http.StatusBadRequest, err)
 		return
 	}
 
@@ -137,6 +148,8 @@ func CreateVolume(w http.ResponseWriter, r *http.Request) {
 
 	if len(input.Name) > 0 {
 		volumeOptions = append(volumeOptions, libpod.WithVolumeName(input.Name))
+	} else {
+		volumeOptions = append(volumeOptions, libpod.WithVolumeAnonymous())
 	}
 	if len(input.Driver) > 0 {
 		volumeOptions = append(volumeOptions, libpod.WithVolumeDriver(input.Driver))
@@ -273,7 +286,7 @@ func PruneVolumes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	f := (url.Values)(*filterMap)
+	f := util.NormalizeVolumePruneFilters(url.Values(*filterMap))
 	filterFuncs := []libpod.VolumeFilter{}
 	for filter, filterValues := range f {
 		filterFunc, err := filters.GeneratePruneVolumeFilters(filter, filterValues, runtime)
@@ -284,7 +297,7 @@ func PruneVolumes(w http.ResponseWriter, r *http.Request) {
 		filterFuncs = append(filterFuncs, filterFunc)
 	}
 
-	pruned, err := runtime.PruneVolumes(r.Context(), filterFuncs)
+	pruned, err := runtime.PruneVolumes(r.Context(), filterFuncs, false)
 	if err != nil {
 		utils.InternalServerError(w, err)
 		return
@@ -308,7 +321,7 @@ func PruneVolumes(w http.ResponseWriter, r *http.Request) {
 	}
 
 	payload := handlers.VolumesPruneReport{
-		VolumesPruneReport: volume.PruneReport{
+		PruneReport: volume.PruneReport{
 			VolumesDeleted: prunedIds,
 			SpaceReclaimed: reclaimedSpace,
 		},

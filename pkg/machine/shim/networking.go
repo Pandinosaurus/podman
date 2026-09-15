@@ -8,15 +8,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/containers/common/pkg/config"
 	gvproxy "github.com/containers/gvisor-tap-vsock/pkg/types"
-	"github.com/containers/podman/v5/pkg/machine"
-	"github.com/containers/podman/v5/pkg/machine/connection"
-	"github.com/containers/podman/v5/pkg/machine/define"
-	"github.com/containers/podman/v5/pkg/machine/env"
-	"github.com/containers/podman/v5/pkg/machine/ports"
-	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/podman/v6/pkg/machine"
+	"go.podman.io/podman/v6/pkg/machine/connection"
+	"go.podman.io/podman/v6/pkg/machine/define"
+	"go.podman.io/podman/v6/pkg/machine/env"
+	"go.podman.io/podman/v6/pkg/machine/ports"
+	"go.podman.io/podman/v6/pkg/machine/vmconfigs"
 )
 
 const (
@@ -81,6 +81,7 @@ func startHostForwarder(mc *vmconfigs.MachineConfig, provider vmconfigs.VMProvid
 	}
 
 	c := cmd.Cmd(binary)
+	setGvproxyProcessAttributes(c)
 
 	logrus.Debugf("gvproxy command-line: %s %s", binary, strings.Join(cmd.ToCmdline(), " "))
 	if err := c.Start(); err != nil {
@@ -124,7 +125,7 @@ func startNetworking(mc *vmconfigs.MachineConfig, provider vmconfigs.VMProvider)
 // conductVMReadinessCheck checks to make sure the machine is in the proper state
 // and that SSH is up and running
 func conductVMReadinessCheck(mc *vmconfigs.MachineConfig, maxBackoffs int, backoff time.Duration, stateF func() (define.Status, error)) (connected bool, sshError error, err error) {
-	for i := 0; i < maxBackoffs; i++ {
+	for i := range maxBackoffs {
 		if i > 0 {
 			time.Sleep(backoff)
 			backoff *= 2
@@ -150,7 +151,7 @@ func conductVMReadinessCheck(mc *vmconfigs.MachineConfig, maxBackoffs int, backo
 		// CoreOS users have reported the same observation but
 		// the underlying source of the issue remains unknown.
 
-		if sshError = machine.CommonSSHSilent(mc.SSH.RemoteUsername, mc.SSH.IdentityPath, mc.Name, mc.SSH.Port, []string{"true"}); sshError != nil {
+		if sshError = machine.LocalhostSSHSilent(mc.SSH.RemoteUsername, mc.SSH.IdentityPath, mc.Name, mc.SSH.Port, []string{"true"}); sshError != nil {
 			logrus.Debugf("SSH readiness check for machine failed: %v", sshError)
 			continue
 		}
@@ -158,7 +159,7 @@ func conductVMReadinessCheck(mc *vmconfigs.MachineConfig, maxBackoffs int, backo
 		sshError = nil
 		break
 	}
-	return
+	return connected, sshError, err
 }
 
 func reassignSSHPort(mc *vmconfigs.MachineConfig, provider vmconfigs.VMProvider) error {
@@ -171,7 +172,7 @@ func reassignSSHPort(mc *vmconfigs.MachineConfig, provider vmconfigs.VMProvider)
 	defer func() {
 		if !success {
 			if err := ports.ReleaseMachinePort(newPort); err != nil {
-				logrus.Warnf("could not release port allocation as part of failure rollback (%d): %s", newPort, err.Error())
+				logrus.Warnf("could not release port allocation as part of failure rollback (%d): %v", newPort, err)
 			}
 		}
 	}()
@@ -184,7 +185,7 @@ func reassignSSHPort(mc *vmconfigs.MachineConfig, provider vmconfigs.VMProvider)
 	}
 
 	if err := ports.ReleaseMachinePort(oldPort); err != nil {
-		logrus.Warnf("could not release current ssh port allocation (%d): %s", oldPort, err.Error())
+		logrus.Warnf("could not release current ssh port allocation (%d): %v", oldPort, err)
 	}
 
 	// Update the backend's settings if relevant (e.g. WSL)

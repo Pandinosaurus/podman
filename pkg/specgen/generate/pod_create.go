@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package generate
 
@@ -6,18 +6,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
-	"github.com/containers/podman/v5/libpod"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/specgen"
-	"github.com/containers/podman/v5/pkg/specgenutil"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/specgen"
+	"go.podman.io/podman/v6/pkg/specgenutil"
 )
 
 func MakePod(p *entities.PodSpec, rt *libpod.Runtime) (_ *libpod.Pod, finalErr error) {
@@ -38,12 +38,14 @@ func MakePod(p *entities.PodSpec, rt *libpod.Runtime) (_ *libpod.Pod, finalErr e
 	}
 
 	if !p.PodSpecGen.NoInfra {
-		imageName, err := PullOrBuildInfraImage(rt, p.PodSpecGen.InfraImage)
+		imageName, err := PullInfraImage(rt, p.PodSpecGen.InfraImage)
 		if err != nil {
 			return nil, err
 		}
-		p.PodSpecGen.InfraImage = imageName
-		p.PodSpecGen.InfraContainerSpec.RawImageName = imageName
+		if len(imageName) > 0 {
+			p.PodSpecGen.InfraImage = imageName
+			p.PodSpecGen.InfraContainerSpec.RawImageName = imageName
+		}
 	}
 
 	spec, err := MapSpec(&p.PodSpecGen)
@@ -86,11 +88,6 @@ func MakePod(p *entities.PodSpec, rt *libpod.Runtime) (_ *libpod.Pod, finalErr e
 		p.PodSpecGen.InfraContainerSpec.ResourceLimits = nil
 		p.PodSpecGen.InfraContainerSpec.WeightDevice = nil
 
-		// Set default for HealthCheck
-		p.PodSpecGen.InfraContainerSpec.HealthLogDestination = define.DefaultHealthCheckLocalDestination
-		p.PodSpecGen.InfraContainerSpec.HealthMaxLogCount = define.DefaultHealthMaxLogCount
-		p.PodSpecGen.InfraContainerSpec.HealthMaxLogSize = define.DefaultHealthMaxLogSize
-
 		rtSpec, spec, opts, err := MakeContainer(context.Background(), rt, p.PodSpecGen.InfraContainerSpec, false, nil)
 		if err != nil {
 			return nil, err
@@ -118,9 +115,7 @@ func MakePod(p *entities.PodSpec, rt *libpod.Runtime) (_ *libpod.Pod, finalErr e
 }
 
 func createPodOptions(p *specgen.PodSpecGenerator) ([]libpod.PodCreateOption, error) {
-	var (
-		options []libpod.PodCreateOption
-	)
+	var options []libpod.PodCreateOption
 
 	if p.ShareParent == nil || (p.ShareParent != nil && *p.ShareParent) {
 		options = append(options, libpod.WithPodParent())
@@ -208,12 +203,6 @@ func MapSpec(p *specgen.PodSpecGenerator) (*specgen.SpecGenerator, error) {
 			return nil, fmt.Errorf("cannot set host network if network-related configuration is specified: %w", define.ErrInvalidArg)
 		}
 		spec.NetNS.NSMode = specgen.Host
-	case specgen.Slirp:
-		logrus.Debugf("Pod will use slirp4netns")
-		if spec.NetNS.NSMode != specgen.Host {
-			spec.NetworkOptions = p.NetworkOptions
-			spec.NetNS.NSMode = specgen.Slirp
-		}
 	case specgen.Pasta:
 		logrus.Debugf("Pod will use pasta")
 		if spec.NetNS.NSMode != specgen.Host {
@@ -243,11 +232,11 @@ func MapSpec(p *specgen.PodSpecGenerator) (*specgen.SpecGenerator, error) {
 	if len(p.HostAdd) > 0 {
 		spec.HostAdd = p.HostAdd
 	}
+	if len(p.HostsFile) > 0 {
+		spec.BaseHostsFile = p.HostsFile
+	}
 	if len(p.DNSServer) > 0 {
-		var dnsServers []net.IP
-		dnsServers = append(dnsServers, p.DNSServer...)
-
-		spec.DNSServers = dnsServers
+		spec.DNSServers = slices.Clone(p.DNSServer)
 	}
 	if len(p.DNSOption) > 0 {
 		spec.DNSOptions = p.DNSOption
@@ -262,12 +251,11 @@ func MapSpec(p *specgen.PodSpecGenerator) (*specgen.SpecGenerator, error) {
 	if len(p.Networks) > 0 {
 		spec.Networks = p.Networks
 	}
-	// deprecated cni networks for api users
-	if len(p.CNINetworks) > 0 {
-		spec.CNINetworks = p.CNINetworks
-	}
 	if p.NoManageHosts {
 		spec.UseImageHosts = &p.NoManageHosts
+	}
+	if p.NoManageHostname {
+		spec.UseImageHostname = &p.NoManageHostname
 	}
 
 	if len(p.InfraConmonPidFile) > 0 {
@@ -368,14 +356,15 @@ func PodConfigToSpec(rt *libpod.Runtime, spec *specgen.PodSpecGenerator, infraOp
 			return nil, err
 		}
 
+		if len(spec.InfraContainerSpec.Image) > 0 {
+			spec.InfraImage = spec.InfraContainerSpec.Image
+		}
+
 		spec.Name = name
 	}
 
 	// need to reset hostname, name etc of both pod and infra
 	spec.Hostname = ""
 
-	if len(spec.InfraContainerSpec.Image) > 0 {
-		spec.InfraImage = spec.InfraContainerSpec.Image
-	}
 	return pod, nil
 }

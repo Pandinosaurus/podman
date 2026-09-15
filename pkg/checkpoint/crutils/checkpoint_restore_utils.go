@@ -10,9 +10,11 @@ import (
 	"path/filepath"
 
 	metadata "github.com/checkpoint-restore/checkpointctl/lib"
-	"github.com/checkpoint-restore/go-criu/v7/stats"
-	"github.com/containers/storage/pkg/archive"
+	"github.com/checkpoint-restore/go-criu/v8/stats"
+	securejoin "github.com/cyphar/filepath-securejoin"
 	"github.com/opencontainers/selinux/go-selinux/label"
+	"go.podman.io/storage/pkg/archive"
+	"go.podman.io/storage/pkg/chrootarchive"
 )
 
 // This file mainly exists to make the checkpoint/restore functions
@@ -34,7 +36,7 @@ func CRImportCheckpointWithoutConfig(destination, input string) error {
 			metadata.SpecDumpFile,
 		},
 	}
-	if err = archive.Untar(archiveFile, destination, options); err != nil {
+	if err = chrootarchive.Untar(archiveFile, destination, options); err != nil {
 		return fmt.Errorf("unpacking of checkpoint archive %s failed: %w", input, err)
 	}
 
@@ -64,7 +66,7 @@ func CRImportCheckpointConfigOnly(destination, input string) error {
 			metadata.CheckpointVolumesDirectory,
 		},
 	}
-	if err = archive.Untar(archiveFile, destination, options); err != nil {
+	if err = chrootarchive.Untar(archiveFile, destination, options); err != nil {
 		return fmt.Errorf("unpacking of checkpoint archive %s failed: %w", input, err)
 	}
 
@@ -75,7 +77,7 @@ func CRImportCheckpointConfigOnly(destination, input string) error {
 // it exists deletes all files listed.
 func CRRemoveDeletedFiles(id, baseDirectory, containerRootDirectory string) error {
 	deletedFiles, _, err := metadata.ReadContainerCheckpointDeletedFiles(baseDirectory)
-	if os.IsNotExist(err) {
+	if errors.Is(err, os.ErrNotExist) {
 		// No files to delete. Just return
 		return nil
 	}
@@ -87,7 +89,11 @@ func CRRemoveDeletedFiles(id, baseDirectory, containerRootDirectory string) erro
 	for _, deleteFile := range deletedFiles {
 		// Using RemoveAll as deletedFiles, which is generated from 'podman diff'
 		// lists completely deleted directories as a single entry: 'D /root'.
-		if err := os.RemoveAll(filepath.Join(containerRootDirectory, deleteFile)); err != nil {
+		path, err := securejoin.SecureJoin(containerRootDirectory, deleteFile)
+		if err != nil {
+			return fmt.Errorf("failed to resolve path %q in container %s: %w", deleteFile, id, err)
+		}
+		if err := os.RemoveAll(path); err != nil {
 			return fmt.Errorf("failed to delete files from container %s during restore: %w", id, err)
 		}
 	}
@@ -109,7 +115,7 @@ func CRApplyRootFsDiffTar(baseDirectory, containerRootDirectory string) error {
 	}
 	defer rootfsDiffFile.Close()
 
-	if err := archive.Untar(rootfsDiffFile, containerRootDirectory, nil); err != nil {
+	if err := chrootarchive.Untar(rootfsDiffFile, containerRootDirectory, nil); err != nil {
 		return fmt.Errorf("failed to apply root file-system diff file %s: %w", rootfsDiffPath, err)
 	}
 
@@ -152,14 +158,15 @@ func CRCreateRootFsDiffTar(changes *[]archive.Change, mountPoint, destination st
 	}
 
 	if len(rootfsIncludeFiles) > 0 {
-		rootfsTar, err := archive.TarWithOptions(mountPoint, &archive.TarOptions{
+		rootfsTar, err := chrootarchive.Tar(mountPoint, &archive.TarOptions{
 			Compression:      archive.Uncompressed,
 			IncludeSourceDir: true,
 			IncludeFiles:     rootfsIncludeFiles,
-		})
+		}, mountPoint)
 		if err != nil {
 			return includeFiles, fmt.Errorf("exporting root file-system diff to %q: %w", rootfsDiffPath, err)
 		}
+		defer rootfsTar.Close()
 		rootfsDiffFile, err := os.Create(rootfsDiffPath)
 		if err != nil {
 			return includeFiles, fmt.Errorf("creating root file-system diff file %q: %w", rootfsDiffPath, err)
@@ -229,7 +236,18 @@ func CRRuntimeSupportsCheckpointRestore(runtimePath string) bool {
 func CRRuntimeSupportsPodCheckpointRestore(runtimePath string) bool {
 	cmd := exec.Command(runtimePath, "restore", "--lsm-mount-context")
 	out, _ := cmd.CombinedOutput()
-	return bytes.Contains(out, []byte("flag needs an argument"))
+
+	// check for runc
+	if bytes.Contains(out, []byte("flag needs an argument")) {
+		return true
+	}
+
+	// check for crun
+	if bytes.Contains(out, []byte("requires an argument")) {
+		return true
+	}
+
+	return false
 }
 
 // CRGetRuntimeFromArchive extracts the checkpoint metadata from the

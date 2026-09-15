@@ -6,10 +6,10 @@ import (
 	"os"
 	"path/filepath"
 
-	. "github.com/containers/podman/v5/test/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	. "github.com/onsi/gomega/gexec"
+	. "go.podman.io/podman/v6/test/utils"
 )
 
 func setupContainersConfWithSystemConnections() {
@@ -31,7 +31,6 @@ func setupContainersConfWithSystemConnections() {
 }
 
 var _ = Describe("podman farm", func() {
-
 	BeforeEach(setupContainersConfWithSystemConnections)
 
 	Context("without running API service", func() {
@@ -79,6 +78,37 @@ farm3 [] false true
 			session = podmanTest.Podman(cmd)
 			session.WaitWithDefaultTimeout()
 			Expect(session).Should(Not(ExitCleanly()))
+		})
+
+		It("list farms quiet", func() {
+			// create farm with multiple system connections
+			cmd := []string{"farm", "create", "farm1", "QA", "QB"}
+			session := podmanTest.Podman(cmd)
+			session.WaitWithDefaultTimeout()
+			Expect(session).Should(ExitCleanly())
+
+			// create farm with only one system connection
+			cmd = []string{"farm", "create", "farm2", "QA"}
+			session = podmanTest.Podman(cmd)
+			session.WaitWithDefaultTimeout()
+			Expect(session).Should(ExitCleanly())
+
+			// --quiet should print only farm names, one per line
+			session = podmanTest.Podman([]string{"farm", "list", "--quiet"})
+			session.WaitWithDefaultTimeout()
+			Expect(session).Should(ExitCleanly())
+			Expect(string(session.Out.Contents())).To(Equal("farm1\nfarm2\n"))
+
+			// -q shorthand behaves the same as --quiet
+			session = podmanTest.Podman([]string{"farm", "list", "-q"})
+			session.WaitWithDefaultTimeout()
+			Expect(session).Should(ExitCleanly())
+			Expect(string(session.Out.Contents())).To(Equal("farm1\nfarm2\n"))
+
+			// --quiet and --format together should error
+			session = podmanTest.Podman([]string{"farm", "list", "--quiet", "--format", "{{.Name}}"})
+			session.WaitWithDefaultTimeout()
+			Expect(session).Should(ExitWithError(125, "quiet and format flags cannot be used together"))
 		})
 
 		It("update existing farms", func() {

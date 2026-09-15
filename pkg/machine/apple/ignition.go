@@ -6,9 +6,9 @@ import (
 	"net"
 	"net/http"
 
-	"github.com/containers/podman/v5/pkg/machine/define"
-	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/podman/v6/pkg/machine/define"
+	"go.podman.io/podman/v6/pkg/machine/vmconfigs"
 )
 
 // ServeIgnitionOverSock allows podman to open a small httpd instance on the vsock between the host
@@ -25,7 +25,7 @@ func ServeIgnitionOverSock(ignitionSocket *define.VMFile, mc *vmconfigs.MachineC
 		return err
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
 		_, err := w.Write(ignFile)
 		if err != nil {
 			logrus.Errorf("failed to serve ignition file: %v", err)

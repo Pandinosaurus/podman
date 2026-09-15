@@ -1,14 +1,15 @@
 package trust
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/containers/image/v5/types"
-	"github.com/containers/storage/pkg/fileutils"
-	"github.com/docker/docker/pkg/homedir"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/storage/pkg/fileutils"
+	"go.podman.io/storage/pkg/homedir"
 	"sigs.k8s.io/yaml"
 )
 
@@ -58,11 +59,12 @@ func loadAndMergeConfig(dirPath string) (*registryConfiguration, error) {
 
 	dir, err := os.Open(dirPath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return &mergedConfig, nil
 		}
 		return nil, err
 	}
+	defer dir.Close()
 	configNames, err := dir.Readdirnames(0)
 	if err != nil {
 		return nil, err
@@ -112,7 +114,7 @@ func registriesDConfigurationForScope(registryConfigs *registryConfiguration, sc
 				return &val
 			}
 		}
-		for range strings.Split(scope, "/") {
+		for range strings.SplitSeq(scope, "/") {
 			val, exists := registryConfigs.Docker[searchScope]
 			if exists {
 				return &val

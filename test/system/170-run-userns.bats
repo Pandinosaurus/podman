@@ -3,8 +3,6 @@
 #
 # Tests for podman build
 #
-# bats file_tags=distro-integration
-#
 
 load helpers
 
@@ -35,7 +33,6 @@ function _require_crun() {
 
 # bats test_tags=ci:parallel
 @test "podman --group-add without keep-groups while in a userns" {
-    skip_if_cgroupsv1 "run --uidmap fails on cgroups v1 (issue 15025, wontfix)"
     skip_if_rootless "chroot is not allowed in rootless mode"
     skip_if_remote "--group-add keep-groups not supported in remote mode"
     run chroot --groups 1234,5678 / ${PODMAN} run --rm --uidmap 0:200000:5000 --group-add 457 $IMAGE id
@@ -44,7 +41,6 @@ function _require_crun() {
 
 # bats test_tags=ci:parallel
 @test "rootful pod with custom ID mapping" {
-    skip_if_cgroupsv1 "run --uidmap fails on cgroups v1 (issue 15025, wontfix)"
     skip_if_rootless "does not work rootless - rootful feature"
     random_pod_name=p_$(safename)
     run_podman pod create --uidmap 0:200000:5000 --name=$random_pod_name
@@ -168,4 +164,68 @@ EOF
     mapping=1:@$first_id:1
     run_podman run --rm --userns=auto:uidmapping=$mapping $IMAGE awk '{if($1 == 1){print $2}}' /proc/self/uid_map
     assert "$output" == 1
+}
+
+# bats test_tags=ci:parallel
+@test "podman current user not mapped in the userns" {
+    # both uid and gid not mapped
+    run_podman run --rm --uidmap 0:1:1000 $IMAGE true
+
+    # uid not mapped
+    run_podman run --rm --uidmap 0:1:1000 --gidmap 0:0:1000 $IMAGE true
+
+    # gid not mapped
+    run_podman run --rm --uidmap 0:0:1000 --gidmap 0:1:1000 $IMAGE true
+}
+
+# bats test_tags=ci:parallel
+@test "podman --userns=ns:<path> join existing user namespace" {
+    # Test for issue #27148: --userns=ns:<path> should not add dummy mappings
+    local cname="userns_source_$(safename)"
+
+    run_podman run -d --name $cname \
+        --userns=keep-id \
+        $IMAGE top
+
+    run_podman inspect --format '{{.State.Pid}}' $cname
+    local pid=$output
+    local userns_path="/proc/$pid/ns/user"
+
+    run_podman exec $cname sh -c "readlink /proc/self/ns/user; echo '---'; cat /proc/self/uid_map"
+    local expected="$output"
+
+    run_podman run --rm \
+        --userns=ns:$userns_path \
+        $IMAGE \
+        sh -c "readlink /proc/self/ns/user; echo '---'; cat /proc/self/uid_map"
+    local output="$output"
+
+    assert "$expected" == "$output" "User namespace identifiers and UID mappings should match"
+
+    run_podman rm -f $cname
+}
+
+# CANNOT BE PARALLELIZED: userns=auto, rootless, => not enough unused IDs in user namespace
+@test "podman :O overlay volume in a userns that does not map the storage owner" {
+    # An overlay volume (:O) must be read-write inside a userns that does not
+    # map the storage owner.  See containers/crun#2212.
+    skip_if_rootless "storage is not owned by an unmapped user when rootless"
+    grep -E -q "^containers:" /etc/subuid || skip "no IDs allocated for user 'containers'"
+
+    local volname="myvol_$(random_string)"
+    run_podman volume create $volname
+
+    run_podman run --rm -v $volname:/vol $IMAGE sh -c "echo lower > /vol/lower.txt"
+
+    # The lower content must be readable and writes (to the upper dir) must work.
+    run_podman run --rm --userns=auto -v $volname:/mnt:O $IMAGE sh -c \
+        "cat /mnt/lower.txt; echo upper > /mnt/new.txt && cat /mnt/new.txt"
+    assert "$output" =~ "lower" "overlay lower is readable under userns"
+    assert "$output" =~ "upper" "overlay upper is writable under userns"
+
+    # Writes are ephemeral: the named volume itself is untouched.
+    run_podman run --rm -v $volname:/vol $IMAGE ls /vol
+    assert "$output" = "lower.txt" "writes to a :O overlay do not leak into the volume"
+
+    run_podman volume rm $volname
 }

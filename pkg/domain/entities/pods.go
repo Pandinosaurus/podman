@@ -4,11 +4,12 @@ import (
 	"errors"
 	"strings"
 
-	commonFlag "github.com/containers/common/pkg/flag"
-	"github.com/containers/podman/v5/pkg/domain/entities/types"
-	"github.com/containers/podman/v5/pkg/specgen"
-	"github.com/containers/podman/v5/pkg/util"
 	"github.com/opencontainers/runtime-spec/specs-go"
+	commonFlag "go.podman.io/common/pkg/flag"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/domain/entities/types"
+	"go.podman.io/podman/v6/pkg/specgen"
+	"go.podman.io/podman/v6/pkg/util"
 )
 
 type PodKillOptions struct {
@@ -51,11 +52,13 @@ type PodRestartOptions struct {
 	Latest bool
 }
 
-type PodRestartReport = types.PodRestartReport
-type PodStartOptions struct {
-	All    bool
-	Latest bool
-}
+type (
+	PodRestartReport = types.PodRestartReport
+	PodStartOptions  struct {
+		All    bool
+		Latest bool
+	}
+)
 
 type PodStartReport = types.PodStartReport
 
@@ -265,19 +268,25 @@ type ContainerCreateOptions struct {
 	IsInfra              bool
 	IsClone              bool
 	DecryptionKeys       []string
+	CertDir              string
+	Creds                string
 	Net                  *NetOptions `json:"net,omitempty"`
 
 	CgroupConf []string
 
+	Passwd      bool
 	GroupEntry  string
 	PasswdEntry string
 }
 
 func NewInfraContainerCreateOptions() ContainerCreateOptions {
 	options := ContainerCreateOptions{
-		IsInfra:          true,
-		ImageVolume:      "anonymous",
-		MemorySwappiness: -1,
+		IsInfra:              true,
+		ImageVolume:          "anonymous",
+		MemorySwappiness:     -1,
+		HealthLogDestination: define.DefaultHealthCheckLocalDestination,
+		HealthMaxLogCount:    define.DefaultHealthMaxLogCount,
+		HealthMaxLogSize:     define.DefaultHealthMaxLogSize,
 	}
 	return options
 }
@@ -287,22 +296,16 @@ type PodCreateReport = types.PodCreateReport
 type PodCloneReport = types.PodCloneReport
 
 func (p *PodCreateOptions) CPULimits() *specs.LinuxCPU {
-	cpu := &specs.LinuxCPU{}
-	hasLimits := false
+	cpu := &specs.LinuxCPU{
+		Cpus: p.CpusetCpus,
+	}
 
 	if p.Cpus != 0 {
 		period, quota := util.CoresToPeriodAndQuota(p.Cpus)
 		cpu.Period = &period
 		cpu.Quota = &quota
-		hasLimits = true
 	}
-	if p.CpusetCpus != "" {
-		cpu.Cpus = p.CpusetCpus
-		hasLimits = true
-	}
-	if !hasLimits {
-		return cpu
-	}
+
 	return cpu
 }
 
@@ -367,25 +370,20 @@ func ToPodSpecGen(s specgen.PodSpecGenerator, p *PodCreateOptions) (*specgen.Pod
 		s.DNSSearch = p.Net.DNSSearch
 		s.DNSOption = p.Net.DNSOptions
 		s.NoManageHosts = p.Net.NoHosts
+		s.NoManageHostname = p.Net.NoHostname
 		s.HostAdd = p.Net.AddHosts
+		s.HostsFile = p.Net.HostsFile
 	}
 
 	// Cgroup
 	s.CgroupParent = p.CgroupParent
 
 	// Resource config
-	cpuDat := p.CPULimits()
 	if s.ResourceLimits == nil {
 		s.ResourceLimits = &specs.LinuxResources{}
-		s.ResourceLimits.CPU = &specs.LinuxCPU{}
 	}
-	if cpuDat != nil {
-		s.ResourceLimits.CPU = cpuDat
-		if p.Cpus != 0 {
-			s.CPUPeriod = *cpuDat.Period
-			s.CPUQuota = *cpuDat.Quota
-		}
-	}
+	s.ResourceLimits.CPU = p.CPULimits()
+
 	s.Userns = p.Userns
 	sysctl := map[string]string{}
 	if ctl := p.Sysctl; len(ctl) > 0 {

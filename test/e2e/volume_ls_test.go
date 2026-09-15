@@ -5,18 +5,24 @@ package integration
 import (
 	"fmt"
 
-	. "github.com/containers/podman/v5/test/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	. "go.podman.io/podman/v6/test/utils"
 )
 
 var _ = Describe("Podman volume ls", func() {
-
 	AfterEach(func() {
 		podmanTest.CleanupVolume()
 	})
 
 	It("podman ls volume", func() {
+		// https://github.com/containers/podman/issues/25911
+		// Output header for volume ls even when empty
+		empty := podmanTest.PodmanExitCleanly("volume", "ls")
+		Expect(empty.OutputToString()).To(ContainSubstring("DRIVER"))
+		Expect(empty.OutputToString()).To(ContainSubstring("VOLUME NAME"))
+		Expect(empty.ErrorToStringArray()).To(BeEmpty())
+
 		session := podmanTest.Podman([]string{"volume", "create", "myvol"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
@@ -94,7 +100,6 @@ var _ = Describe("Podman volume ls", func() {
 		session = podmanTest.Podman([]string{"volume", "ls", "--filter", "label=foo=foo"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
-		Expect(session.OutputToStringArray()).To(BeEmpty())
 
 		session = podmanTest.Podman([]string{"volume", "ls", "--filter", "label=foo=bar"})
 		session.WaitWithDefaultTimeout()
@@ -105,7 +110,6 @@ var _ = Describe("Podman volume ls", func() {
 		session = podmanTest.Podman([]string{"volume", "ls", "--filter", "label=foo=baz"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
-		Expect(session.OutputToStringArray()).To(BeEmpty())
 	})
 
 	It("podman ls volume with --filter until flag", func() {
@@ -121,7 +125,6 @@ var _ = Describe("Podman volume ls", func() {
 		session = podmanTest.Podman([]string{"volume", "ls", "--filter", "until=50000"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
-		Expect(session.OutputToStringArray()).To(BeEmpty())
 	})
 
 	It("podman volume ls with --filter dangling", func() {
@@ -171,7 +174,6 @@ var _ = Describe("Podman volume ls", func() {
 		session = podmanTest.Podman([]string{"volume", "ls", "--filter", "name=volumex"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
-		Expect(session.OutputToStringArray()).To(BeEmpty())
 
 		session = podmanTest.Podman([]string{"volume", "ls", "--filter", "name=volume1"})
 		session.WaitWithDefaultTimeout()
@@ -187,7 +189,7 @@ var _ = Describe("Podman volume ls", func() {
 
 		vol1Name := session.OutputToString()
 
-		session = podmanTest.Podman([]string{"volume", "create", "--label", "b=c", "--label", "a=b", "vol2"})
+		session = podmanTest.Podman([]string{"volume", "create", "--label", "a=b", "--label", "b=c", "--label", "d=e", "vol2"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 
@@ -206,11 +208,25 @@ var _ = Describe("Podman volume ls", func() {
 		Expect(session.OutputToStringArray()[0]).To(Equal(vol1Name))
 		Expect(session.OutputToStringArray()[1]).To(Equal(vol2Name))
 
-		session = podmanTest.Podman([]string{"volume", "ls", "-q", "--filter", "label=c=d", "--filter", "label=b=c"})
+		session = podmanTest.Podman([]string{"volume", "ls", "-q", "--filter", "label=b=c", "--filter", "label=c=d"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 		Expect(session.OutputToStringArray()).To(HaveLen(1))
 		Expect(session.OutputToStringArray()[0]).To(Equal(vol3Name))
+
+		// Filters with label! key
+		session = podmanTest.Podman([]string{"volume", "ls", "-q", "--filter", "label!=c=d", "--filter", "label!=d=e"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+		Expect(session.OutputToStringArray()).To(HaveLen(1))
+		Expect(session.OutputToStringArray()[0]).To(Equal(vol1Name))
+
+		// Filters with different keys
+		session = podmanTest.Podman([]string{"volume", "ls", "-q", "--filter", "label=b=c", "--filter", "name=vol1"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+		Expect(session.OutputToStringArray()).To(HaveLen(1))
+		Expect(session.OutputToStringArray()[0]).To(Equal(vol1Name))
 	})
 
 	It("podman ls volume with --filter since/after", func() {

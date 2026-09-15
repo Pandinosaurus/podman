@@ -6,15 +6,15 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/containers/podman/v5/pkg/rootless"
 	"github.com/spf13/cobra"
+	"go.podman.io/podman/v6/pkg/rootless"
 )
 
 func isUnixSocket(file os.DirEntry) bool {
 	return file.Type()&os.ModeSocket != 0
 }
 
-func rootlessOnly(cmd *cobra.Command, args []string) error {
+func rootlessOnly(cmd *cobra.Command, _ []string) error {
 	if !rootless.IsRootless() {
 		return fmt.Errorf("cannot run command %q as root", cmd.CommandPath())
 	}

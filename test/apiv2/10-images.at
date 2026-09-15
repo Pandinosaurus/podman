@@ -42,6 +42,14 @@ t GET images/json?filter=$IMAGE 200 \
   length=1 \
   .[0].Names[0]=$IMAGE
 
+# Test VirtualSize field is present in API v1.43 (backward compatibility)
+t GET /v1.43/images/json 200 \
+  .[0].VirtualSize~[0-9]\\+
+
+# Test VirtualSize field is no longer present in API v1.44+ (deprecated since API v1.43)
+t GET /v1.44/images/json 200 \
+  .[0].VirtualSize=null
+
 # Negative test case
 t GET images/json?filter=nonesuch 200 length=0
 
@@ -49,6 +57,22 @@ t GET images/json?filter=nonesuch 200 length=0
 t GET images/$iid/json 200 \
   .Id=sha256:$iid \
   .RepoTags[0]=$IMAGE
+
+# Test VirtualSize field is present in API v1.43 for single image inspect (backward compatibility)
+t GET /v1.43/images/$iid/json 200 \
+  .VirtualSize~[0-9]\\+
+
+# Test VirtualSize field is no longer present in API v1.44+ for single image inspect (deprecated since API v1.43)
+t GET /v1.44/images/$iid/json 200 \
+  .VirtualSize=null
+
+# Test ContainerConfig fields are present in API v1.44 (backward compatibility)
+t GET /v1.44/images/$iid/json 200 \
+  .ContainerConfig.Hostname~[0-9a-f]
+
+# Test ContainerConfig fields are no longer present in API >= v1.45 (deprecated since API v1.44, omitted since API v1.45)
+t GET /v1.45/images/$iid/json 200 \
+  .ContainerConfig=null
 
 t POST "images/create?fromImage=alpine" 200 .error~null .status~".*Download complete.*"
 t POST "libpod/images/pull?reference=alpine&compatMode=true" 200 .error~null .status~".*Download complete.*"
@@ -85,19 +109,45 @@ t GET libpod/images/nonesuch/history 404
 for i in $iid ${iid:0:12} $PODMAN_TEST_IMAGE_NAME:$PODMAN_TEST_IMAGE_TAG; do
   t GET libpod/images/$i/history 200 \
     .[0].Id=$iid \
+    .[1].Id="<missing>" \
+    .[2].Id="<missing>" \
+    .[3].Id="<missing>" \
     .[0].Created~[0-9]\\{10\\} \
     .[0].Tags[0]="$IMAGE" \
     .[0].Size=1024 \
-    .[0].Comment="FROM localhost/interim-image:latest"
+    .[1].Size=0 \
+    .[2].Size=0 \
+    .[3].Size=0 \
+    .[0].Comment="" \
+    .[1].Comment="" \
+    .[2].Comment="" \
+    .[3].Comment="FROM localhost/interim-image:latest" \
+    .[0].CreatedBy~".*/echo.*This container is intended for podman CI testing.*" \
+    .[1].CreatedBy~".* WORKDIR /home/podman" \
+    .[2].CreatedBy~".* LABEL created_at=.*" \
+    .[3].CreatedBy~".* LABEL created_by=test/system/build-testimage"
 done
 
 for i in $iid ${iid:0:12} $PODMAN_TEST_IMAGE_NAME:$PODMAN_TEST_IMAGE_TAG; do
   t GET images/$i/history 200 \
-    .[0].Id="sha256:"$iid \
+    .[0].Id="sha256:$iid" \
+    .[1].Id="sha256:<missing>" \
+    .[2].Id="sha256:<missing>" \
+    .[3].Id="sha256:<missing>" \
     .[0].Created~[0-9]\\{10\\} \
     .[0].Tags[0]="$IMAGE" \
     .[0].Size=1024 \
-    .[0].Comment="FROM localhost/interim-image:latest"
+    .[1].Size=0 \
+    .[2].Size=0 \
+    .[3].Size=0 \
+    .[0].Comment="" \
+    .[1].Comment="" \
+    .[2].Comment="" \
+    .[3].Comment="FROM localhost/interim-image:latest" \
+    .[0].CreatedBy~".*/echo.*This container is intended for podman CI testing.*" \
+    .[1].CreatedBy~".* WORKDIR /home/podman" \
+    .[2].CreatedBy~".* LABEL created_at=.*" \
+    .[3].CreatedBy~".* LABEL created_by=test/system/build-testimage"
 done
 
 # compat api pull image unauthorized message error
@@ -190,6 +240,18 @@ t GET images/json?filters='{"reference":["test1"]}' 200 length=1
 t POST images/prune?filters='{"until":["500000"]}' 200
 t GET images/json?filters='{"reference":["test1"]}' 200 length=1
 
+# Get number of images for verification.
+t GET images/json 200
+img_count=$(jq -r 'length' <<<"$output")
+
+# Test compat: GET images/json - until filter (distant future x past).
+t GET images/json?filters='{"until":["99999999999"]}' 200 length=$img_count
+t GET images/json?filters='{"until":["500000"]}' 200 length=0
+
+# Test libpod: GET images/json - until filter (distant future x past).
+t GET libpod/images/json?filters='{"until":["99999999999"]}' 200 length=$img_count
+t GET libpod/images/json?filters='{"until":["500000"]}' 200 length=0
+
 t DELETE libpod/images/test1:latest 200
 
 # to be used in prune until filter tests
@@ -204,6 +266,47 @@ podman rm test1
 t DELETE images/test1:latest 200
 
 t GET "images/get?names=alpine" 200 '[POSIX tar archive]'
+
+# START: Testing variance between Docker API and Podman API
+# regarding force deleting images.
+# Podman: Force deleting an image will force remove any
+#         container using the image.
+# Docker: Force deleting an image will only remove non
+#         running containers using the image.
+
+# Create new image
+podman image build -t docker.io/library/test1:latest - <<EOF
+from alpine
+RUN >file4
+EOF
+
+# Create running container
+podman run --rm -d --name test_container docker.io/library/test1:latest top
+
+# When using the Docker Compat API, force deleting an image
+# shouldn't force delete any container using the image, only
+# containers in a non running state should be removed.
+# https://github.com/containers/podman/issues/25871
+t DELETE images/test1:latest?force=true 409
+
+# When using the Podman Libpod API, deleting an image
+# with a running container will fail.
+t DELETE libpod/images/test1:latest 409
+
+# When using the Podman Libpod API, force deleting an
+# image will also force delete all containers using the image.
+
+# Verify container exists.
+t GET libpod/containers/test_container/exists 204
+
+# Delete image with force.
+t DELETE libpod/images/test1:latest?force=true 200
+
+# Verify container also removed.
+t GET libpod/containers/test_container/exists 404
+
+# END: Testing variance between Docker API and Podman API
+# regarding force deleting images.
 
 podman pull busybox
 t GET "images/get?names=alpine&names=busybox" 200 '[POSIX tar archive]'
@@ -372,5 +475,145 @@ t GET "libpod/events?stream=false&since=$START"  200  \
   .Action=pull-error \
   .Actor.Attributes.name="localhost:5000/idonotexist" \
   .Actor.Attributes.error~".*connection refused"
+
+# test empty RepoTags and RepoDigests is an empty array
+IIDFILE=$(mktemp)
+podman image build --iidfile $IIDFILE -<<EOF
+FROM $IMAGE
+RUN :
+EOF
+
+t GET images/json 200 \
+  .[1].RepoTags=[] \
+  .[1].RepoDigests=[] \
+  .[1].Id=$(< $IIDFILE)
+
+podman rmi -f $(< $IIDFILE)
+rm -f $IIDFILE
+
+# check that SharedSize returns -1 for compat api if not set
+# and 0 (or the correct shared size) if set
+t GET images/json 200 \
+    .[0].SharedSize=-1
+t GET images/json?shared-size=true 200 \
+    .[0].SharedSize=0
+
+TMPD=$(mktemp -d podman-apiv2-test.build.XXXXXXXX)
+function cleanLoad() {
+    podman rmi -a -f
+    rm -rf "${TMPD}" &> /dev/null
+}
+
+podman pull quay.io/libpod/alpine:latest quay.io/libpod/busybox:latest
+podman save -o ${TMPD}/test.tar quay.io/libpod/alpine:latest quay.io/libpod/busybox:latest
+podman rmi quay.io/libpod/alpine:latest quay.io/libpod/busybox:latest
+ABS_PATH=$( realpath "${TMPD}/test.tar" )
+t POST libpod/local/images/load?path="${ABS_PATH}" 200
+t GET libpod/images/quay.io/libpod/alpine:latest/exists  204
+t GET libpod/images/quay.io/libpod/busybox:latest/exists  204
+
+# Test with directory instead of file
+mkdir -p ${TMPD}/testdir
+t POST libpod/local/images/load?path="${TMPD}/testdir" 400
+
+cleanLoad
+
+t POST libpod/local/images/load?path="/tmp/notexisting.tar" 404
+
+t POST libpod/local/images/load?invalid=arg 400
+
+t POST libpod/local/images/load?path="" 400
+
+t POST libpod/local/images/load?path="../../../etc/passwd" 400
+
+# Test pullProgress parameter on /libpod/images/pull endpoint
+# Remove the image first to ensure we actually pull it
+podman rmi -f quay.io/libpod/alpine:latest >/dev/null 2>&1 || true
+
+# Test pullProgress=true - should return ImagePullReport format with progress info
+t POST "libpod/images/pull?reference=quay.io/libpod/alpine:latest&pullProgress=true" 200 \
+  .status~".*success.*" \
+  .stream~".*Artifact pulled successfully.*"
+
+
+# Test pullProgress=true with invalid image - should return error status
+t POST "libpod/images/pull?reference=localhost:5000/idonotexist:latest&pullProgress=true" 500 \
+  .cause~".\\+" \
+  .message~".\\+" \
+  .response="500"
+
+# Test pullProgress=true shows layer IDs during pull
+# Remove the image first to ensure we actually pull it
+podman rmi -f quay.io/libpod/alpine:latest >/dev/null 2>&1 || true
+
+# Get layer digests using skopeo inspect
+layer_digests=$(skopeo inspect -n docker://quay.io/libpod/alpine:latest | jq -r '.Layers[]' | sed 's/sha256://')
+
+# Pull image with pullProgress=true and verify layer IDs are in the stream
+t POST "libpod/images/pull?reference=quay.io/libpod/alpine:latest&pullProgress=true" 200 \
+  .status~".*success.*" \
+  .stream~".*Artifact pulled successfully.*"
+
+# Verify each layer digest appears in the stream output
+for layer_id in $layer_digests; do
+    like "$output" ".*$layer_id.*" "pullProgress shows layer ID $layer_id"
+done
+
+# Clean up
+podman rmi -f quay.io/libpod/alpine:latest >/dev/null 2>&1 || true
+
+# Test pullProgress=true with zstd:chunked image from local registry
+# Restart service with a custom storage.conf (enable_partial_images = "true")
+stop_service
+CONTAINERS_STORAGE_CONF=$TESTS_DIR/storage.partial-pull.conf start_service
+start_registry
+
+# Build the image
+CHUNKED_TMPD=$(mktemp -d podman-apiv2-test.chunked.XXXXXXXX)
+echo "$(random_string 256)" > $CHUNKED_TMPD/content1
+echo "$(random_string 256)" > $CHUNKED_TMPD/content2
+echo "$(random_string 256)" > $CHUNKED_TMPD/content3
+cat > $CHUNKED_TMPD/Containerfile << EOF
+FROM scratch
+ADD content1 /content1
+ADD content2 /content2
+ADD content3 /content3
+EOF
+podman image build -t chunked-test:latest $CHUNKED_TMPD
+
+# Push it to the local registry
+podman push --tls-verify=false --force-compression \
+    --compression-format=zstd:chunked \
+    chunked-test:latest docker://localhost:$REGISTRY_PORT/chunked-test:latest
+
+# Remove the local image to force a fresh pull
+podman rmi -f chunked-test:latest >/dev/null 2>&1 || true
+
+# Pull via API with pullProgress=true
+t POST "libpod/images/pull?reference=localhost:$REGISTRY_PORT/chunked-test:latest&pullProgress=true&tlsVerify=false" 200 \
+  .status~".*success.*" \
+  .stream~".*Starting to pull artifact.*" \
+  .stream~".*Artifact pulled successfully.*"
+
+# Get layer digests (output has the 'sha256:' prefix) for verification
+layer_digests=$(skopeo inspect --tls-verify=false \
+    docker://localhost:$REGISTRY_PORT/chunked-test:latest | jq -r '.Layers[]')
+
+# Verify each layer digest appears as a progressComponentID in the pullProgress stream
+for layer_id in $layer_digests; do
+    like "$output" ".*\"total\":[1-9][0-9]*,\"progressComponentID\":\"${layer_id}\".*" \
+         "pullProgress reports total for layer $layer_id"
+    like "$output" ".*\"current\":[1-9][0-9]*,\"total\":[1-9][0-9]*,\"progressComponentID\":\"${layer_id}\".*" \
+         "pullProgress reports current for layer $layer_id"
+done
+
+# Clean up
+podman rmi -f localhost:$REGISTRY_PORT/chunked-test:latest >/dev/null 2>&1 || true
+rm -rf $CHUNKED_TMPD
+stop_registry
+
+# Restart service without modified storage.conf
+stop_service
+start_service
 
 # vim: filetype=sh

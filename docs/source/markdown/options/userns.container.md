@@ -1,8 +1,12 @@
 ####> This option file is used in:
-####>   podman create, kube play, run
+####>   podman podman-container.unit.5.md.in, create, kube play, podman-kube.unit.5.md.in, run
 ####> If file is edited, make sure the changes
 ####> are applicable to all of those.
+<< if is_quadlet >>
+### `UserNS=mode`
+<< else >>
 #### **--userns**=*mode*
+<< endif >>
 
 Set the user namespace mode for the container.
 
@@ -14,7 +18,7 @@ If `--userns` is not set, the default value is determined as follows.
 
 `--userns=""` (i.e., an empty string) is an alias for `--userns=host`.
 
-This option is incompatible with **--gidmap**, **--uidmap**, **--subuidname** and **--subgidname**.
+This option is incompatible with << '**GIDMap=**' if is_quadlet else '**--gidmap**' >>, << '**UIDMap=**' if is_quadlet else '**--uidmap**' >>, << '**SubUIDMap=**' if is_quadlet else '**--subuidname**' >> and << '**SubGIDMap=**' if is_quadlet else '**--subgidname**' >>.
 
 Rootless user --userns=Key mappings:
 
@@ -30,9 +34,7 @@ Valid _mode_ values are:
 
 **auto**[:_OPTIONS,..._]: automatically create a unique user namespace.
 
-* `rootful mode`: The `--userns=auto` flag requires that the user name __containers__ be specified in the /etc/subuid and /etc/subgid files, with an unused range of subordinate user IDs that Podman containers are allowed to allocate.
-
-  	   Example: `containers:2147483647:2147483648`.
+* `rootful mode`: The `--userns=auto` flag requires that the user name __containers__ be specified in the /etc/subuid and /etc/subgid files, with an unused range of subordinate user IDs that Podman containers are allowed to allocate.  Example: `containers:2147483647:2147483648`.
 
 * `rootless mode`: The users range from the /etc/subuid and /etc/subgid files will be used. Note running a single container without using --userns=auto will use the entire range of UIDs and not allow further subdividing. See subuid(5).
 
@@ -40,7 +42,7 @@ Podman allocates unique ranges of UIDs and GIDs from the `containers` subordinat
 
 The option `--userns=keep-id` uses all the subuids and subgids of the user.
 The option `--userns=nomap` uses all the subuids and subgids of the user except the user's own ID.
-Using `--userns=auto` when starting new containers does not work as long as any containers exist that were started with `--userns=keep-id` or `--userns=nomap`.
+Using `--userns=auto` when starting new containers does not work as long as any containers exist that were started with `--userns=nomap` or `--userns=keep-id` without limiting the user namespace size.
 
   Valid `auto` options:
 
@@ -50,7 +52,7 @@ Using `--userns=auto` when starting new containers does not work as long as any 
 
 The host UID and GID in *gidmapping* and *uidmapping* can optionally be prefixed with the `@` symbol.
 In this case, podman will look up the intermediate ID corresponding to host ID and it will map the found intermediate ID to the container id.
-For details see **--uidmap**.
+For details see << '**UIDMap=**' if is_quadlet else '**--uidmap**' >>.
 
 **container:**_id_: join the user namespace of the specified container.
 
@@ -58,10 +60,13 @@ For details see **--uidmap**.
 
 **keep-id**: creates a user namespace where the current user's UID:GID are mapped to the same values in the container. For containers created by root, the current mapping is created into a new user namespace.
 
+  In addition, the init process within the container will run under the current user's UID. This behavior overrides the image's `USER` instruction unless you explicitly set `--user`.
+
   Valid `keep-id` options:
 
   - *uid*=UID: override the UID inside the container that is used to map the current user to.
   - *gid*=GID: override the GID inside the container that is used to map the current user to.
+  - *size*=SIZE: override the size of the configured user namespace.  It is useful to not saturate all the available IDs.  Not supported when running as root.
 
 **nomap**: creates a user namespace where the current rootless user's UID:GID are not mapped into the container. This option is not allowed for containers created by the root user.
 

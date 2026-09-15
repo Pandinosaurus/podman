@@ -5,13 +5,12 @@ package integration
 import (
 	"fmt"
 
-	. "github.com/containers/podman/v5/test/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	. "go.podman.io/podman/v6/test/utils"
 )
 
 var _ = Describe("Podman run passwd", func() {
-
 	It("podman run no user specified ", func() {
 		session := podmanTest.Podman([]string{"run", "--read-only", BB, "mount"})
 		session.WaitWithDefaultTimeout()
@@ -85,13 +84,6 @@ USER 1000`, ALPINE)
 
 	It("podman run numeric group not specified in container", func() {
 		session := podmanTest.Podman([]string{"run", "--read-only", "-u", "20001:20001", BB, "mount"})
-		session.WaitWithDefaultTimeout()
-		Expect(session).Should(ExitCleanly())
-		Expect(session.OutputToString()).To(ContainSubstring("/etc/group"))
-	})
-
-	It("podman run numeric user not specified in container modifies group", func() {
-		session := podmanTest.Podman([]string{"run", "--read-only", "-u", "20001", BB, "mount"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 		Expect(session.OutputToString()).To(ContainSubstring("/etc/group"))

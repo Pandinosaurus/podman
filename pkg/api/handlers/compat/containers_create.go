@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package compat
 
@@ -13,24 +13,24 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/containers/buildah/pkg/parse"
-	"github.com/containers/common/libimage"
-	"github.com/containers/common/libnetwork/types"
-	"github.com/containers/common/pkg/cgroups"
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/podman/v5/libpod"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/api/handlers"
-	"github.com/containers/podman/v5/pkg/api/handlers/utils"
-	api "github.com/containers/podman/v5/pkg/api/types"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/domain/infra/abi"
-	"github.com/containers/podman/v5/pkg/rootless"
-	"github.com/containers/podman/v5/pkg/specgen"
-	"github.com/containers/podman/v5/pkg/specgenutil"
-	"github.com/containers/storage"
-	"github.com/containers/storage/pkg/fileutils"
-	"github.com/docker/docker/api/types/mount"
+	"github.com/moby/moby/api/types/mount"
+	"go.podman.io/buildah/pkg/parse"
+	"go.podman.io/common/libimage"
+	"go.podman.io/common/libnetwork/types"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/image/v5/manifest"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/api/handlers"
+	"go.podman.io/podman/v6/pkg/api/handlers/utils"
+	api "go.podman.io/podman/v6/pkg/api/types"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/domain/infra/abi"
+	"go.podman.io/podman/v6/pkg/rootless"
+	"go.podman.io/podman/v6/pkg/specgen"
+	"go.podman.io/podman/v6/pkg/specgenutil"
+	"go.podman.io/storage"
+	"go.podman.io/storage/pkg/fileutils"
 )
 
 func CreateContainer(w http.ResponseWriter, r *http.Request) {
@@ -49,8 +49,8 @@ func CreateContainer(w http.ResponseWriter, r *http.Request) {
 
 	// compatible configuration
 	body := handlers.CreateContainerConfig{}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		utils.Error(w, http.StatusInternalServerError, fmt.Errorf("decode(): %w", err))
+	if err := utils.ReadJSONFromBody(r, &body); err != nil {
+		utils.Error(w, http.StatusBadRequest, err)
 		return
 	}
 
@@ -117,15 +117,35 @@ func CreateContainer(w http.ResponseWriter, r *http.Request) {
 		utils.Error(w, http.StatusInternalServerError, fmt.Errorf("fill out specgen: %w", err))
 		return
 	}
+
+	// empty test command means inherit the image healthcheck, but we need to preserve the other health config fields if provided
+	if hc := body.Config.Healthcheck; hc != nil && len(hc.Test) == 0 && sg.HealthConfig == nil {
+		if hc.Interval != 0 || hc.Timeout != 0 || hc.Retries != 0 || hc.StartPeriod != 0 || hc.StartInterval != 0 {
+			sg.HealthConfig = &manifest.Schema2HealthConfig{
+				Interval:      hc.Interval,
+				Timeout:       hc.Timeout,
+				Retries:       hc.Retries,
+				StartPeriod:   hc.StartPeriod,
+				StartInterval: hc.StartInterval,
+			}
+		}
+	}
+
 	// moby always create the working directory
 	localTrue := true
 	sg.CreateWorkingDir = &localTrue
-	// moby doesn't inherit /etc/hosts from host
-	sg.BaseHostsFile = "none"
+	// moby doesn't inherit /etc/hosts from host, but only overwrite if not set in containers.conf
+	if rtc.Containers.BaseHostsFile == "" {
+		sg.BaseHostsFile = "none"
+	}
 
 	ic := abi.ContainerEngine{Libpod: runtime}
 	report, err := ic.ContainerCreate(r.Context(), sg)
 	if err != nil {
+		if errors.Is(err, define.ErrCtrExists) || errors.Is(err, storage.ErrDuplicateName) {
+			utils.Error(w, http.StatusConflict, fmt.Errorf("container create: %w", err))
+			return
+		}
 		utils.Error(w, http.StatusInternalServerError, fmt.Errorf("container create: %w", err))
 		return
 	}
@@ -147,8 +167,6 @@ func stringMaptoArray(m map[string]string) []string {
 // cliOpts converts a compat input struct to cliopts
 func cliOpts(cc handlers.CreateContainerConfig, rtc *config.Config) (*entities.ContainerCreateOptions, []string, error) {
 	var (
-		capAdd     []string
-		cappDrop   []string
 		entrypoint *string
 		init       bool
 		specPorts  []types.PortMapping
@@ -161,7 +179,12 @@ func cliOpts(cc handlers.CreateContainerConfig, rtc *config.Config) (*entities.C
 	// Iterate devices and convert to CLI expected string
 	devices := make([]string, 0, len(cc.HostConfig.Devices))
 	for _, dev := range cc.HostConfig.Devices {
-		devices = append(devices, fmt.Sprintf("%s:%s:%s", dev.PathOnHost, dev.PathInContainer, dev.CgroupPermissions))
+		devices = append(devices, utils.DockerDeviceMappingString(dev))
+	}
+	for _, r := range cc.HostConfig.Resources.DeviceRequests {
+		if r.Driver == "cdi" {
+			devices = append(devices, r.DeviceIDs...)
+		}
 	}
 
 	// iterate blkreaddevicebps
@@ -202,12 +225,18 @@ func cliOpts(cc handlers.CreateContainerConfig, rtc *config.Config) (*entities.C
 			jsonString := string(b)
 			entrypoint = &jsonString
 		}
+	} else if cc.Config.Entrypoint != nil {
+		// Entrypoint in HTTP request is set, but it is an empty slice.
+		// Set the entrypoint to empty string slice, because keeping it set to nil
+		// would later fallback to default entrypoint.
+		emptySlice := "[]"
+		entrypoint = &emptySlice
 	}
 
 	// expose ports
 	expose := make([]string, 0, len(cc.Config.ExposedPorts))
 	for p := range cc.Config.ExposedPorts {
-		expose = append(expose, fmt.Sprintf("%s/%s", p.Port(), p.Proto()))
+		expose = append(expose, p.String())
 	}
 
 	// mounts type=tmpfs/bind,source=...,target=...=,opt=val
@@ -239,10 +268,30 @@ func cliOpts(cc handlers.CreateContainerConfig, rtc *config.Config) (*entities.C
 			}
 		case mount.TypeTmpfs:
 			if m.TmpfsOptions != nil {
-				addField(&builder, "tmpfs-size", strconv.FormatInt(m.TmpfsOptions.SizeBytes, 10))
-				addField(&builder, "tmpfs-mode", strconv.FormatUint(uint64(m.TmpfsOptions.Mode), 8))
+				if m.TmpfsOptions.SizeBytes != 0 {
+					addField(&builder, "tmpfs-size", strconv.FormatInt(m.TmpfsOptions.SizeBytes, 10))
+				}
+				if m.TmpfsOptions.Mode != 0 {
+					addField(&builder, "tmpfs-mode", strconv.FormatUint(uint64(m.TmpfsOptions.Mode), 8))
+				}
+				for _, opt := range m.TmpfsOptions.Options {
+					switch len(opt) {
+					case 1:
+						if builder.Len() > 0 {
+							builder.WriteRune(',')
+						}
+						builder.WriteString(opt[0])
+					case 2:
+						addField(&builder, opt[0], opt[1])
+					default:
+						return nil, nil, fmt.Errorf("invalid tmpfs format %q,", opt)
+					}
+				}
 			}
 		case mount.TypeVolume:
+			if m.VolumeOptions != nil {
+				addField(&builder, "subpath", m.VolumeOptions.Subpath)
+			}
 			// All current VolumeOpts are handled above
 			// See vendor/github.com/containers/common/pkg/parse/parse.go:ValidateVolumeOpts()
 		}
@@ -253,7 +302,7 @@ func cliOpts(cc handlers.CreateContainerConfig, rtc *config.Config) (*entities.C
 	// dns
 	dns := make([]net.IP, 0, len(cc.HostConfig.DNS))
 	for _, d := range cc.HostConfig.DNS {
-		dns = append(dns, net.ParseIP(d))
+		dns = append(dns, net.IP(d.AsSlice()))
 	}
 
 	// publish
@@ -267,18 +316,22 @@ func cliOpts(cc handlers.CreateContainerConfig, rtc *config.Config) (*entities.C
 			if err != nil {
 				return nil, nil, err
 			}
+			hostIP := ""
+			if pb.HostIP.IsValid() {
+				hostIP = pb.HostIP.String()
+			}
 			tmpPort := types.PortMapping{
-				HostIP:        pb.HostIP,
-				ContainerPort: uint16(port.Int()),
+				HostIP:        hostIP,
+				ContainerPort: port.Num(),
 				HostPort:      uint16(hostport),
 				Range:         0,
-				Protocol:      port.Proto(),
+				Protocol:      string(port.Proto()),
 			}
 			specPorts = append(specPorts, tmpPort)
 		}
 	}
 
-	// special case for NetworkMode, the podman default is slirp4netns for
+	// special case for NetworkMode, the podman default is pasta for
 	// rootless but for better docker compat we want bridge. Do this only if
 	// the default config in containers.conf wasn't overridden to use another
 	// value than the default "private" one.
@@ -292,7 +345,7 @@ func cliOpts(cc handlers.CreateContainerConfig, rtc *config.Config) (*entities.C
 		}
 	}
 
-	nsmode, networks, netOpts, err := specgen.ParseNetworkFlag([]string{netmode})
+	nsmode, networks, _, netOpts, err := specgen.ParseNetworkFlag([]string{netmode})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -317,7 +370,7 @@ func cliOpts(cc handlers.CreateContainerConfig, rtc *config.Config) (*entities.C
 	// This field is deprecated since API v1.44 where
 	// EndpointSettings.MacAddress is used instead (and has precedence
 	// below).  Let's still use it for backwards compat.
-	containerMacAddress := cc.MacAddress //nolint:staticcheck
+	containerMacAddress := cc.MacAddress
 
 	// network names
 	switch {
@@ -329,40 +382,22 @@ func cliOpts(cc handlers.CreateContainerConfig, rtc *config.Config) (*entities.C
 			if endpoint != nil {
 				netOpts.Aliases = endpoint.Aliases
 
-				// if IP address is provided
-				if len(endpoint.IPAddress) > 0 {
-					staticIP := net.ParseIP(endpoint.IPAddress)
-					if staticIP == nil {
-						return nil, nil, fmt.Errorf("failed to parse the ip address %q", endpoint.IPAddress)
-					}
-					netOpts.StaticIPs = append(netOpts.StaticIPs, staticIP)
-				}
-
 				if endpoint.IPAMConfig != nil {
 					// if IPAMConfig.IPv4Address is provided
-					if len(endpoint.IPAMConfig.IPv4Address) > 0 {
-						staticIP := net.ParseIP(endpoint.IPAMConfig.IPv4Address)
-						if staticIP == nil {
-							return nil, nil, fmt.Errorf("failed to parse the ipv4 address %q", endpoint.IPAMConfig.IPv4Address)
-						}
+					if endpoint.IPAMConfig.IPv4Address.IsValid() {
+						staticIP := net.IP(endpoint.IPAMConfig.IPv4Address.AsSlice())
 						netOpts.StaticIPs = append(netOpts.StaticIPs, staticIP)
 					}
+
 					// if IPAMConfig.IPv6Address is provided
-					if len(endpoint.IPAMConfig.IPv6Address) > 0 {
-						staticIP := net.ParseIP(endpoint.IPAMConfig.IPv6Address)
-						if staticIP == nil {
-							return nil, nil, fmt.Errorf("failed to parse the ipv6 address %q", endpoint.IPAMConfig.IPv6Address)
-						}
+					if endpoint.IPAMConfig.IPv6Address.IsValid() {
+						staticIP := net.IP(endpoint.IPAMConfig.IPv6Address.AsSlice())
 						netOpts.StaticIPs = append(netOpts.StaticIPs, staticIP)
 					}
 				}
 				// If MAC address is provided
-				if len(endpoint.MacAddress) > 0 {
-					staticMac, err := net.ParseMAC(endpoint.MacAddress)
-					if err != nil {
-						return nil, nil, fmt.Errorf("failed to parse the mac address %q", endpoint.MacAddress)
-					}
-					netOpts.StaticMAC = types.HardwareAddr(staticMac)
+				if len(endpoint.MacAddress) != 0 {
+					netOpts.StaticMAC = types.HardwareAddr(net.HardwareAddr(endpoint.MacAddress))
 				} else if len(containerMacAddress) > 0 {
 					// docker-compose only sets one mac address for the container on the container config
 					// If there are more than one network attached it will end up on the first one,
@@ -408,44 +443,55 @@ func cliOpts(cc handlers.CreateContainerConfig, rtc *config.Config) (*entities.C
 	// like with start. We believe this is just a difference in podman/compat
 	cliOpts := entities.ContainerCreateOptions{
 		// Attach:            nil, // don't need?
+		Annotation:   stringMaptoArray(cc.HostConfig.Annotations),
+		Arch:         "",
 		Authfile:     "",
-		CapAdd:       append(capAdd, cc.HostConfig.CapAdd...),
-		CapDrop:      append(cappDrop, cc.HostConfig.CapDrop...),
+		CapAdd:       cc.HostConfig.CapAdd,
+		CapDrop:      cc.HostConfig.CapDrop,
+		CgroupNS:     string(cc.HostConfig.CgroupnsMode),
 		CgroupParent: cc.HostConfig.CgroupParent,
 		CIDFile:      cc.HostConfig.ContainerIDFile,
+		// CPUS:              0, // don't need?
 		CPUPeriod:    uint64(cc.HostConfig.CPUPeriod),
 		CPUQuota:     cc.HostConfig.CPUQuota,
 		CPURTPeriod:  uint64(cc.HostConfig.CPURealtimePeriod),
 		CPURTRuntime: cc.HostConfig.CPURealtimeRuntime,
+		CPUSetCPUs:   cc.HostConfig.CpusetCpus,
+		CPUSetMems:   cc.HostConfig.CpusetMems,
 		CPUShares:    uint64(cc.HostConfig.CPUShares),
-		// CPUS:              0, // don't need?
-		CPUSetCPUs: cc.HostConfig.CpusetCpus,
-		CPUSetMems: cc.HostConfig.CpusetMems,
 		// Detach:            false, // don't need
 		// DetachKeys:        "",    // don't need
-		Devices:              devices,
 		DeviceCgroupRule:     cc.HostConfig.DeviceCgroupRules,
 		DeviceReadBPs:        readBps,
 		DeviceReadIOPs:       readIops,
+		Devices:              devices,
 		DeviceWriteBPs:       writeBps,
 		DeviceWriteIOPs:      writeIops,
 		Entrypoint:           entrypoint,
-		Env:                  cc.Config.Env,
+		Env:                  cc.Env,
+		EnvMerge:             cc.EnvMerge,
 		Expose:               expose,
 		GroupAdd:             cc.HostConfig.GroupAdd,
-		Hostname:             cc.Config.Hostname,
+		HealthInterval:       define.DefaultHealthCheckInterval,
+		HealthLogDestination: define.DefaultHealthCheckLocalDestination,
+		HealthMaxLogCount:    define.DefaultHealthMaxLogCount,
+		HealthMaxLogSize:     define.DefaultHealthMaxLogSize,
+		HealthRetries:        define.DefaultHealthCheckRetries,
+		HealthStartPeriod:    define.DefaultHealthCheckStartPeriod,
+		HealthTimeout:        define.DefaultHealthCheckTimeout,
+		Hostname:             cc.Hostname,
 		ImageVolume:          "anonymous",
 		Init:                 init,
-		Interactive:          cc.Config.OpenStdin,
+		Interactive:          cc.OpenStdin,
 		IPC:                  string(cc.HostConfig.IpcMode),
-		Label:                stringMaptoArray(cc.Config.Labels),
+		Label:                stringMaptoArray(cc.Labels),
 		LogDriver:            cc.HostConfig.LogConfig.Type,
 		LogOptions:           stringMaptoArray(cc.HostConfig.LogConfig.Config),
+		Mount:                mounts,
 		Name:                 cc.Name,
+		Net:                  &netInfo,
 		OOMScoreAdj:          &cc.HostConfig.OomScoreAdj,
-		Arch:                 "",
 		OS:                   "",
-		Variant:              "",
 		PID:                  string(cc.HostConfig.PidMode),
 		PIDsLimit:            cc.HostConfig.PidsLimit,
 		Privileged:           cc.HostConfig.Privileged,
@@ -454,42 +500,32 @@ func cliOpts(cc handlers.CreateContainerConfig, rtc *config.Config) (*entities.C
 		ReadOnly:             cc.HostConfig.ReadonlyRootfs,
 		ReadWriteTmpFS:       true, // podman default
 		Rm:                   cc.HostConfig.AutoRemove,
-		Annotation:           stringMaptoArray(cc.HostConfig.Annotations),
 		SecurityOpt:          cc.HostConfig.SecurityOpt,
-		StopSignal:           cc.Config.StopSignal,
+		StopSignal:           cc.StopSignal,
 		StopTimeout:          rtc.Engine.StopTimeout, // podman default
 		StorageOpts:          stringMaptoArray(cc.HostConfig.StorageOpt),
 		Sysctl:               stringMaptoArray(cc.HostConfig.Sysctls),
 		Systemd:              "true", // podman default
 		TmpFS:                parsedTmp,
-		TTY:                  cc.Config.Tty,
-		EnvMerge:             cc.EnvMerge,
+		TTY:                  cc.Tty,
 		UnsetEnv:             cc.UnsetEnv,
 		UnsetEnvAll:          cc.UnsetEnvAll,
-		User:                 cc.Config.User,
+		User:                 cc.User,
 		UserNS:               string(cc.HostConfig.UsernsMode),
 		UTS:                  string(cc.HostConfig.UTSMode),
-		Mount:                mounts,
+		Variant:              "",
 		VolumesFrom:          cc.HostConfig.VolumesFrom,
-		Workdir:              cc.Config.WorkingDir,
-		Net:                  &netInfo,
-		HealthInterval:       define.DefaultHealthCheckInterval,
-		HealthRetries:        define.DefaultHealthCheckRetries,
-		HealthTimeout:        define.DefaultHealthCheckTimeout,
-		HealthStartPeriod:    define.DefaultHealthCheckStartPeriod,
-		HealthLogDestination: define.DefaultHealthCheckLocalDestination,
-		HealthMaxLogCount:    define.DefaultHealthMaxLogCount,
-		HealthMaxLogSize:     define.DefaultHealthMaxLogSize,
+		Workdir:              cc.WorkingDir,
 	}
-	if !rootless.IsRootless() {
-		var ulimits []string
-		if len(cc.HostConfig.Ulimits) > 0 {
-			for _, ul := range cc.HostConfig.Ulimits {
-				ulimits = append(ulimits, ul.String())
-			}
-			cliOpts.Ulimit = ulimits
+
+	var ulimits []string
+	if len(cc.HostConfig.Ulimits) > 0 {
+		for _, ul := range cc.HostConfig.Ulimits {
+			ulimits = append(ulimits, ul.String())
 		}
+		cliOpts.Ulimit = ulimits
 	}
+
 	if cc.HostConfig.Resources.NanoCPUs > 0 {
 		if cliOpts.CPUPeriod != 0 || cliOpts.CPUQuota != 0 {
 			return nil, nil, fmt.Errorf("NanoCpus conflicts with CpuPeriod and CpuQuota")
@@ -537,7 +573,7 @@ func cliOpts(cc handlers.CreateContainerConfig, rtc *config.Config) (*entities.C
 			continue
 		}
 		if err := os.MkdirAll(vol, 0o755); err != nil {
-			if !os.IsExist(err) {
+			if !errors.Is(err, os.ErrExist) {
 				return nil, nil, fmt.Errorf("making volume mountpoint for volume %s: %w", vol, err)
 			}
 		}
@@ -561,11 +597,7 @@ func cliOpts(cc handlers.CreateContainerConfig, rtc *config.Config) (*entities.C
 		cliOpts.MemoryReservation = strconv.Itoa(int(cc.HostConfig.MemoryReservation))
 	}
 
-	cgroupsv2, err := cgroups.IsCgroup2UnifiedMode()
-	if err != nil {
-		return nil, nil, err
-	}
-	if cc.HostConfig.MemorySwap > 0 && (!rootless.IsRootless() || (rootless.IsRootless() && cgroupsv2)) {
+	if cc.HostConfig.MemorySwap > 0 {
 		cliOpts.MemorySwap = strconv.Itoa(int(cc.HostConfig.MemorySwap))
 	}
 
@@ -586,7 +618,7 @@ func cliOpts(cc handlers.CreateContainerConfig, rtc *config.Config) (*entities.C
 		cliOpts.Restart = policy
 	}
 
-	if cc.HostConfig.MemorySwappiness != nil && (!rootless.IsRootless() || rootless.IsRootless() && cgroupsv2 && rtc.Engine.CgroupManager == "systemd") {
+	if cc.HostConfig.MemorySwappiness != nil && (!rootless.IsRootless() || rootless.IsRootless() && rtc.Engine.CgroupManager == "systemd") {
 		cliOpts.MemorySwappiness = *cc.HostConfig.MemorySwappiness
 	} else {
 		cliOpts.MemorySwappiness = -1
@@ -594,15 +626,14 @@ func cliOpts(cc handlers.CreateContainerConfig, rtc *config.Config) (*entities.C
 	if cc.HostConfig.OomKillDisable != nil {
 		cliOpts.OOMKillDisable = *cc.HostConfig.OomKillDisable
 	}
-	if cc.Config.Healthcheck != nil {
-		finCmd := ""
-		for _, str := range cc.Config.Healthcheck.Test {
-			finCmd = finCmd + str + " "
+	if cc.Config.Healthcheck != nil && len(cc.Config.Healthcheck.Test) > 0 {
+		// Encode healthcheck test as JSON to preserve arguments with spaces.
+		// MakeHealthCheckFromCli will unmarshal this back to the original array.
+		cmdJSON, err := json.Marshal(cc.Config.Healthcheck.Test)
+		if err != nil {
+			return nil, nil, err
 		}
-		if len(finCmd) > 1 {
-			finCmd = finCmd[:len(finCmd)-1]
-		}
-		cliOpts.HealthCmd = finCmd
+		cliOpts.HealthCmd = string(cmdJSON)
 		if cc.Config.Healthcheck.Interval > 0 {
 			cliOpts.HealthInterval = cc.Config.Healthcheck.Interval.String()
 		}
@@ -618,8 +649,8 @@ func cliOpts(cc handlers.CreateContainerConfig, rtc *config.Config) (*entities.C
 	}
 
 	// specgen assumes the image name is arg[0]
-	cmd := []string{cc.Config.Image}
-	cmd = append(cmd, cc.Config.Cmd...)
+	cmd := append([]string{cc.Config.Image}, cc.Config.Cmd...)
+
 	return &cliOpts, cmd, nil
 }
 

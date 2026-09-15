@@ -1,7 +1,9 @@
 package bindings
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -9,14 +11,19 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/user"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/blang/semver/v4"
-	"github.com/containers/common/pkg/ssh"
-	"github.com/containers/podman/v5/version"
+	"github.com/kevinburke/ssh_config"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/pkg/ssh"
+	"go.podman.io/podman/v6/pkg/util/tlsutil"
+	"go.podman.io/podman/v6/version"
+	"go.podman.io/storage/pkg/fileutils"
 	"golang.org/x/net/proxy"
 )
 
@@ -28,13 +35,15 @@ type APIResponse struct {
 type Connection struct {
 	URI    *url.URL
 	Client *http.Client
+	tls    bool
 }
 
 type valueKey string
 
 const (
-	clientKey  = valueKey("Client")
-	versionKey = valueKey("ServiceVersion")
+	clientKey      = valueKey("Client")
+	versionKey     = valueKey("ServiceVersion")
+	machineModeKey = valueKey("MachineMode")
 )
 
 type ConnectError struct {
@@ -61,6 +70,13 @@ func GetClient(ctx context.Context) (*Connection, error) {
 	return nil, fmt.Errorf("%s not set in context", clientKey)
 }
 
+func GetMachineMode(ctx context.Context) bool {
+	if v, ok := ctx.Value(machineModeKey).(bool); ok {
+		return v
+	}
+	return false
+}
+
 // ServiceVersion from context build by NewConnection()
 func ServiceVersion(ctx context.Context) *semver.Version {
 	if v, ok := ctx.Value(versionKey).(*semver.Version); ok {
@@ -76,7 +92,7 @@ func JoinURL(elements ...string) string {
 
 // NewConnection creates a new service connection without an identity
 func NewConnection(ctx context.Context, uri string) (context.Context, error) {
-	return NewConnectionWithIdentity(ctx, uri, "", false)
+	return NewConnectionWithOptions(ctx, Options{URI: uri})
 }
 
 // NewConnectionWithIdentity takes a URI as a string and returns a context with the
@@ -88,16 +104,31 @@ func NewConnection(ctx context.Context, uri string) (context.Context, error) {
 // or unix:///run/podman/podman.sock
 // or ssh://<user>@<host>[:port]/run/podman/podman.sock
 func NewConnectionWithIdentity(ctx context.Context, uri string, identity string, machine bool) (context.Context, error) {
-	var (
-		err error
-	)
-	if v, found := os.LookupEnv("CONTAINER_HOST"); found && uri == "" {
-		uri = v
-	}
+	return NewConnectionWithOptions(ctx, Options{URI: uri, Identity: identity, Machine: machine})
+}
 
-	if v, found := os.LookupEnv("CONTAINER_SSHKEY"); found && len(identity) == 0 {
-		identity = v
+type Options struct {
+	URI         string
+	Identity    string
+	TLSCertFile string
+	TLSKeyFile  string
+	TLSCAFile   string
+	Machine     bool
+}
+
+func orEnv(s string, env string) string {
+	if len(s) != 0 {
+		return s
 	}
+	s, _ = os.LookupEnv(env)
+	return s
+}
+
+func NewConnectionWithOptions(ctx context.Context, opts Options) (context.Context, error) {
+	var err error
+
+	uri := orEnv(opts.URI, "CONTAINER_HOST")
+	identity := orEnv(opts.Identity, "CONTAINER_SSHKEY")
 
 	_url, err := url.Parse(uri)
 	if err != nil {
@@ -108,7 +139,7 @@ func NewConnectionWithIdentity(ctx context.Context, uri string, identity string,
 	var connection Connection
 	switch _url.Scheme {
 	case "ssh":
-		conn, err := sshClient(_url, uri, identity, machine)
+		conn, err := sshClient(_url, uri, identity, opts.Machine)
 		if err != nil {
 			return nil, err
 		}
@@ -124,7 +155,7 @@ func NewConnectionWithIdentity(ctx context.Context, uri string, identity string,
 		if !strings.HasPrefix(uri, "tcp://") {
 			return nil, errors.New("tcp URIs should begin with tcp://")
 		}
-		conn, err := tcpClient(_url)
+		conn, err := tcpClient(_url, opts)
 		if err != nil {
 			return nil, newConnectError(err)
 		}
@@ -139,49 +170,149 @@ func NewConnectionWithIdentity(ctx context.Context, uri string, identity string,
 		return nil, newConnectError(err)
 	}
 	ctx = context.WithValue(ctx, versionKey, serviceVersion)
+
+	ctx = context.WithValue(ctx, machineModeKey, opts.Machine)
 	return ctx, nil
 }
 
 func sshClient(_url *url.URL, uri string, identity string, machine bool) (Connection, error) {
 	var (
-		err error
+		err  error
+		port int
 	)
 	connection := Connection{
 		URI: _url,
 	}
-	port := 22
+	userinfo := _url.User
+
 	if _url.Port() != "" {
 		port, err = strconv.Atoi(_url.Port())
 		if err != nil {
 			return connection, err
 		}
 	}
+
+	// only parse ssh_config when we are not connecting to a machine
+	// For machine connections we always have the full URL in the
+	// system connection so reading the file is just unnecessary.
+	if !machine {
+		alias := _url.Hostname()
+		cfg := ssh_config.DefaultUserSettings
+		cfg.IgnoreErrors = true
+		found := false
+
+		if userinfo == nil {
+			if val := cfg.Get(alias, "User"); val != "" {
+				userinfo = url.User(val)
+				found = true
+			}
+		}
+		// not in url or ssh_config so default to current user
+		if userinfo == nil {
+			u, err := user.Current()
+			if err != nil {
+				return connection, fmt.Errorf("current user could not be determined: %w", err)
+			}
+			userinfo = url.User(u.Username)
+		}
+
+		if val := cfg.Get(alias, "Hostname"); val != "" {
+			uri = "ssh://" + val
+			found = true
+		}
+
+		if port == 0 {
+			if val := cfg.Get(alias, "Port"); val != "" {
+				if val != ssh_config.Default("Port") {
+					port, err = strconv.Atoi(val)
+					if err != nil {
+						return connection, fmt.Errorf("port is not an int: %s: %w", val, err)
+					}
+					found = true
+				}
+			}
+		}
+		// not in ssh config or url so use default 22 port
+		if port == 0 {
+			port = 22
+		}
+
+		if identity == "" {
+			if val := cfg.Get(alias, "IdentityFile"); val != "" {
+				// we get default IdentityFile value (~/.ssh/identity) every time
+				// checking if we got default
+				defaultIdentityPath := val == ssh_config.Default("IdentityFile")
+
+				identity = strings.Trim(val, "\"")
+
+				if strings.HasPrefix(identity, "~/") {
+					homedir, err := os.UserHomeDir()
+					if err != nil {
+						return connection, fmt.Errorf("failed to find home dir: %w", err)
+					}
+
+					identity = filepath.Join(homedir, identity[2:])
+				}
+
+				// if we have default value but no file exists ignoring identity
+				if err := fileutils.Exists(identity); err != nil && defaultIdentityPath {
+					identity = ""
+				} else {
+					found = true
+				}
+			}
+		}
+
+		if found {
+			logrus.Debugf("ssh_config alias found: %s", alias)
+			logrus.Debugf("  User: %s", userinfo.Username())
+			logrus.Debugf("  Hostname: %s", uri)
+			logrus.Debugf("  Port: %d", port)
+			logrus.Debugf("  IdentityFile: %q", identity)
+		}
+	}
 	conn, err := ssh.Dial(&ssh.ConnectionDialOptions{
 		Host:                        uri,
 		Identity:                    identity,
-		User:                        _url.User,
+		User:                        userinfo,
 		Port:                        port,
 		InsecureIsMachineConnection: machine,
 	}, ssh.GolangMode)
 	if err != nil {
 		return connection, newConnectError(err)
 	}
-	dialContext := func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return ssh.DialNet(conn, "unix", _url)
+	if _url.Path == "" {
+		session, err := conn.NewSession()
+		if err != nil {
+			return connection, err
+		}
+		defer session.Close()
+
+		var b bytes.Buffer
+		session.Stdout = &b
+		if err := session.Run(
+			"podman info --format '{{.Host.RemoteSocket.Path}}'"); err != nil {
+			return connection, err
+		}
+		val := strings.TrimSuffix(b.String(), "\n")
+		_url.Path = val
 	}
 	connection.Client = &http.Client{
 		Transport: &http.Transport{
-			DialContext: dialContext,
-		}}
+			DialContext: newSSHDialContext(conn, _url),
+		},
+	}
 	return connection, nil
 }
 
-func tcpClient(_url *url.URL) (Connection, error) {
+// tcpClient creates a TCP connection to _url.
+// opts are consulted for TLS options only.
+func tcpClient(_url *url.URL, opts Options) (Connection, error) {
 	connection := Connection{
 		URI: _url,
 	}
 	dialContext := func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return net.Dial("tcp", _url.Host)
+		return (&net.Dialer{}).DialContext(ctx, "tcp", _url.Host)
 	}
 	// use proxy if env `CONTAINER_PROXY` set
 	if proxyURI, found := os.LookupEnv("CONTAINER_PROXY"); found {
@@ -193,7 +324,7 @@ func tcpClient(_url *url.URL) (Connection, error) {
 		if err != nil {
 			return connection, fmt.Errorf("unable to dial to proxy %s, %w", proxyURI, err)
 		}
-		dialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
+		dialContext = func(_ context.Context, _, _ string) (net.Conn, error) {
 			logrus.Debugf("use proxy %s, but proxy dialer does not support dial timeout", proxyURI)
 			return proxyDialer.Dial("tcp", _url.Host)
 		}
@@ -208,11 +339,34 @@ func tcpClient(_url *url.URL) (Connection, error) {
 			}
 		}
 	}
+	transport := http.Transport{
+		DialContext:        dialContext,
+		DisableCompression: true,
+	}
+	if len(opts.TLSCAFile) != 0 || len(opts.TLSCertFile) != 0 || len(opts.TLSKeyFile) != 0 {
+		logrus.Debugf("using TLS cert=%s key=%s ca=%s", opts.TLSCertFile, opts.TLSKeyFile, opts.TLSCAFile)
+		transport.TLSClientConfig = &tls.Config{}
+		connection.tls = true
+	}
+	if len(opts.TLSCAFile) != 0 {
+		pool, err := tlsutil.ReadCertBundle(opts.TLSCAFile)
+		if err != nil {
+			return connection, fmt.Errorf("unable to read CA bundle: %w", err)
+		}
+		transport.TLSClientConfig.RootCAs = pool
+	}
+	if (len(opts.TLSCertFile) == 0) != (len(opts.TLSKeyFile) == 0) {
+		return connection, fmt.Errorf("TLS Key and Certificate must both or neither be provided")
+	}
+	if len(opts.TLSCertFile) != 0 && len(opts.TLSKeyFile) != 0 {
+		keyPair, err := tls.LoadX509KeyPair(opts.TLSCertFile, opts.TLSKeyFile)
+		if err != nil {
+			return connection, fmt.Errorf("unable to read TLS key pair: %w", err)
+		}
+		transport.TLSClientConfig.Certificates = append(transport.TLSClientConfig.Certificates, keyPair)
+	}
 	connection.Client = &http.Client{
-		Transport: &http.Transport{
-			DialContext:        dialContext,
-			DisableCompression: true,
-		},
+		Transport: &transport,
 	}
 	return connection, nil
 }
@@ -275,7 +429,7 @@ func (c *Connection) DoRequest(ctx context.Context, httpBody io.Reader, httpMeth
 		response *http.Response
 	)
 
-	params := make([]interface{}, len(pathValues)+1)
+	params := make([]any, len(pathValues)+1)
 
 	if v := headers.Values("API-Version"); len(v) > 0 {
 		params[0] = v[0]
@@ -293,8 +447,14 @@ func (c *Connection) DoRequest(ctx context.Context, httpBody io.Reader, httpMeth
 
 	baseURL := "http://d"
 	if c.URI.Scheme == "tcp" {
+		var scheme string
+		if c.tls {
+			scheme = "https"
+		} else {
+			scheme = "http"
+		}
 		// Allow path prefixes for tcp connections to match Docker behavior
-		baseURL = "http://" + c.URI.Host + c.URI.Path
+		baseURL = scheme + "://" + c.URI.Host + c.URI.Path
 	}
 	uri := fmt.Sprintf(baseURL+"/v%s/libpod"+endpoint, params...)
 	logrus.Debugf("DoRequest Method: %s URI: %v", httpMethod, uri)
@@ -317,10 +477,15 @@ func (c *Connection) DoRequest(ctx context.Context, httpBody io.Reader, httpMeth
 		}
 	}
 
-	// Give the Do three chances in the case of a comm/service hiccup
+	// Give the Do three chances in the case of a comm/service hiccup.
+	// Don't retry on context or timeout errors — those won't recover.
 	for i := 1; i <= 3; i++ {
 		response, err = c.Client.Do(req) //nolint:bodyclose // The caller has to close the body.
 		if err == nil {
+			break
+		}
+		var netErr net.Error
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || (errors.As(err, &netErr) && netErr.Timeout()) {
 			break
 		}
 		time.Sleep(time.Duration(i*100) * time.Millisecond)
@@ -341,25 +506,21 @@ func (c *Connection) GetDialer(ctx context.Context) (net.Conn, error) {
 
 // IsInformational returns true if the response code is 1xx
 func (h *APIResponse) IsInformational() bool {
-	//nolint:usestdlibvars // linter wants to use http.StatusContinue over 100 but that makes less readable IMO
 	return h.Response.StatusCode/100 == 1
 }
 
 // IsSuccess returns true if the response code is 2xx
 func (h *APIResponse) IsSuccess() bool {
-	//nolint:usestdlibvars // linter wants to use http.StatusContinue over 100 but that makes less readable IMO
 	return h.Response.StatusCode/100 == 2
 }
 
 // IsRedirection returns true if the response code is 3xx
 func (h *APIResponse) IsRedirection() bool {
-	//nolint:usestdlibvars // linter wants to use http.StatusContinue over 100 but that makes less readable IMO
 	return h.Response.StatusCode/100 == 3
 }
 
 // IsClientError returns true if the response code is 4xx
 func (h *APIResponse) IsClientError() bool {
-	//nolint:usestdlibvars // linter wants to use http.StatusContinue over 100 but that makes less readable IMO
 	return h.Response.StatusCode/100 == 4
 }
 
@@ -370,6 +531,5 @@ func (h *APIResponse) IsConflictError() bool {
 
 // IsServerError returns true if the response code is 5xx
 func (h *APIResponse) IsServerError() bool {
-	//nolint:usestdlibvars // linter wants to use http.StatusContinue over 100 but that makes less readable IMO
 	return h.Response.StatusCode/100 == 5
 }

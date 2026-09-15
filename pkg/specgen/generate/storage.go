@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package generate
 
@@ -7,20 +7,21 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"path"
 	"path/filepath"
 	"strings"
 
-	"github.com/containers/common/libimage"
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/common/pkg/parse"
-	"github.com/containers/podman/v5/libpod"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/specgen"
-	"github.com/containers/podman/v5/pkg/util"
-	"github.com/containers/storage/pkg/fileutils"
 	spec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/libimage"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/common/pkg/parse"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/specgen"
+	"go.podman.io/podman/v6/pkg/util"
+	"go.podman.io/storage/pkg/fileutils"
 )
 
 // Produce final mounts and named volumes for a container
@@ -157,27 +158,35 @@ func finalizeMounts(ctx context.Context, s *specgen.SpecGenerator, rt *libpod.Ru
 		delete(baseMounts, dest)
 	}
 
+	// Overlays are neither mounts nor volumes but should supersede both.
+	for dest := range unifiedOverlays {
+		delete(baseVolumes, dest)
+		delete(baseMounts, dest)
+	}
+
 	// Supersede volumes-from/image volumes with unified volumes from above.
 	// This is an unconditional replacement.
-	for dest, mount := range unifiedMounts {
-		baseMounts[dest] = mount
-	}
-	for dest, volume := range unifiedVolumes {
-		baseVolumes[dest] = volume
-	}
+	maps.Copy(baseMounts, unifiedMounts)
+	maps.Copy(baseVolumes, unifiedVolumes)
 
 	// TODO: Investigate moving readonlyTmpfs into here. Would be more
 	// correct.
 
-	// Check for conflicts between named volumes and mounts
+	// Check for conflicts between named volumes, mounts, and overlays
 	for dest := range baseMounts {
 		if _, ok := baseVolumes[dest]; ok {
 			return nil, nil, nil, fmt.Errorf("baseMounts conflict at mount destination %v: %w", dest, specgen.ErrDuplicateDest)
+		}
+		if _, ok := unifiedOverlays[dest]; ok {
+			return nil, nil, nil, fmt.Errorf("baseMounts conflict with overlay mount at mount destination %v: %w", dest, specgen.ErrDuplicateDest)
 		}
 	}
 	for dest := range baseVolumes {
 		if _, ok := baseMounts[dest]; ok {
 			return nil, nil, nil, fmt.Errorf("baseVolumes conflict at mount destination %v: %w", dest, specgen.ErrDuplicateDest)
+		}
+		if _, ok := unifiedOverlays[dest]; ok {
+			return nil, nil, nil, fmt.Errorf("baseVolumes conflict with overlay mount at mount destination %v: %w", dest, specgen.ErrDuplicateDest)
 		}
 	}
 
@@ -434,13 +443,13 @@ func InitFSMounts(mounts []spec.Mount) error {
 	for i, m := range mounts {
 		switch {
 		case m.Type == define.TypeBind:
-			opts, err := util.ProcessOptions(m.Options, false, m.Source)
+			opts, _, err := util.ProcessOptions(m.Options, false, m.Source)
 			if err != nil {
 				return err
 			}
 			mounts[i].Options = opts
 		case m.Type == define.TypeTmpfs && filepath.Clean(m.Destination) != "/dev":
-			opts, err := util.ProcessOptions(m.Options, true, "")
+			opts, _, err := util.ProcessOptions(m.Options, true, "")
 			if err != nil {
 				return err
 			}

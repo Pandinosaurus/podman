@@ -4,10 +4,12 @@ import (
 	"os"
 	"strings"
 
-	"github.com/containers/common/pkg/ssh"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/ssh"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/validate"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 var (
@@ -29,6 +31,7 @@ var (
 var (
 	parentFlags []string
 	quiet       bool
+	format      string
 )
 
 func init() {
@@ -42,12 +45,14 @@ func init() {
 func scpFlags(cmd *cobra.Command) {
 	flags := cmd.Flags()
 	flags.BoolVarP(&quiet, "quiet", "q", false, "Suppress the output")
+
+	formatChoice := validate.Value(&format, common.ValidScpFormats...)
+	flags.Var(formatChoice, "format", "Format for `podman save` when creating the transfer archive ("+formatChoice.Choices()+"). Default is docker-archive when omitted.")
+	_ = cmd.RegisterFlagCompletionFunc("format", common.AutocompleteImageScpFormat)
 }
 
-func scp(cmd *cobra.Command, args []string) (finalErr error) {
-	var (
-		err error
-	)
+func scp(_ *cobra.Command, args []string) (finalErr error) {
+	var err error
 
 	containerConfig := registry.PodmanConfig()
 
@@ -73,7 +78,12 @@ func scp(cmd *cobra.Command, args []string) (finalErr error) {
 	}
 
 	sshEngine := ssh.DefineMode(sshType)
-	err = registry.ImageEngine().Scp(registry.Context(), src, dst, parentFlags, quiet, sshEngine)
+	scpOpts := entities.ImageScpOptions{}
+	scpOpts.ParentFlags = parentFlags
+	scpOpts.Quiet = quiet
+	scpOpts.SSHMode = sshEngine
+	scpOpts.SaveFormat = format
+	_, err = registry.ImageEngine().Scp(registry.Context(), src, dst, scpOpts)
 	if err != nil {
 		return err
 	}

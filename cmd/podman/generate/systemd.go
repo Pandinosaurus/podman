@@ -7,16 +7,16 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/common/pkg/report"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/utils"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	envLib "github.com/containers/podman/v5/pkg/env"
-	systemDefine "github.com/containers/podman/v5/pkg/systemd/define"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/common/pkg/report"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/utils"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	envLib "go.podman.io/podman/v6/pkg/env"
+	systemDefine "go.podman.io/podman/v6/pkg/systemd/define"
 )
 
 const (
@@ -60,8 +60,8 @@ Please refer to podman-systemd.unit(5) for details.
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: common.AutocompleteContainersAndPods,
 		Example: `podman generate systemd CTR
-  podman generate systemd --new --time 10 CTR
-  podman generate systemd --files --name POD`,
+podman generate systemd --new --time 10 CTR
+podman generate systemd --files --name POD`,
 	}
 )
 
@@ -170,7 +170,7 @@ func systemd(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("%s and %s are redundant and cannot be used together", stopTimeoutFlagName, stopTimeoutCompatFlagName)
 	}
 
-	reports, err := registry.ContainerEngine().GenerateSystemd(registry.GetContext(), args[0], systemdOptions)
+	reports, err := registry.ContainerEngine().GenerateSystemd(registry.Context(), args[0], systemdOptions)
 	if err != nil {
 		return err
 	}

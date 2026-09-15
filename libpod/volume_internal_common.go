@@ -8,9 +8,9 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/containers/podman/v5/libpod/define"
 	pluginapi "github.com/docker/go-plugins-helpers/volume"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/podman/v6/libpod/define"
 	"golang.org/x/sys/unix"
 )
 
@@ -180,7 +180,7 @@ func (v *Volume) unmount(force bool) error {
 
 		// Unmount the volume
 		if err := detachUnmount(v.config.MountPoint); err != nil {
-			if err == unix.EINVAL {
+			if errors.Is(err, unix.EINVAL) {
 				// Ignore EINVAL - the mount no longer exists.
 				return nil
 			}

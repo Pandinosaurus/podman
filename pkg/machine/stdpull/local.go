@@ -1,10 +1,10 @@
 package stdpull
 
 import (
-	"github.com/containers/podman/v5/pkg/machine/compression"
-	"github.com/containers/podman/v5/pkg/machine/define"
-	"github.com/containers/storage/pkg/fileutils"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/podman/v6/pkg/machine/compression"
+	"go.podman.io/podman/v6/pkg/machine/define"
+	"go.podman.io/storage/pkg/fileutils"
 )
 
 type StdDiskPull struct {

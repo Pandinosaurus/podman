@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package libpod
 
@@ -12,29 +12,20 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
-	"time"
 
-	"github.com/containers/common/libnetwork/types"
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/api/handlers/utils/apiutil"
-	"github.com/containers/storage/pkg/fileutils"
 	spec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/opencontainers/selinux/go-selinux/label"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/libnetwork/types"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/api/handlers/utils/apiutil"
+	"go.podman.io/storage/pkg/fileutils"
 	"golang.org/x/sys/unix"
 )
-
-// FuncTimer helps measure the execution time of a function
-// For debug purposes, do not leave in code
-// used like defer FuncTimer("foo")
-func FuncTimer(funcName string) {
-	elapsed := time.Since(time.Now())
-	fmt.Printf("%s executed in %d ms\n", funcName, elapsed)
-}
 
 // MountExists returns true if dest exists in the list of mounts
 func MountExists(specMounts []spec.Mount, dest string) bool {
@@ -46,47 +37,34 @@ func MountExists(specMounts []spec.Mount, dest string) bool {
 	return false
 }
 
-type byDestination []spec.Mount
-
-func (m byDestination) Len() int {
-	return len(m)
-}
-
-func (m byDestination) Less(i, j int) bool {
-	return m.parts(i) < m.parts(j)
-}
-
-func (m byDestination) Swap(i, j int) {
-	m[i], m[j] = m[j], m[i]
-}
-
-func (m byDestination) parts(i int) int {
-	return strings.Count(filepath.Clean(m[i].Destination), string(os.PathSeparator))
+func parts(m spec.Mount) int {
+	// We must special case a root mount /.
+	// The count of "/" and "/proc" are both 1 but of course logically "/" must
+	// be mounted before "/proc" as such set the count to 0.
+	if m.Destination == "/" {
+		return 0
+	}
+	return strings.Count(filepath.Clean(m.Destination), string(os.PathSeparator))
 }
 
 func sortMounts(m []spec.Mount) []spec.Mount {
-	sort.Sort(byDestination(m))
+	slices.SortStableFunc(m, func(a, b spec.Mount) int {
+		aLen := parts(a)
+		bLen := parts(b)
+		if aLen < bLen {
+			return -1
+		}
+		if aLen == bLen {
+			return 0
+		}
+		return 1
+	})
 	return m
-}
-
-func validPodNSOption(p *Pod, ctrPod string) error {
-	if p == nil {
-		return fmt.Errorf("pod passed in was nil. Container may not be associated with a pod: %w", define.ErrInvalidArg)
-	}
-
-	if ctrPod == "" {
-		return fmt.Errorf("container is not a member of any pod: %w", define.ErrInvalidArg)
-	}
-
-	if ctrPod != p.ID() {
-		return fmt.Errorf("pod passed in is not the pod the container is associated with: %w", define.ErrInvalidArg)
-	}
-	return nil
 }
 
 // JSONDeepCopy performs a deep copy by performing a JSON encode/decode of the
 // given structures. From and To should be identically typed structs.
-func JSONDeepCopy(from, to interface{}) error {
+func JSONDeepCopy(from, to any) error {
 	tmp, err := json.Marshal(from)
 	if err != nil {
 		return err
@@ -110,11 +88,11 @@ func DefaultSeccompPath() (string, error) {
 	if err == nil {
 		return config.SeccompOverridePath, nil
 	}
-	if !os.IsNotExist(err) {
+	if !errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
 	if err := fileutils.Exists(config.SeccompDefaultPath); err != nil {
-		if !os.IsNotExist(err) {
+		if !errors.Is(err, os.ErrNotExist) {
 			return "", err
 		}
 		return "", nil
@@ -149,8 +127,8 @@ func checkDependencyContainer(depCtr, ctr *Container) error {
 
 // hijackWriteError writes an error to a hijacked HTTP session.
 func hijackWriteError(toWrite error, cid string, terminal bool, httpBuf *bufio.ReadWriter) {
-	if toWrite != nil {
-		errString := []byte(fmt.Sprintf("Error: %v\n", toWrite))
+	if toWrite != nil && !errors.Is(toWrite, define.ErrDetach) {
+		errString := fmt.Appendf(nil, "Error: %v\n", toWrite)
 		if !terminal {
 			// We need a header.
 			header := makeHTTPAttachHeader(2, uint32(len(errString)))
@@ -227,12 +205,11 @@ func writeHijackHeader(r *http.Request, conn io.Writer, tty bool) {
 func makeInspectPortBindings(bindings []types.PortMapping) map[string][]define.InspectHostPort {
 	portBindings := make(map[string][]define.InspectHostPort)
 	for _, port := range bindings {
-		protocols := strings.Split(port.Protocol, ",")
-		for _, protocol := range protocols {
+		for protocol := range strings.SplitSeq(port.Protocol, ",") {
 			for i := uint16(0); i < port.Range; i++ {
 				key := fmt.Sprintf("%d/%s", port.ContainerPort+i, protocol)
 				hostPorts := portBindings[key]
-				var hostIP = port.HostIP
+				hostIP := port.HostIP
 				if len(port.HostIP) == 0 {
 					hostIP = "0.0.0.0"
 				}
@@ -306,4 +283,65 @@ func evalSymlinksIfExists(toCheck string) (string, error) {
 		return filepath.Clean(toCheck), nil
 	}
 	return checkedVal, nil
+}
+
+func isDirectory(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	return info.IsDir()
+}
+
+// vendorLister is an interface for listing GPU vendors from CDI.
+type vendorLister interface {
+	ListVendors() []string
+}
+
+// discoverGPUVendorFromCDI discovers vendor from CDI cache.
+// It returns the vendor domain (e.g., "nvidia.com", "amd.com") that should
+// be used to construct fully qualified CDI device names.
+// Returns an error if no known GPU vendor is found.
+func discoverGPUVendorFromCDI(lister vendorLister) (string, error) {
+	if lister == nil {
+		return "", fmt.Errorf("vendor lister cannot be nil")
+	}
+
+	knownGPUVendors := []string{
+		"nvidia.com",
+		"amd.com",
+	}
+	vendors := lister.ListVendors()
+	// Check if any known GPU vendor is present
+	for _, knownVendor := range knownGPUVendors {
+		for _, vendor := range vendors {
+			if vendor == knownVendor {
+				logrus.Debugf("Discovered GPU vendor from CDI specs: %s", vendor)
+				return vendor, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("no known GPU vendor found in CDI specs")
+}
+
+// gpusToCDIDevices converts GPU identifiers to full CDI device names
+// by discovering the vendor from the provided vendor lister.
+func gpusToCDIDevices(gpus []string, lister vendorLister) ([]string, error) {
+	if len(gpus) == 0 {
+		return nil, nil
+	}
+
+	vendor, err := discoverGPUVendorFromCDI(lister)
+	if err != nil {
+		return nil, fmt.Errorf("could not discover GPU vendor: %w", err)
+	}
+
+	cdiDevices := make([]string, 0, len(gpus))
+	for _, gpu := range gpus {
+		device := fmt.Sprintf("%s/gpu=%s", vendor, gpu)
+		cdiDevices = append(cdiDevices, device)
+		logrus.Debugf("Added GPU device: %s", device)
+	}
+	return cdiDevices, nil
 }

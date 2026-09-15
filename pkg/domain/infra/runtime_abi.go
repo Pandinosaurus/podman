@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package infra
 
@@ -6,9 +6,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/containers/podman/v5/pkg/bindings"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/domain/infra/tunnel"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/domain/infra/tunnel"
 )
 
 // NewContainerEngine factory provides a libpod runtime for container-related operations
@@ -18,7 +17,7 @@ func NewContainerEngine(facts *entities.PodmanConfig) (entities.ContainerEngine,
 		r, err := NewLibpodRuntime(facts.FlagSet, facts)
 		return r, err
 	case entities.TunnelMode:
-		ctx, err := bindings.NewConnectionWithIdentity(context.Background(), facts.URI, facts.Identity, facts.MachineMode)
+		ctx, err := newConnectionWithoutLock(context.Background(), facts)
 		return &tunnel.ContainerEngine{ClientCtx: ctx}, err
 	}
 	return nil, fmt.Errorf("runtime mode '%v' is not supported", facts.EngineMode)
@@ -32,7 +31,7 @@ func NewImageEngine(facts *entities.PodmanConfig) (entities.ImageEngine, error) 
 		return r, err
 	case entities.TunnelMode:
 		// TODO: look at me!
-		ctx, err := bindings.NewConnectionWithIdentity(context.Background(), facts.URI, facts.Identity, facts.MachineMode)
+		ctx, err := newConnectionWithoutLock(context.Background(), facts)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %s", err, facts.URI)
 		}

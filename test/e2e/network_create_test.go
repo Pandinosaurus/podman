@@ -6,14 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"strings"
 
-	"github.com/containers/common/libnetwork/types"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	. "github.com/containers/podman/v5/test/utils"
-	"github.com/containers/storage/pkg/stringid"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	. "github.com/onsi/gomega/gexec"
+	"go.podman.io/common/libnetwork/types"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	. "go.podman.io/podman/v6/test/utils"
+	"go.podman.io/storage/pkg/stringid"
 )
 
 func removeNetworkDevice(name string) {
@@ -22,32 +22,24 @@ func removeNetworkDevice(name string) {
 }
 
 var _ = Describe("Podman network create", func() {
-
 	It("podman network create with name and subnet", func() {
 		netName := "subnet-" + stringid.GenerateRandomID()
-		nc := podmanTest.Podman([]string{"network", "create", "--subnet", "10.11.12.0/24", "--ip-range", "10.11.12.0/26", netName})
+		nc := podmanTest.Podman([]string{"network", "create", "--subnet", "10.11.17.0/24", "--ip-range", "10.11.17.0/26", netName})
 		nc.WaitWithDefaultTimeout()
 		defer podmanTest.removeNetwork(netName)
 		Expect(nc).Should(ExitCleanly())
 
 		// Inspect the network configuration
-		inspect := podmanTest.Podman([]string{"network", "inspect", netName})
-		inspect.WaitWithDefaultTimeout()
-		Expect(inspect).Should(ExitCleanly())
-
-		// JSON the network configuration into something usable
-		var results []entities.NetworkInspectReport
-		err := json.Unmarshal([]byte(inspect.OutputToString()), &results)
-		Expect(err).ToNot(HaveOccurred())
+		results := podmanTest.InspectNetwork(netName)
 		Expect(results).To(HaveLen(1))
 		result := results[0]
 		Expect(result).To(HaveField("Name", netName))
 		Expect(result.Subnets).To(HaveLen(1))
-		Expect(result.Subnets[0].Subnet.String()).To(Equal("10.11.12.0/24"))
-		Expect(result.Subnets[0].Gateway.String()).To(Equal("10.11.12.1"))
+		Expect(result.Subnets[0].Subnet.String()).To(Equal("10.11.17.0/24"))
+		Expect(result.Subnets[0].Gateway.String()).To(Equal("10.11.17.1"))
 		Expect(result.Subnets[0].LeaseRange).ToNot(BeNil())
-		Expect(result.Subnets[0].LeaseRange.StartIP.String()).To(Equal("10.11.12.1"))
-		Expect(result.Subnets[0].LeaseRange.EndIP.String()).To(Equal("10.11.12.63"))
+		Expect(result.Subnets[0].LeaseRange.StartIP.String()).To(Equal("10.11.17.1"))
+		Expect(result.Subnets[0].LeaseRange.EndIP.String()).To(Equal("10.11.17.63"))
 
 		// Once a container executes a new network, the nic will be created. We should clean those up
 		// best we can
@@ -57,7 +49,7 @@ var _ = Describe("Podman network create", func() {
 		try.WaitWithDefaultTimeout()
 		Expect(try).To(ExitCleanly())
 
-		_, subnet, err := net.ParseCIDR("10.11.12.0/24")
+		_, subnet, err := net.ParseCIDR("10.11.17.0/24")
 		Expect(err).ToNot(HaveOccurred())
 		// Note this is an IPv4 test only!
 		containerIP, _, err := net.ParseCIDR(try.OutputToString())
@@ -67,7 +59,6 @@ var _ = Describe("Podman network create", func() {
 	})
 
 	It("podman network create with name and subnet and static route", func() {
-		SkipIfCNI(podmanTest)
 		netName := "subnet-" + stringid.GenerateRandomID()
 		nc := podmanTest.Podman([]string{
 			"network",
@@ -83,14 +74,7 @@ var _ = Describe("Podman network create", func() {
 		Expect(nc).Should(ExitCleanly())
 
 		// Inspect the network configuration
-		inspect := podmanTest.Podman([]string{"network", "inspect", netName})
-		inspect.WaitWithDefaultTimeout()
-		Expect(inspect).Should(ExitCleanly())
-
-		// JSON the network configuration into something usable
-		var results []entities.NetworkInspectReport
-		err := json.Unmarshal([]byte(inspect.OutputToString()), &results)
-		Expect(err).ToNot(HaveOccurred())
+		results := podmanTest.InspectNetwork(netName)
 		Expect(results).To(HaveLen(1))
 		result := results[0]
 		Expect(result).To(HaveField("Name", netName))
@@ -104,11 +88,9 @@ var _ = Describe("Podman network create", func() {
 		// Once a container executes a new network, the nic will be created. We should clean those up
 		// best we can
 		defer removeNetworkDevice(result.NetworkInterface)
-
 	})
 
 	It("podman network create with name and subnet and static route and metric", func() {
-		SkipIfCNI(podmanTest)
 		netName := "subnet-" + stringid.GenerateRandomID()
 		nc := podmanTest.Podman([]string{
 			"network",
@@ -124,14 +106,7 @@ var _ = Describe("Podman network create", func() {
 		Expect(nc).Should(ExitCleanly())
 
 		// Inspect the network configuration
-		inspect := podmanTest.Podman([]string{"network", "inspect", netName})
-		inspect.WaitWithDefaultTimeout()
-		Expect(inspect).Should(ExitCleanly())
-
-		// JSON the network configuration into something usable
-		var results []entities.NetworkInspectReport
-		err := json.Unmarshal([]byte(inspect.OutputToString()), &results)
-		Expect(err).ToNot(HaveOccurred())
+		results := podmanTest.InspectNetwork(netName)
 		Expect(results).To(HaveLen(1))
 		result := results[0]
 		Expect(result).To(HaveField("Name", netName))
@@ -145,11 +120,9 @@ var _ = Describe("Podman network create", func() {
 		// Once a container executes a new network, the nic will be created. We should clean those up
 		// best we can
 		defer removeNetworkDevice(result.NetworkInterface)
-
 	})
 
 	It("podman network create with name and subnet and two static routes", func() {
-		SkipIfCNI(podmanTest)
 		netName := "subnet-" + stringid.GenerateRandomID()
 		nc := podmanTest.Podman([]string{
 			"network",
@@ -167,14 +140,7 @@ var _ = Describe("Podman network create", func() {
 		Expect(nc).Should(ExitCleanly())
 
 		// Inspect the network configuration
-		inspect := podmanTest.Podman([]string{"network", "inspect", netName})
-		inspect.WaitWithDefaultTimeout()
-		Expect(inspect).Should(ExitCleanly())
-
-		// JSON the network configuration into something usable
-		var results []entities.NetworkInspectReport
-		err := json.Unmarshal([]byte(inspect.OutputToString()), &results)
-		Expect(err).ToNot(HaveOccurred())
+		results := podmanTest.InspectNetwork(netName)
 		Expect(results).To(HaveLen(1))
 		result := results[0]
 		Expect(result).To(HaveField("Name", netName))
@@ -192,11 +158,9 @@ var _ = Describe("Podman network create", func() {
 		// Once a container executes a new network, the nic will be created. We should clean those up
 		// best we can
 		defer removeNetworkDevice(result.NetworkInterface)
-
 	})
 
 	It("podman network create with name and subnet and static route (ipv6)", func() {
-		SkipIfCNI(podmanTest)
 		netName := "subnet-" + stringid.GenerateRandomID()
 		nc := podmanTest.Podman([]string{
 			"network",
@@ -212,14 +176,7 @@ var _ = Describe("Podman network create", func() {
 		Expect(nc).Should(ExitCleanly())
 
 		// Inspect the network configuration
-		inspect := podmanTest.Podman([]string{"network", "inspect", netName})
-		inspect.WaitWithDefaultTimeout()
-		Expect(inspect).Should(ExitCleanly())
-
-		// JSON the network configuration into something usable
-		var results []entities.NetworkInspectReport
-		err := json.Unmarshal([]byte(inspect.OutputToString()), &results)
-		Expect(err).ToNot(HaveOccurred())
+		results := podmanTest.InspectNetwork(netName)
 		Expect(results).To(HaveLen(1))
 		result := results[0]
 		Expect(result).To(HaveField("Name", netName))
@@ -233,11 +190,9 @@ var _ = Describe("Podman network create", func() {
 		// Once a container executes a new network, the nic will be created. We should clean those up
 		// best we can
 		defer removeNetworkDevice(result.NetworkInterface)
-
 	})
 
-	It("podman network create with name and subnet with --opt no_default_route=1", func() {
-		SkipIfCNI(podmanTest)
+	It("podman network create with name and subnet with --opt no_default_route=true", func() {
 		netName := "subnet-" + stringid.GenerateRandomID()
 		nc := podmanTest.Podman([]string{
 			"network",
@@ -245,7 +200,7 @@ var _ = Describe("Podman network create", func() {
 			"--subnet",
 			"10.19.15.0/24",
 			"--opt",
-			"no_default_route=1",
+			"no_default_route=true",
 			netName,
 		})
 		nc.WaitWithDefaultTimeout()
@@ -253,14 +208,7 @@ var _ = Describe("Podman network create", func() {
 		Expect(nc).Should(ExitCleanly())
 
 		// Inspect the network configuration
-		inspect := podmanTest.Podman([]string{"network", "inspect", netName})
-		inspect.WaitWithDefaultTimeout()
-		Expect(inspect).Should(ExitCleanly())
-
-		// JSON the network configuration into something usable
-		var results []entities.NetworkInspectReport
-		err := json.Unmarshal([]byte(inspect.OutputToString()), &results)
-		Expect(err).ToNot(HaveOccurred())
+		results := podmanTest.InspectNetwork(netName)
 		Expect(results).To(HaveLen(1))
 		result := results[0]
 		Expect(result).To(HaveField("Name", netName))
@@ -272,7 +220,6 @@ var _ = Describe("Podman network create", func() {
 		// Once a container executes a new network, the nic will be created. We should clean those up
 		// best we can
 		defer removeNetworkDevice(result.NetworkInterface)
-
 	})
 
 	It("podman network create with name and IPv6 subnet", func() {
@@ -283,14 +230,7 @@ var _ = Describe("Podman network create", func() {
 		Expect(nc).Should(ExitCleanly())
 
 		// Inspect the network configuration
-		inspect := podmanTest.Podman([]string{"network", "inspect", netName})
-		inspect.WaitWithDefaultTimeout()
-		Expect(inspect).Should(ExitCleanly())
-
-		// JSON the network configuration into something usable
-		var results []entities.NetworkInspectReport
-		err := json.Unmarshal([]byte(inspect.OutputToString()), &results)
-		Expect(err).ToNot(HaveOccurred())
+		results := podmanTest.InspectNetwork(netName)
 		Expect(results).To(HaveLen(1))
 		result := results[0]
 		Expect(result).To(HaveField("Name", netName))
@@ -322,14 +262,7 @@ var _ = Describe("Podman network create", func() {
 		Expect(nc).Should(ExitCleanly())
 
 		// Inspect the network configuration
-		inspect := podmanTest.Podman([]string{"network", "inspect", netName})
-		inspect.WaitWithDefaultTimeout()
-		Expect(inspect).Should(ExitCleanly())
-
-		// JSON the network configuration into something usable
-		var results []entities.NetworkInspectReport
-		err := json.Unmarshal([]byte(inspect.OutputToString()), &results)
-		Expect(err).ToNot(HaveOccurred())
+		results := podmanTest.InspectNetwork(netName)
 		Expect(results).To(HaveLen(1))
 		result := results[0]
 		Expect(result).To(HaveField("Name", netName))
@@ -355,13 +288,7 @@ var _ = Describe("Podman network create", func() {
 		Expect(nc).Should(ExitCleanly())
 
 		// Inspect the network configuration
-		inspect = podmanTest.Podman([]string{"network", "inspect", netName2})
-		inspect.WaitWithDefaultTimeout()
-		Expect(inspect).Should(ExitCleanly())
-
-		// JSON the network configuration into something usable
-		err = json.Unmarshal([]byte(inspect.OutputToString()), &results)
-		Expect(err).ToNot(HaveOccurred())
+		results = podmanTest.InspectNetwork(netName2)
 		Expect(results).To(HaveLen(1))
 		result = results[0]
 		Expect(result).To(HaveField("Name", netName2))
@@ -408,11 +335,22 @@ var _ = Describe("Podman network create", func() {
 		Expect(nc).To(ExitCleanly())
 		defer podmanTest.removeNetwork(name)
 
-		nc = podmanTest.Podman([]string{"network", "inspect", name})
-		nc.WaitWithDefaultTimeout()
-		Expect(nc).To(ExitCleanly())
-		Expect(nc.OutputToString()).To(ContainSubstring(`::/64`))
-		Expect(nc.OutputToString()).To(ContainSubstring(`10.11.14.0/24`))
+		results := podmanTest.InspectNetwork(name)
+		Expect(results).To(HaveLen(1))
+		Expect(results[0].Subnets).To(HaveLen(2))
+		// Check for both IPv4 and IPv6 subnets
+		hasIPv4 := false
+		hasIPv6 := false
+		for _, subnet := range results[0].Subnets {
+			if subnet.Subnet.String() == "10.11.14.0/24" {
+				hasIPv4 = true
+			}
+			if strings.HasSuffix(subnet.Subnet.String(), "::/64") {
+				hasIPv6 = true
+			}
+		}
+		Expect(hasIPv4).To(BeTrue())
+		Expect(hasIPv6).To(BeTrue())
 	})
 
 	It("podman network create with empty subnet and ipv6 flag", func() {
@@ -422,11 +360,22 @@ var _ = Describe("Podman network create", func() {
 		Expect(nc).To(ExitCleanly())
 		defer podmanTest.removeNetwork(name)
 
-		nc = podmanTest.Podman([]string{"network", "inspect", name})
-		nc.WaitWithDefaultTimeout()
-		Expect(nc).To(ExitCleanly())
-		Expect(nc.OutputToString()).To(ContainSubstring(`::/64`))
-		Expect(nc.OutputToString()).To(ContainSubstring(`.0/24`))
+		results := podmanTest.InspectNetwork(name)
+		Expect(results).To(HaveLen(1))
+		Expect(results[0].Subnets).To(HaveLen(2))
+		// Check for both IPv4 and IPv6 subnets
+		hasIPv4 := false
+		hasIPv6 := false
+		for _, subnet := range results[0].Subnets {
+			if strings.HasSuffix(subnet.Subnet.String(), ".0/24") {
+				hasIPv4 = true
+			}
+			if strings.HasSuffix(subnet.Subnet.String(), "::/64") {
+				hasIPv6 = true
+			}
+		}
+		Expect(hasIPv4).To(BeTrue())
+		Expect(hasIPv6).To(BeTrue())
 	})
 
 	It("podman network create with invalid IP arguments", func() {
@@ -441,13 +390,12 @@ var _ = Describe("Podman network create", func() {
 		nc = podmanTest.Podman([]string{"network", "create", "--gateway", "10.11.12.256"})
 		nc.WaitWithDefaultTimeout()
 		Expect(nc).To(ExitWithError(125, `invalid argument "10.11.12.256" for "--gateway" flag: invalid string being converted to IP address: 10.11.12.256`))
-
 	})
 
 	It("podman network create with invalid gateway for subnet", func() {
-		nc := podmanTest.Podman([]string{"network", "create", "--subnet", "10.11.12.0/24", "--gateway", "192.168.1.1", stringid.GenerateRandomID()})
+		nc := podmanTest.Podman([]string{"network", "create", "--subnet", "10.11.15.0/24", "--gateway", "192.168.1.1", stringid.GenerateRandomID()})
 		nc.WaitWithDefaultTimeout()
-		Expect(nc).To(ExitWithError(125, "gateway 192.168.1.1 not in subnet 10.11.12.0/24"))
+		Expect(nc).To(ExitWithError(125, "gateway 192.168.1.1 not in subnet 10.11.15.0/24"))
 	})
 
 	It("podman network create two networks with same name should fail", func() {
@@ -459,7 +407,7 @@ var _ = Describe("Podman network create", func() {
 
 		ncFail := podmanTest.Podman([]string{"network", "create", netName})
 		ncFail.WaitWithDefaultTimeout()
-		Expect(ncFail).To(ExitWithError(125, fmt.Sprintf("network name %s already used: network already exists", netName)))
+		Expect(ncFail).To(ExitWithError(125, "network already exists"))
 	})
 
 	It("podman network create two networks with same subnet should fail", func() {
@@ -487,13 +435,13 @@ var _ = Describe("Podman network create", func() {
 		ncFail := podmanTest.Podman([]string{"network", "create", "--subnet", "fd00:4:4:4:4::/64", "--ipv6", netName2})
 		ncFail.WaitWithDefaultTimeout()
 		defer podmanTest.removeNetwork(netName2)
-		Expect(ncFail).To(ExitWithError(125, "subnet fd00:4:4:4::/64 is already used on the host or by another config"))
+		Expect(ncFail).To(ExitWithError(125, "subnet fd00:4:4:4:4::/64 is already used on the host or by another config"))
 	})
 
 	It("podman network create with invalid network name", func() {
 		nc := podmanTest.Podman([]string{"network", "create", "2bad!"})
 		nc.WaitWithDefaultTimeout()
-		Expect(nc).To(ExitWithError(125, "network name 2bad! invalid: names must match [a-zA-Z0-9][a-zA-Z0-9_.-]*: invalid argument"))
+		Expect(nc).To(ExitWithError(125, "Invalid characters in network name \"2bad!\": must match [a-zA-Z0-9][a-zA-Z0-9_.-]*"))
 	})
 
 	It("podman network create with mtu option", func() {
@@ -503,10 +451,9 @@ var _ = Describe("Podman network create", func() {
 		defer podmanTest.removeNetwork(net)
 		Expect(nc).Should(ExitCleanly())
 
-		nc = podmanTest.Podman([]string{"network", "inspect", net})
-		nc.WaitWithDefaultTimeout()
-		Expect(nc).Should(ExitCleanly())
-		Expect(nc.OutputToString()).To(ContainSubstring(`"mtu": "9000"`))
+		results := podmanTest.InspectNetwork(net)
+		Expect(results).To(HaveLen(1))
+		Expect(results[0].Options).To(HaveKeyWithValue("mtu", "9000"))
 	})
 
 	It("podman network create with vlan option", func() {
@@ -516,10 +463,9 @@ var _ = Describe("Podman network create", func() {
 		defer podmanTest.removeNetwork(net)
 		Expect(nc).Should(ExitCleanly())
 
-		nc = podmanTest.Podman([]string{"network", "inspect", net})
-		nc.WaitWithDefaultTimeout()
-		Expect(nc).Should(ExitCleanly())
-		Expect(nc.OutputToString()).To(ContainSubstring(`"vlan": "9"`))
+		results := podmanTest.InspectNetwork(net)
+		Expect(results).To(HaveLen(1))
+		Expect(results[0].Options).To(HaveKeyWithValue("vlan", "9"))
 	})
 
 	It("podman network create with invalid option", func() {
@@ -527,30 +473,10 @@ var _ = Describe("Podman network create", func() {
 		nc := podmanTest.Podman([]string{"network", "create", "--opt", "foo=bar", net})
 		nc.WaitWithDefaultTimeout()
 		defer podmanTest.removeNetwork(net)
-		Expect(nc).To(ExitWithError(125, "unsupported bridge network option foo"))
-	})
-
-	It("podman CNI network create with internal should not have dnsname", func() {
-		SkipIfNetavark(podmanTest)
-		net := "internal-test" + stringid.GenerateRandomID()
-		nc := podmanTest.Podman([]string{"network", "create", "--internal", net})
-		nc.WaitWithDefaultTimeout()
-		defer podmanTest.removeNetwork(net)
-		// Cannot ExitCleanly(): "dnsname and internal networks are incompatible"
-		Expect(nc).Should(Exit(0))
-		// Not performing this check on remote tests because it is a logrus error which does
-		// not come back via stderr on the remote client.
-		if !IsRemote() {
-			Expect(nc.ErrorToString()).To(ContainSubstring("dnsname and internal networks are incompatible"))
-		}
-		nc = podmanTest.Podman([]string{"network", "inspect", net})
-		nc.WaitWithDefaultTimeout()
-		Expect(nc).Should(ExitCleanly())
-		Expect(nc.OutputToString()).ToNot(ContainSubstring("dnsname"))
+		Expect(nc).To(ExitWithError(125, "unsupported bridge network option: foo"))
 	})
 
 	It("podman Netavark network create with internal should have dnsname", func() {
-		SkipIfCNI(podmanTest)
 		net := "internal-test" + stringid.GenerateRandomID()
 		nc := podmanTest.Podman([]string{"network", "create", "--internal", net})
 		nc.WaitWithDefaultTimeout()
@@ -561,14 +487,13 @@ var _ = Describe("Podman network create", func() {
 		if !IsRemote() {
 			Expect(nc.ErrorToString()).To(BeEmpty())
 		}
-		nc = podmanTest.Podman([]string{"network", "inspect", net})
-		nc.WaitWithDefaultTimeout()
-		Expect(nc).Should(ExitCleanly())
-		Expect(nc.OutputToString()).To(ContainSubstring(`"dns_enabled": true`))
+		results := podmanTest.InspectNetwork(net)
+		Expect(results).To(HaveLen(1))
+		Expect(results[0].DNSEnabled).To(BeTrue())
 	})
 
 	It("podman network create with invalid name", func() {
-		for _, name := range []string{"none", "host", "bridge", "private", "slirp4netns", "pasta", "container", "ns", "default"} {
+		for _, name := range []string{"none", "host", "bridge", "private", "pasta", "container", "ns", "default"} {
 			nc := podmanTest.Podman([]string{"network", "create", name})
 			nc.WaitWithDefaultTimeout()
 			Expect(nc).To(ExitWithError(125, fmt.Sprintf("cannot create network with name %q because it conflicts with a valid network mode", name)))
@@ -585,12 +510,12 @@ var _ = Describe("Podman network create", func() {
 		Expect(nc).To(ExitCleanly())
 		Expect(nc.OutputToString()).To(Equal(name))
 
-		inspect := podmanTest.Podman([]string{"network", "inspect", name})
-		inspect.WaitWithDefaultTimeout()
-		Expect(inspect).To(ExitCleanly())
-		Expect(inspect.OutputToString()).To(ContainSubstring(`"subnet": "` + subnet1))
-		Expect(inspect.OutputToString()).To(ContainSubstring(`"subnet": "` + subnet2))
-		Expect(inspect.OutputToString()).To(ContainSubstring(`"ipv6_enabled": false`))
+		results := podmanTest.InspectNetwork(name)
+		Expect(results).To(HaveLen(1))
+		Expect(results[0].Subnets).To(HaveLen(2))
+		Expect(results[0].Subnets[0].Subnet.String()).To(Equal(subnet1))
+		Expect(results[0].Subnets[1].Subnet.String()).To(Equal(subnet2))
+		Expect(results[0].IPv6Enabled).To(BeFalse())
 	})
 
 	It("podman network create with multiple subnets dual stack", func() {
@@ -603,12 +528,12 @@ var _ = Describe("Podman network create", func() {
 		Expect(nc).To(ExitCleanly())
 		Expect(nc.OutputToString()).To(Equal(name))
 
-		inspect := podmanTest.Podman([]string{"network", "inspect", name})
-		inspect.WaitWithDefaultTimeout()
-		Expect(inspect).To(ExitCleanly())
-		Expect(inspect.OutputToString()).To(ContainSubstring(`"subnet": "` + subnet1))
-		Expect(inspect.OutputToString()).To(ContainSubstring(`"subnet": "` + subnet2))
-		Expect(inspect.OutputToString()).To(ContainSubstring(`"ipv6_enabled": true`))
+		results := podmanTest.InspectNetwork(name)
+		Expect(results).To(HaveLen(1))
+		Expect(results[0].Subnets).To(HaveLen(2))
+		Expect(results[0].Subnets[0].Subnet.String()).To(Equal(subnet1))
+		Expect(results[0].Subnets[1].Subnet.String()).To(Equal(subnet2))
+		Expect(results[0].IPv6Enabled).To(BeTrue())
 	})
 
 	It("podman network create with multiple subnets dual stack with gateway and range", func() {
@@ -624,16 +549,16 @@ var _ = Describe("Podman network create", func() {
 		Expect(nc).To(ExitCleanly())
 		Expect(nc.OutputToString()).To(Equal(name))
 
-		inspect := podmanTest.Podman([]string{"network", "inspect", name})
-		inspect.WaitWithDefaultTimeout()
-		Expect(inspect).To(ExitCleanly())
-		Expect(inspect.OutputToString()).To(ContainSubstring(`"subnet": "` + subnet1))
-		Expect(inspect.OutputToString()).To(ContainSubstring(`"gateway": "` + gw1))
-		Expect(inspect.OutputToString()).To(ContainSubstring(`"start_ip": "10.10.3.1",`))
-		Expect(inspect.OutputToString()).To(ContainSubstring(`"end_ip": "10.10.3.63"`))
-		Expect(inspect.OutputToString()).To(ContainSubstring(`"subnet": "` + subnet2))
-		Expect(inspect.OutputToString()).To(ContainSubstring(`"gateway": "` + gw2))
-		Expect(inspect.OutputToString()).To(ContainSubstring(`"ipv6_enabled": true`))
+		results := podmanTest.InspectNetwork(name)
+		Expect(results).To(HaveLen(1))
+		Expect(results[0].Subnets).To(HaveLen(2))
+		Expect(results[0].Subnets[0].Subnet.String()).To(Equal(subnet1))
+		Expect(results[0].Subnets[0].Gateway.String()).To(Equal(gw1))
+		Expect(results[0].Subnets[0].LeaseRange.StartIP.String()).To(Equal("10.10.3.1"))
+		Expect(results[0].Subnets[0].LeaseRange.EndIP.String()).To(Equal("10.10.3.63"))
+		Expect(results[0].Subnets[1].Subnet.String()).To(Equal(subnet2))
+		Expect(results[0].Subnets[1].Gateway.String()).To(Equal(gw2))
+		Expect(results[0].IPv6Enabled).To(BeTrue())
 	})
 
 	It("podman network create invalid options with multiple subnets", func() {
@@ -663,7 +588,7 @@ var _ = Describe("Podman network create", func() {
 
 		nc = podmanTest.Podman(networkCreateCommand)
 		nc.WaitWithDefaultTimeout()
-		Expect(nc).To(ExitWithError(125, fmt.Sprintf("network name %s already used: network already exists", name)))
+		Expect(nc).To(ExitWithError(125, fmt.Sprintf("network already exists %s", name)))
 	})
 
 	It("podman network create same name - succeed with ignore", func() {
@@ -701,7 +626,7 @@ var _ = Describe("Podman network create", func() {
 
 		// can only check this as root
 		if !isRootless() {
-			// make sure cni/netavark created bridge with expected name
+			// make sure netavark created bridge with expected name
 			bridge, err := net.InterfaceByName(bridgeName)
 			Expect(err).ToNot(HaveOccurred())
 			Expect(bridge.Name).To(Equal(bridgeName))
@@ -716,14 +641,7 @@ var _ = Describe("Podman network create", func() {
 		Expect(nc).Should(ExitCleanly())
 
 		// Inspect the network configuration
-		inspect := podmanTest.Podman([]string{"network", "inspect", netName})
-		inspect.WaitWithDefaultTimeout()
-		Expect(inspect).Should(ExitCleanly())
-
-		// JSON the network configuration into something usable
-		var results []entities.NetworkInspectReport
-		err := json.Unmarshal([]byte(inspect.OutputToString()), &results)
-		Expect(err).ToNot(HaveOccurred())
+		results := podmanTest.InspectNetwork(netName)
 		Expect(results).To(HaveLen(1))
 		result := results[0]
 		Expect(result).To(HaveField("Name", netName))
@@ -740,8 +658,54 @@ var _ = Describe("Podman network create", func() {
 
 		containerIP, _, err := net.ParseCIDR(try.OutputToString())
 		Expect(err).ToNot(HaveOccurred())
-		// Note as of today (June 2023) we always get the first ip from netavark and cni but let's not depend on that.
+		// Note as of today (June 2023) we always get the first ip from netavark but let's not depend on that.
 		// All we care about is the ip is from the range which allows for both.
 		Expect(containerIP.String()).To(Or(Equal("10.11.16.11"), Equal("10.11.16.12")), "ip address must be in --ip-range")
 	})
+
+	DescribeTable("podman network create with special route types",
+		func(subnet string, route string, expectedDest string, expectedRouteType types.RouteType, expectedMetric *uint32) {
+			netName := "subnet-" + stringid.GenerateRandomID()
+			nc := podmanTest.Podman([]string{
+				"network",
+				"create",
+				"--subnet",
+				subnet,
+				"--route",
+				route,
+				netName,
+			})
+			nc.WaitWithDefaultTimeout()
+			defer podmanTest.removeNetwork(netName)
+			Expect(nc).Should(ExitCleanly())
+
+			inspect := podmanTest.Podman([]string{"network", "inspect", netName})
+			inspect.WaitWithDefaultTimeout()
+			Expect(inspect).Should(ExitCleanly())
+
+			var results []entities.NetworkInspectReport
+			err := json.Unmarshal([]byte(inspect.OutputToString()), &results)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(results).To(HaveLen(1))
+			result := results[0]
+			Expect(result).To(HaveField("Name", netName))
+			Expect(result.Subnets).To(HaveLen(1))
+			Expect(result.Subnets[0].Subnet.String()).To(Equal(subnet))
+			Expect(result.Routes).To(HaveLen(1))
+			Expect(result.Routes[0].Destination.String()).To(Equal(expectedDest))
+			Expect(result.Routes[0].Gateway).To(BeNil())
+			Expect(result.Routes[0].RouteType).To(Equal(expectedRouteType))
+			if expectedMetric != nil {
+				Expect(*result.Routes[0].Metric).To(Equal(*expectedMetric))
+			} else {
+				Expect(result.Routes[0].Metric).To(BeNil())
+			}
+
+			defer removeNetworkDevice(result.NetworkInterface)
+		},
+		Entry("blackhole route", "10.19.20.0/24", "10.21.10.0/24,blackhole", "10.21.10.0/24", types.RouteTypeBlackhole, nil),
+		Entry("unreachable route", "10.19.21.0/24", "10.21.11.0/24,unreachable", "10.21.11.0/24", types.RouteTypeUnreachable, nil),
+		Entry("prohibit route", "10.19.22.0/24", "10.21.12.0/24,prohibit", "10.21.12.0/24", types.RouteTypeProhibit, nil),
+		Entry("blackhole route with metric", "10.19.23.0/24", "10.21.13.0/24,blackhole,250", "10.21.13.0/24", types.RouteTypeBlackhole, new(uint32(250))),
+	)
 })

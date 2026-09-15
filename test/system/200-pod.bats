@@ -309,7 +309,7 @@ EOF
 
     # pod ps
     run_podman pod ps --format '{{.ID}} {{.Name}} {{.Status}} {{.Labels}}'
-    assert "$output" =~ "${pod_id:0:12} $podname Running map\[${labelname}:${labelvalue}]"  "pod ps"
+    assert "$output" =~ "${pod_id:0:12} $podname Running ${labelname}=${labelvalue}"  "pod ps"
 
     run_podman pod ps --no-trunc --filter "label=${labelname}=${labelvalue}" --format '{{.ID}}'
     is "$output" "$pod_id" "pod ps --filter label=..."
@@ -338,7 +338,7 @@ EOF
     # send a random string to the container. This will cause the container
     # to output the string to its logs, then exit.
     teststring=$(random_string 30)
-    echo "$teststring" | nc 127.0.0.1 $port_out
+    echo "$teststring" > /dev/tcp/127.0.0.1/$port_out
 
     # Confirm that the container log output is the string we sent it.
     run_podman wait $cid
@@ -535,7 +535,6 @@ spec:
 @test "pod resource limits" {
     skip_if_remote "resource limits only implemented on non-remote"
     skip_if_rootless "resource limits only work with root"
-    skip_if_cgroupsv1 "resource limits only meaningful on cgroups V2"
 
     # create loopback device
     lofile=${PODMAN_TMPDIR}/disk.img
@@ -589,7 +588,7 @@ io.max          | $lomajmin rbps=1048576 wbps=1048576 riops=max wiops=max
     done
 
     # and delete them
-    $PODMAN pod rm -a &
+    "${PODMAN_CMD[@]}" pod rm -a &
 
     # pod ps should not fail while pods are deleted
     run_podman pod ps -q
@@ -762,7 +761,6 @@ function thingy_with_unique_id() {
 # bats test_tags=ci:parallel
 @test "podman pod cleans cgroup and keeps limits" {
     skip_if_remote "we cannot check cgroup settings"
-    skip_if_rootless_cgroupsv1 "rootless cannot use cgroups on v1"
 
     for infra in true false; do
         run_podman pod create --infra=$infra --memory=256M
@@ -773,12 +771,7 @@ function thingy_with_unique_id() {
         result="$output"
         assert "$result" =~ "/" ".CgroupPath is a valid path"
 
-        if is_cgroupsv2; then
-           cgroup_path=/sys/fs/cgroup/$result
-        else
-           cgroup_path=/sys/fs/cgroup/memory/$result
-        fi
-
+        cgroup_path=/sys/fs/cgroup/$result
         if test ! -e $cgroup_path; then
             die "the cgroup $cgroup_path does not exist"
         fi
@@ -795,11 +788,7 @@ function thingy_with_unique_id() {
 
         # validate that cgroup limits are in place after a restart
         # issue #19175
-        if is_cgroupsv2; then
-           memory_limit_file=$cgroup_path/memory.max
-        else
-           memory_limit_file=$cgroup_path/memory.limit_in_bytes
-        fi
+        memory_limit_file=$cgroup_path/memory.max
         assert "$(< $memory_limit_file)" = "268435456" "Contents of $memory_limit_file"
 
         run_podman pod rm -t 0 -f $podid
@@ -807,6 +796,16 @@ function thingy_with_unique_id() {
             die "the cgroup $cgroup_path should not exist after pod rm"
         fi
     done
+}
+
+@test "podman pod inspect ordering" {
+    local pod_name="p-$(safename)"
+    run_podman pod create $pod_name
+
+    run_podman pod inspect --format '{{ .SharedNamespaces }}' $pod_name
+    assert "$output" == "[ipc net uts]"
+
+    run_podman pod rm $pod_name
 }
 
 # vim: filetype=sh

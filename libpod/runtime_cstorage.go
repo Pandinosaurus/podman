@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package libpod
 
@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/storage"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/storage"
 )
 
 // StorageContainer represents a container present in c/storage but not in

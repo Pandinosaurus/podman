@@ -1,24 +1,33 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package libpod
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
 
-	"github.com/containers/podman/v5/libpod"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/api/handlers/utils"
-	api "github.com/containers/podman/v5/pkg/api/types"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/specgen"
-	"github.com/containers/podman/v5/pkg/specgen/generate"
-	"github.com/containers/podman/v5/pkg/specgenutil"
-	"github.com/containers/storage"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/api/handlers/utils"
+	api "go.podman.io/podman/v6/pkg/api/types"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/specgen"
+	"go.podman.io/podman/v6/pkg/specgen/generate"
+	"go.podman.io/podman/v6/pkg/specgenutil"
+	"go.podman.io/storage"
 )
+
+// The JSON decoder correctly cannot decode (overflow) negative values for fields of type `uint64`,
+// as negative numbers are used to represent `max` (unlimited) in `POSIXRlimit`. To address this, we use `specGeneratorWire` to decode the request body.
+// The `specGeneratorWire` overrides the `POSIXRlimit` type with a `WirePOSIXRlimit` type that uses `UInt64OrMinusOne` for decoding values.
+// The `WirePOSIXRlimit` is then parsed into the `POSIXRlimit` type and assigned to the `SpecGenerator`.
+// This serves as a workaround for the issue (https://github.com/containers/podman/issues/24886).
+type specGeneratorWire struct {
+	specgen.SpecGenerator
+	Rlimits []WirePOSIXRlimit `json:"r_limits,omitempty"`
+}
 
 // CreateContainer takes a specgenerator and makes a container. It returns
 // the new container ID on success along with any warnings.
@@ -35,23 +44,36 @@ func CreateContainer(w http.ResponseWriter, r *http.Request) {
 	privileged := conf.Containers.Privileged
 
 	// we have to set the default before we decode to make sure the correct default is set when the field is unset
-	sg := specgen.SpecGenerator{
-		ContainerNetworkConfig: specgen.ContainerNetworkConfig{
-			UseImageHosts: &noHosts,
-		},
-		ContainerSecurityConfig: specgen.ContainerSecurityConfig{
-			Umask:      conf.Containers.Umask,
-			Privileged: &privileged,
-		},
-		ContainerHealthCheckConfig: specgen.ContainerHealthCheckConfig{
-			HealthLogDestination: define.DefaultHealthCheckLocalDestination,
+	wire := specGeneratorWire{
+		SpecGenerator: specgen.SpecGenerator{
+			ContainerNetworkConfig: specgen.ContainerNetworkConfig{
+				UseImageHosts: &noHosts,
+			},
+			ContainerSecurityConfig: specgen.ContainerSecurityConfig{
+				Umask:      conf.Containers.Umask,
+				Privileged: &privileged,
+			},
+			ContainerHealthCheckConfig: specgen.ContainerHealthCheckConfig{
+				HealthLogDestination: define.DefaultHealthCheckLocalDestination,
+				HealthMaxLogCount:    define.DefaultHealthMaxLogCount,
+				HealthMaxLogSize:     define.DefaultHealthMaxLogSize,
+			},
 		},
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&sg); err != nil {
-		utils.Error(w, http.StatusInternalServerError, fmt.Errorf("decode(): %w", err))
+	if err := utils.ReadJSONFromBody(r, &wire); err != nil {
+		utils.Error(w, http.StatusBadRequest, err)
 		return
 	}
+
+	sg := wire.SpecGenerator
+	rLimits, err := parseRLimits(wire.Rlimits)
+	if err != nil {
+		utils.Error(w, http.StatusBadRequest, fmt.Errorf("invalid rlimit: %w", err))
+		return
+	}
+	sg.Rlimits = rLimits
+
 	if sg.Passwd == nil {
 		t := true
 		sg.Passwd = &t

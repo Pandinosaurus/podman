@@ -3,12 +3,12 @@ package volumes
 import (
 	"errors"
 
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/inspect"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/inspect"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 var (
@@ -22,14 +22,12 @@ var (
 		RunE:              volumeInspect,
 		ValidArgsFunction: common.AutocompleteVolumes,
 		Example: `podman volume inspect myvol
-  podman volume inspect --all
-  podman volume inspect --format "{{.Driver}} {{.Scope}}" myvol`,
+podman volume inspect --all
+podman volume inspect --format "{{.Driver}} {{.Scope}}" myvol`,
 	}
 )
 
-var (
-	inspectOpts *entities.InspectOptions
-)
+var inspectOpts *entities.InspectOptions
 
 func init() {
 	registry.Commands = append(registry.Commands, registry.CliCommand{
@@ -45,7 +43,7 @@ func init() {
 	_ = inspectCommand.RegisterFlagCompletionFunc(formatFlagName, common.AutocompleteFormat(&define.InspectVolumeData{}))
 }
 
-func volumeInspect(cmd *cobra.Command, args []string) error {
+func volumeInspect(_ *cobra.Command, args []string) error {
 	if (inspectOpts.All && len(args) > 0) || (!inspectOpts.All && len(args) < 1) {
 		return errors.New("provide one or more volume names or use --all")
 	}

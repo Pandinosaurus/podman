@@ -4,68 +4,67 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/containers/podman/v5/pkg/machine"
-	"github.com/containers/podman/v5/pkg/machine/connection"
-	machineDefine "github.com/containers/podman/v5/pkg/machine/define"
-	"github.com/containers/podman/v5/pkg/machine/env"
-	"github.com/containers/podman/v5/pkg/machine/ignition"
-	"github.com/containers/podman/v5/pkg/machine/lock"
-	"github.com/containers/podman/v5/pkg/machine/provider"
-	"github.com/containers/podman/v5/pkg/machine/proxyenv"
-	"github.com/containers/podman/v5/pkg/machine/shim/diskpull"
-	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
-	"github.com/containers/podman/v5/utils"
 	"github.com/hashicorp/go-multierror"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/pkg/machine"
+	"go.podman.io/podman/v6/pkg/machine/certificates"
+	"go.podman.io/podman/v6/pkg/machine/connection"
+	machineDefine "go.podman.io/podman/v6/pkg/machine/define"
+	"go.podman.io/podman/v6/pkg/machine/env"
+	"go.podman.io/podman/v6/pkg/machine/ignition"
+	"go.podman.io/podman/v6/pkg/machine/lock"
+	"go.podman.io/podman/v6/pkg/machine/provider"
+	"go.podman.io/podman/v6/pkg/machine/proxyenv"
+	"go.podman.io/podman/v6/pkg/machine/shim/diskpull"
+	"go.podman.io/podman/v6/pkg/machine/vmconfigs"
+	"go.podman.io/podman/v6/utils"
+	"golang.org/x/term"
 )
 
 // List is done at the host level to allow for a *possible* future where
 // more than one provider is used
 func List(vmstubbers []vmconfigs.VMProvider, _ machine.ListOptions) ([]*machine.ListResponse, error) {
-	var (
-		lrs []*machine.ListResponse
-	)
-
-	for _, s := range vmstubbers {
-		dirs, err := env.GetMachineDirs(s.VMType())
-		if err != nil {
-			return nil, err
-		}
-		mcs, err := vmconfigs.LoadMachinesInDir(dirs)
-		if err != nil {
-			return nil, err
-		}
-		for name, mc := range mcs {
-			state, err := s.State(mc, false)
-			if err != nil {
-				return nil, err
-			}
-			lr := machine.ListResponse{
-				Name:      name,
-				CreatedAt: mc.Created,
-				LastUp:    mc.LastUp,
-				Running:   state == machineDefine.Running,
-				Starting:  mc.Starting,
-				//Stream:             "", // No longer applicable
-				VMType:             s.VMType().String(),
-				CPUs:               mc.Resources.CPUs,
-				Memory:             mc.Resources.Memory,
-				DiskSize:           mc.Resources.DiskSize,
-				Port:               mc.SSH.Port,
-				RemoteUsername:     mc.SSH.RemoteUsername,
-				IdentityPath:       mc.SSH.IdentityPath,
-				UserModeNetworking: s.UserModeNetworkEnabled(mc),
-			}
-			lrs = append(lrs, &lr)
-		}
+	lrs := make([]*machine.ListResponse, 0)
+	mcs, err := getMCsOverProviders(vmstubbers)
+	if err != nil {
+		return nil, err
 	}
+	for name, mc := range mcs {
+		// set bypass=true so it doesn't fail the entire list if one provider can't determine state
+		state, err := mc.Provider.State(mc.MachineConfig, true)
+		if err != nil {
+			return nil, err
+		}
+		lr := machine.ListResponse{
+			Name:               name,
+			CreatedAt:          mc.Created,
+			LastUp:             mc.LastUp,
+			Running:            state == machineDefine.Running,
+			Starting:           mc.Starting,
+			VMType:             mc.Provider.VMType().String(),
+			CPUs:               mc.Resources.CPUs,
+			Memory:             mc.Resources.Memory,
+			Swap:               mc.Swap,
+			DiskSize:           mc.Resources.DiskSize,
+			Port:               mc.SSH.Port,
+			RemoteUsername:     mc.SSH.RemoteUsername,
+			IdentityPath:       mc.SSH.IdentityPath,
+			UserModeNetworking: mc.Provider.UserModeNetworkEnabled(mc.MachineConfig),
+		}
 
+		lrs = append(lrs, &lr)
+	}
 	return lrs, nil
 }
 
@@ -77,8 +76,19 @@ func Init(opts machineDefine.InitOptions, mp vmconfigs.VMProvider) error {
 	)
 
 	callbackFuncs := machine.CleanUp()
-	defer callbackFuncs.CleanIfErr(&err)
-	go callbackFuncs.CleanOnSignal()
+	defer func() {
+		// ErrRelaunchSucceeded is not a real error: it signals that
+		// an elevated child process completed the operation successfully.
+		// Skip cleanup so we don't remove resources (e.g. the disk image)
+		// that the child process created and that are now in use.
+		if !errors.Is(err, machineDefine.ErrRelaunchSucceeded) {
+			callbackFuncs.CleanIfErr(&err)
+		}
+	}()
+	// The following goroutine will block waiting
+	// for a termination signal. If no signal is received
+	// the routine is aborted when the main goroutine terminates.
+	go callbackFuncs.CleanOnSignal(false)
 
 	dirs, err := env.GetMachineDirs(mp.VMType())
 	if err != nil {
@@ -98,8 +108,12 @@ func Init(opts machineDefine.InitOptions, mp vmconfigs.VMProvider) error {
 	if err != nil {
 		return err
 	}
-	machineLock.Lock()
-	defer machineLock.Unlock()
+
+	// If the machine is being re-launched, the lock is already held
+	if !opts.ReExec {
+		machineLock.Lock()
+		defer machineLock.Unlock()
+	}
 
 	mc, err := vmconfigs.NewMachineConfig(opts, dirs, sshIdentityPath, mp.VMType(), machineLock)
 	if err != nil {
@@ -107,14 +121,28 @@ func Init(opts machineDefine.InitOptions, mp vmconfigs.VMProvider) error {
 	}
 
 	mc.Version = vmconfigs.MachineConfigVersion
+	mc.ImportNativeCA = opts.ImportNativeCA
 
 	createOpts := machineDefine.CreateVMOpts{
-		Name: opts.Name,
-		Dirs: dirs,
+		Name:   opts.Name,
+		Dirs:   dirs,
+		ReExec: opts.ReExec,
 	}
 
 	if umn := opts.UserModeNetworking; umn != nil {
 		createOpts.UserModeNetworking = *umn
+	}
+
+	// Mounts
+	if mp.VMType() != machineDefine.WSLVirt {
+		mc.Mounts = CmdLineVolumesToMounts(opts.Volumes, mp.MountType())
+	}
+
+	// Issue #18230 ... do not mount over important directories at the / level (subdirs are fine)
+	for _, mnt := range mc.Mounts {
+		if err := validateDestinationPaths(mnt.Target); err != nil {
+			return err
+		}
 	}
 
 	// Get Image
@@ -144,22 +172,24 @@ func Init(opts machineDefine.InitOptions, mp vmconfigs.VMProvider) error {
 	}
 	mc.ImagePath = imagePath
 
-	// TODO The following stanzas should be re-written in a differeent place.  It should have a custom
-	// parser for our image pulling.  It would be nice if init just got an error and mydisk back.
-	//
-	// Eventual valid input:
-	// "" <- means take the default
-	// "http|https://path"
-	// "/path
-	// "docker://quay.io/something/someManifest
-
-	if err := diskpull.GetDisk(opts.Image, dirs, mc.ImagePath, mp.VMType(), mc.Name); err != nil {
-		return err
+	// If the process was re-executed with elevation, the image has already been pulled
+	// in the parent process, so skip disk pulling here.
+	if !opts.ReExec {
+		// TODO The following stanzas should be re-written in a differeent place.  It should have a custom
+		// parser for our image pulling.  It would be nice if init just got an error and mydisk back.
+		//
+		// Eventual valid input:
+		// "" <- means take the default
+		// "http|https://path"
+		// "/path
+		// "docker://quay.io/something/someManifest
+		if err := diskpull.GetDisk(opts.Image, dirs, mc.ImagePath, mp.VMType(), mc.Name, opts.SkipTlsVerify); err != nil {
+			return err
+		}
+		callbackFuncs.Add(mc.ImagePath.Delete)
 	}
 
-	callbackFuncs.Add(mc.ImagePath.Delete)
-
-	logrus.Debugf("--> imagePath is %q", imagePath.GetPath())
+	logrus.Debugf("imagePath is %q", imagePath.GetPath())
 
 	ignitionFile, err := mc.IgnitionFile()
 	if err != nil {
@@ -190,18 +220,48 @@ func Init(opts machineDefine.InitOptions, mp vmconfigs.VMProvider) error {
 		VMType:    mp.VMType(),
 		WritePath: ignitionFile.GetPath(),
 		Rootful:   opts.Rootful,
+		Swap:      opts.Swap,
 	})
 
 	// If the user provides an ignition file, we need to
 	// copy it into the conf dir
 	if len(opts.IgnitionPath) > 0 {
 		err = ignBuilder.BuildWithIgnitionFile(opts.IgnitionPath)
-		return err
+		if err != nil {
+			return err
+		}
+	} else {
+		err = ignBuilder.GenerateIgnitionConfig()
+		if err != nil {
+			return err
+		}
 	}
 
-	err = ignBuilder.GenerateIgnitionConfig()
-	if err != nil {
-		return err
+	if len(opts.PlaybookPath) > 0 {
+		f, err := os.Open(opts.PlaybookPath)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		s, err := io.ReadAll(f)
+		if err != nil {
+			return fmt.Errorf("read playbook: %w", err)
+		}
+
+		playbookDest := fmt.Sprintf("/home/%s/%s", userName, "playbook.yaml")
+
+		if mp.VMType() != machineDefine.WSLVirt {
+			err = ignBuilder.AddPlaybook(string(s), playbookDest, userName)
+			if err != nil {
+				return err
+			}
+		}
+
+		mc.Ansible = &vmconfigs.AnsibleConfig{
+			PlaybookPath: playbookDest,
+			Contents:     string(s),
+			User:         userName,
+		}
 	}
 
 	readyIgnOpts, err := mp.PrepareIgnition(mc, &ignBuilder)
@@ -215,19 +275,32 @@ func Init(opts machineDefine.InitOptions, mp vmconfigs.VMProvider) error {
 	}
 
 	readyUnit := ignition.Unit{
-		Enabled:  ignition.BoolToPtr(true),
+		Enabled:  new(true),
 		Name:     "ready.service",
-		Contents: ignition.StrToPtr(readyUnitFile),
+		Contents: new(readyUnitFile),
 	}
 	ignBuilder.WithUnit(readyUnit)
 
-	// Mounts
-	if mp.VMType() != machineDefine.WSLVirt {
-		mc.Mounts = CmdLineVolumesToMounts(opts.Volumes, mp.MountType())
+	// CreateVM could cause the init command to be re-launched in some cases (e.g. wsl)
+	// so we need to avoid creating the machine config or connections before this check happens.
+	// when relaunching, the invoked 'init' command will be responsible to set up the machine
+	err = mp.CreateVM(createOpts, mc, &ignBuilder)
+	if err != nil {
+		return err
 	}
+	rmVM := func() error {
+		if err == nil {
+			return nil
+		}
+		if _, rm, _ := mp.Remove(mc); rm != nil {
+			return rm()
+		}
+		return nil
+	}
+	callbackFuncs.Add(rmVM)
 
 	// TODO AddSSHConnectionToPodmanSocket could take an machineconfig instead
-	if err := connection.AddSSHConnectionsToPodmanSocket(mc.HostUser.UID, mc.SSH.Port, mc.SSH.IdentityPath, mc.Name, mc.SSH.RemoteUsername, opts); err != nil {
+	if err = connection.AddSSHConnectionsToPodmanSocket(mc.HostUser.UID, mc.SSH.Port, mc.SSH.IdentityPath, mc.Name, mc.SSH.RemoteUsername, opts); err != nil {
 		return err
 	}
 
@@ -240,68 +313,89 @@ func Init(opts machineDefine.InitOptions, mp vmconfigs.VMProvider) error {
 	}
 	callbackFuncs.Add(cleanup)
 
-	err = mp.CreateVM(createOpts, mc, &ignBuilder)
-	if err != nil {
-		return err
-	}
-
-	err = ignBuilder.Build()
-	if err != nil {
-		return err
+	if len(opts.IgnitionPath) == 0 {
+		if err := ignBuilder.Build(); err != nil {
+			return err
+		}
 	}
 
 	return mc.Write()
 }
 
+type MultiProvider []vmconfigs.VMProvider
+
 // VMExists looks across given providers for a machine's existence.  returns the actual config and found bool
-func VMExists(name string, vmstubbers []vmconfigs.VMProvider) (*vmconfigs.MachineConfig, bool, error) {
+func VMExists(name string) (*vmconfigs.MachineConfig, vmconfigs.VMProvider, error) {
 	// Look on disk first
-	mcs, err := getMCsOverProviders(vmstubbers)
+	mcs, err := getMCsOverProviders(provider.GetAll())
 	if err != nil {
-		return nil, false, err
+		return nil, nil, err
 	}
 	if mc, found := mcs[name]; found {
-		return mc, true, nil
+		vmType := mc.Provider
+		return mc.MachineConfig, vmType, nil
 	}
-	// Check with the provider hypervisor
-	for _, vmstubber := range vmstubbers {
-		exists, err := vmstubber.Exists(name)
+
+	return nil, nil, &machineDefine.ErrVMDoesNotExist{Name: name}
+}
+
+// VMExistsOnHyperVisor actually checks the managing hypervisor (like WSL, HyperV)
+// to make sure a VM with the same name does not happen to exist.
+func VMExistsOnHyperVisor(name string) (bool, error) {
+	providers := provider.GetAll()
+	for _, p := range providers {
+		exists, err := p.Exists(name)
 		if err != nil {
-			return nil, false, err
+			return false, err
 		}
 		if exists {
-			return nil, true, fmt.Errorf("vm %q already exists on hypervisor", name)
+			return true, nil
 		}
 	}
-	return nil, false, nil
+	return false, nil
 }
 
 // checkExclusiveActiveVM checks if any of the machines are already running
-func checkExclusiveActiveVM(provider vmconfigs.VMProvider, mc *vmconfigs.MachineConfig) error {
+func checkExclusiveActiveVM(currentProvider vmconfigs.VMProvider, mc *vmconfigs.MachineConfig) error {
+	providers := provider.GetAll()
 	// Check if any other machines are running; if so, we error
-	localMachines, err := getMCsOverProviders([]vmconfigs.VMProvider{provider})
+	localMachines, err := getMCsOverProviders(providers)
 	if err != nil {
 		return err
 	}
+
 	for name, localMachine := range localMachines {
-		state, err := provider.State(localMachine, false)
+		state, err := localMachine.Provider.State(localMachine.MachineConfig, false)
 		if err != nil {
 			return err
 		}
 		if state == machineDefine.Running || state == machineDefine.Starting {
 			if mc.Name == name {
-				return fmt.Errorf("unable to start %q: machine %s: %w", mc.Name, name, machineDefine.ErrVMAlreadyRunning)
+				return fmt.Errorf("unable to start %q: already running", mc.Name)
 			}
-			return fmt.Errorf("unable to start %q: machine %s is already running: %w", mc.Name, name, machineDefine.ErrMultipleActiveVM)
+
+			// A machine is running in the current provider
+			if currentProvider.VMType() == localMachine.Provider.VMType() {
+				fail := machineDefine.ErrMultipleActiveVM{Name: name}
+				return fmt.Errorf("unable to start %q: %w", mc.Name, &fail)
+			}
+			// A machine is running in an alternate provider
+			fail := machineDefine.ErrMultipleActiveVM{Name: name, Provider: localMachine.Provider.VMType().String()}
+			return fmt.Errorf("unable to start: %w", &fail)
 		}
 	}
 	return nil
 }
 
+type knownMachineConfig struct {
+	Provider vmconfigs.VMProvider
+	*vmconfigs.MachineConfig
+}
+
 // getMCsOverProviders loads machineconfigs from a config dir derived from the "provider".  it returns only what is known on
 // disk so things like status may be incomplete or inaccurate
-func getMCsOverProviders(vmstubbers []vmconfigs.VMProvider) (map[string]*vmconfigs.MachineConfig, error) {
-	mcs := make(map[string]*vmconfigs.MachineConfig)
+func getMCsOverProviders(vmstubbers []vmconfigs.VMProvider) (map[string]knownMachineConfig, error) {
+	mcs := make(map[string]knownMachineConfig)
 	for _, stubber := range vmstubbers {
 		dirs, err := env.GetMachineDirs(stubber.VMType())
 		if err != nil {
@@ -311,12 +405,9 @@ func getMCsOverProviders(vmstubbers []vmconfigs.VMProvider) (map[string]*vmconfi
 		if err != nil {
 			return nil, err
 		}
-		// TODO When we get to golang-1.20+ we can replace the following with maps.Copy
-		// maps.Copy(mcs, stubberMCs)
-		// iterate known mcs and add the stubbers
 		for mcName, mc := range stubberMCs {
 			if _, ok := mcs[mcName]; !ok {
-				mcs[mcName] = mc
+				mcs[mcName] = knownMachineConfig{Provider: stubber, MachineConfig: mc}
 			}
 		}
 	}
@@ -324,7 +415,11 @@ func getMCsOverProviders(vmstubbers []vmconfigs.VMProvider) (map[string]*vmconfi
 }
 
 // Stop stops the machine as well as supporting binaries/processes
-func Stop(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, dirs *machineDefine.MachineDirs, hardStop bool) error {
+func Stop(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, hardStop bool) error {
+	dirs, err := env.GetMachineDirs(mp.VMType())
+	if err != nil {
+		return err
+	}
 	// state is checked here instead of earlier because stopping a stopped vm is not considered
 	// an error.  so putting in one place instead of sprinkling all over.
 	mc.Lock()
@@ -334,6 +429,39 @@ func Stop(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, dirs *machineDef
 	}
 
 	return stopLocked(mc, mp, dirs, hardStop)
+}
+
+// StopThenStart stops and starts the machine while holding its lock.
+func StopThenStart(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, hardStop bool, opts machine.StartOptions, updateSystemConn *bool) error {
+	dirs, err := env.GetMachineDirs(mp.VMType())
+	if err != nil {
+		return err
+	}
+	mc.Lock()
+	defer mc.Unlock()
+	err = mc.Refresh()
+	if err != nil {
+		err = fmt.Errorf("reload config: %w", err)
+		return err
+	}
+
+	err = stopLocked(mc, mp, dirs, hardStop)
+	if err != nil {
+		return err
+	}
+
+	err = mc.Refresh()
+	if err != nil {
+		err = fmt.Errorf("reload config: %w", err)
+		return err
+	}
+
+	callbackFuncs := machine.CleanUp()
+	defer callbackFuncs.CleanIfErr(&err)
+	go callbackFuncs.CleanOnSignal(opts.Quiet)
+
+	err = startLocked(mc, mp, dirs, opts, updateSystemConn, &callbackFuncs)
+	return err
 }
 
 // stopLocked stops the machine and expects the caller to hold the machine's lock.
@@ -380,14 +508,65 @@ func stopLocked(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, dirs *mach
 	return mc.Write()
 }
 
-func Start(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, dirs *machineDefine.MachineDirs, opts machine.StartOptions) error {
+func Start(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, opts machine.StartOptions, updateSystemConn *bool) error {
+	dirs, err := env.GetMachineDirs(mp.VMType())
+	if err != nil {
+		return err
+	}
+
+	callbackFuncs := machine.CleanUp()
+	defer callbackFuncs.CleanIfErr(&err)
+	// The following goroutine will block waiting
+	// for a termination signal. If no signal is received
+	// the routine is aborted when the main goroutine terminates.
+	go callbackFuncs.CleanOnSignal(opts.Quiet)
+
+	if !opts.ReExec {
+		mc.Lock()
+		// Use sync.Once to ensure that `mc.Unlock()` is called
+		// only once.
+		// Otherwise, when errors occur, it's called twice and panics:
+		//   - defer mcunlock()
+		//   - defer callbackFuncs.CleanIfErr()
+		var mcUnlockOnce sync.Once
+		mcunlock := func() error { //nolint: unparam
+			mcUnlockOnce.Do(func() {
+				logrus.Debug("unlocking machine config")
+				mc.Unlock()
+			})
+			return nil
+		}
+		callbackFuncs.Add(mcunlock)
+		// callbackFuncs are invoked when errors occurs or term signals
+		// are received. Thus we need to defer mcunlock for when Start()
+		// completes successfully
+		defer func() { _ = mcunlock() }()
+	}
+
+	err = mc.Refresh()
+	if err != nil {
+		err = fmt.Errorf("reload config: %w", err)
+		return err
+	}
+
+	err = startLocked(mc, mp, dirs, opts, updateSystemConn, &callbackFuncs)
+	return err
+}
+
+// startLocked starts the machine and expects the caller to hold the machine's lock.
+func startLocked(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, dirs *machineDefine.MachineDirs, opts machine.StartOptions, updateSystemConn *bool, callbackFuncs *machine.CleanupCallback) error {
+	var updateDefaultConnection bool
+
 	defaultBackoff := 500 * time.Millisecond
 	maxBackoffs := 6
 
-	mc.Lock()
-	defer mc.Unlock()
-	if err := mc.Refresh(); err != nil {
-		return fmt.Errorf("reload config: %w", err)
+	connName := mc.Name
+	if mc.HostUser.Rootful {
+		connName += "-root"
+	}
+	conn, err := registry.PodmanConfig().ContainersConfDefaultsRO.GetConnection(connName, false)
+	if err != nil {
+		return err
 	}
 
 	// Don't check if provider supports parallel running machines
@@ -397,7 +576,21 @@ func Start(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, dirs *machineDe
 			return err
 		}
 		startLock.Lock()
-		defer startLock.Unlock()
+		// Use sync.Once to ensure that `startLock.Unlock()` is called
+		// only once.
+		// Otherwise, when errors occur, it's called twice and panics:
+		//   - defer startLockUnlock()
+		//   - defer callbackFuncs.CleanIfErr()
+		var startLockOnce sync.Once
+		startLockUnlock := func() error { //nolint: unparam
+			startLockOnce.Do(startLock.Unlock)
+			return nil
+		}
+		callbackFuncs.Add(startLockUnlock)
+		// callbackFuncs are invoked when errors occurs or term signals
+		// are received. Thus we need to defer startLockUnlock for when
+		// Start() completes successfully
+		defer func() { _ = startLockUnlock() }()
 
 		if err := checkExclusiveActiveVM(mp, mc); err != nil {
 			return err
@@ -410,22 +603,56 @@ func Start(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, dirs *machineDe
 		}
 
 		if state == machineDefine.Running || state == machineDefine.Starting {
-			return fmt.Errorf("machine %s: %w", mc.Name, machineDefine.ErrVMAlreadyRunning)
+			return fmt.Errorf("unable to start %q: already running", mc.Name)
+		}
+	}
+
+	// Do not do anything with the system connection if its already
+	// the default system connection.
+	if !conn.Default {
+		if updateSystemConn != nil {
+			updateDefaultConnection = *updateSystemConn
+		} else if term.IsTerminal(int(os.Stdin.Fd())) {
+			// Prompt for system connection update if there is a terminal
+			// on stdin
+			response, err := promptUpdateSystemConn()
+			if err != nil {
+				return err
+			}
+			// This might be kind of lame but when using the command, but if you don't
+			// provide some sort of visual cue back to the user, it's unclear what is
+			// going on because the machine startup is going and it looks like things
+			// are frozen
+			if response {
+				fmt.Printf("\nDefault system connection will be changed to %q\n ", connName)
+			} else {
+				fmt.Println("Default system connection will remain unchanged")
+			}
+			updateDefaultConnection = response
 		}
 	}
 
 	// Set starting to true
 	mc.Starting = true
-	if err := mc.Write(); err != nil {
+	if err = mc.Write(); err != nil {
+		mc.Starting = false
 		logrus.Error(err)
 	}
+
 	// Set starting to false on exit
-	defer func() {
+	startingFalse := func() error {
 		mc.Starting = false
-		if err := mc.Write(); err != nil {
-			logrus.Error(err)
+		if writeErr := mc.Write(); writeErr != nil {
+			logrus.Error("Error writing machine starting state to false: ", writeErr)
+			return writeErr
 		}
-	}()
+		return nil
+	}
+	callbackFuncs.Add(startingFalse)
+	// callbackFuncs are invoked when errors occurs or term signals
+	// are received. Thus we need to defer startingFalse for when
+	// Start() completes successfully
+	defer func() { _ = startingFalse() }()
 
 	gvproxyPidFile, err := dirs.RuntimeDir.AppendToNewVMFile("gvproxy.pid", nil)
 	if err != nil {
@@ -438,40 +665,39 @@ func Start(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, dirs *machineDe
 		return err
 	}
 
-	callBackFuncs := machine.CleanUp()
-	defer callBackFuncs.CleanIfErr(&err)
-	go callBackFuncs.CleanOnSignal()
-
-	// Clean up gvproxy if start fails
-	cleanGV := func() error {
-		return machine.CleanupGVProxy(*gvproxyPidFile)
+	// Stop gvproxy if Start() fails or termination signal is received
+	cleanGv := func() error {
+		if cleanGvErr := machine.CleanupGVProxy(*gvproxyPidFile); cleanGvErr != nil {
+			return fmt.Errorf("unable to clean up gvproxy: %w", cleanGvErr)
+		}
+		return nil
 	}
-	callBackFuncs.Add(cleanGV)
+	callbackFuncs.Add(cleanGv)
 
 	// if there are generic things that need to be done, a preStart function could be added here
 	// should it be extensive
 
-	// releaseFunc is if the provider starts a vm using a go command
-	// and we still need control of it while it is booting until the ready
-	// socket is tripped
-	releaseCmd, WaitForReady, err := mp.StartVM(mc)
+	// StartVM spawns the VM process and returns two callback functions:
+	// - releaseCmd: releases any resource associated with the VM
+	//               Cmd.Process (typically cmd.Process.Release())
+	// - waitForReady: waits until the VM process is ready and returns an
+	//                 error it fails to start
+	releaseCmd, waitForReady, err := mp.StartVM(mc)
 	if err != nil {
 		return err
 	}
-
-	if WaitForReady == nil {
+	if releaseCmd != nil { // some providers can return nil here (hyperv)
+		callbackFuncs.Add(releaseCmd)
+		// callbackFuncs are invoked when errors occurs or term signals
+		// are received. Thus we need to defer releaseCmd for when
+		// Start() completes successfully
+		defer func() { _ = releaseCmd() }()
+	}
+	if waitForReady == nil {
 		return errors.New("no valid wait function returned")
 	}
-
-	if err := WaitForReady(); err != nil {
+	if err = waitForReady(); err != nil {
 		return err
-	}
-
-	if releaseCmd != nil && releaseCmd() != nil { // some providers can return nil here (hyperv)
-		if err := releaseCmd(); err != nil {
-			// I think it is ok for a "light" error?
-			logrus.Error(err)
-		}
 	}
 
 	if !opts.NoInfo && !mc.HostUser.Rootful {
@@ -495,18 +721,30 @@ func Start(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, dirs *machineDe
 	if !connected {
 		msg := "machine did not transition into running state"
 		if sshError != nil {
-			return fmt.Errorf("%s: ssh error: %v", msg, sshError)
+			return fmt.Errorf("%s: ssh error: %w", msg, sshError)
 		}
 		return errors.New(msg)
 	}
 
-	if err := proxyenv.ApplyProxies(mc); err != nil {
+	if err = proxyenv.ApplyProxies(mc); err != nil {
 		return err
 	}
 
 	// mount the volumes to the VM
-	if err := mp.MountVolumesToVM(mc, opts.Quiet); err != nil {
+	if err = mp.MountVolumesToVM(mc, opts.Quiet); err != nil {
 		return err
+	}
+
+	// Import native CA certificates if enabled (must run after volumes are
+	// mounted so the certificate file is accessible via the mounted path)
+	if mc.ImportNativeCA {
+		if err := certificates.ImportNativeCertificates(mc, mp.VMType()); err != nil {
+			// Warn the user but continue the machine startup process
+			logrus.Warnf("Failed to import native CA certificates: %v", err)
+			fmt.Println("Warning: Failed to import host trusted CA certificates. The machine will start without them.")
+		} else if !opts.Quiet {
+			fmt.Println("The host trusted CA certificates have been imported successfully")
+		}
 	}
 
 	// update the podman/docker socket service if the host user has been modified at all (UID or Rootful)
@@ -521,9 +759,27 @@ func Start(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, dirs *machineDe
 		}
 	}
 
+	if mp.VMType() == machineDefine.WSLVirt && mc.Ansible != nil && mc.IsFirstBoot() {
+		if err := machine.LocalhostSSHSilent(mc.Ansible.User, mc.SSH.IdentityPath, mc.Name, mc.SSH.Port, []string{"ansible-playbook", mc.Ansible.PlaybookPath}); err != nil {
+			logrus.Error(err)
+		}
+	}
+
+	// embedded function for handling if we should update the default connection
+	// and the actual update
+	updateConnectionFunc := func() error {
+		if !updateDefaultConnection {
+			return nil
+		}
+		return config.EditConnectionConfig(func(cfg *config.ConnectionsFile) error {
+			logrus.Infof("Setting default Podman connection to %s", connName)
+			cfg.Connection.Default = connName
+			return nil
+		})
+	}
 	// Provider is responsible for waiting
 	if mp.UseProviderNetworkSetup() {
-		return nil
+		return updateConnectionFunc()
 	}
 
 	noInfo := opts.NoInfo
@@ -536,8 +792,7 @@ func Start(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, dirs *machineDe
 		noInfo,
 		mc.HostUser.Rootful,
 	)
-
-	return nil
+	return updateConnectionFunc()
 }
 
 func Set(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, opts machineDefine.SetOptions) error {
@@ -563,6 +818,10 @@ func Set(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, opts machineDefin
 		mc.Resources.DiskSize = *opts.DiskSize
 	}
 
+	if opts.ImportNativeCA != nil {
+		mc.ImportNativeCA = *opts.ImportNativeCA
+	}
+
 	if err := mp.SetProviderAttrs(mc, opts); err != nil {
 		return err
 	}
@@ -571,9 +830,15 @@ func Set(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, opts machineDefin
 	return mc.Write()
 }
 
-func Remove(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, dirs *machineDefine.MachineDirs, opts machine.RemoveOptions) error {
-	mc.Lock()
-	defer mc.Unlock()
+func Remove(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, opts machine.RemoveOptions) error {
+	dirs, err := env.GetMachineDirs(mp.VMType())
+	if err != nil {
+		return err
+	}
+	if !opts.ReExec {
+		mc.Lock()
+		defer mc.Unlock()
+	}
 	if err := mc.Refresh(); err != nil {
 		return fmt.Errorf("reload config: %w", err)
 	}
@@ -640,7 +905,7 @@ func Remove(mc *vmconfigs.MachineConfig, mp vmconfigs.VMProvider, dirs *machineD
 	}
 
 	if err := genericRm(); err != nil {
-		return fmt.Errorf("failed to remove machines files: %v", err)
+		return fmt.Errorf("failed to remove machines files: %w", err)
 	}
 	return nil
 }
@@ -652,7 +917,7 @@ func confirmationMessage(files []string) {
 	}
 }
 
-func Reset(mps []vmconfigs.VMProvider, opts machine.ResetOptions) error {
+func Reset(mps []vmconfigs.VMProvider, _ machine.ResetOptions) error {
 	var resetErrors *multierror.Error
 	removeDirs := []*machineDefine.MachineDirs{}
 
@@ -675,7 +940,7 @@ func Reset(mps []vmconfigs.VMProvider, opts machine.ResetOptions) error {
 		}
 
 		for _, mc := range mcs {
-			err := Stop(mc, p, d, true)
+			err := Stop(mc, p, true)
 			if err != nil {
 				resetErrors = multierror.Append(resetErrors, err)
 			}
@@ -688,11 +953,18 @@ func Reset(mps []vmconfigs.VMProvider, opts machine.ResetOptions) error {
 				resetErrors = multierror.Append(resetErrors, err)
 			}
 
-			if err := genericRm(); err != nil {
-				resetErrors = multierror.Append(resetErrors, err)
+			if genericRm != nil {
+				if err := genericRm(); err != nil {
+					resetErrors = multierror.Append(resetErrors, err)
+				}
 			}
-			if err := providerRm(); err != nil {
-				resetErrors = multierror.Append(resetErrors, err)
+			// We must check if the returned providerRm function is not nil before executing it.
+			// If a provider (like Hyper-V) encountered an error during the removal setup
+			// phase (e.g., a cancelled 'runas' elevation), it returns nil for the function.
+			if providerRm != nil {
+				if err := providerRm(); err != nil {
+					resetErrors = multierror.Append(resetErrors, err)
+				}
 			}
 		}
 	}
@@ -714,4 +986,40 @@ func Reset(mps []vmconfigs.VMProvider, opts machine.ResetOptions) error {
 		}
 	}
 	return resetErrors.ErrorOrNil()
+}
+
+func validateDestinationPaths(dest string) error {
+	// illegalMounts are locations at the / level of the podman machine where we do want users mounting directly over
+	illegalMounts := map[string]struct{}{
+		"/bin":  {},
+		"/boot": {},
+		"/dev":  {},
+		"/etc":  {},
+		"/home": {},
+		"/proc": {},
+		"/root": {},
+		"/run":  {},
+		"/sbin": {},
+		"/sys":  {},
+		"/tmp":  {},
+		"/usr":  {},
+		"/var":  {},
+	}
+	mountTarget := path.Clean(dest)
+	if _, ok := illegalMounts[mountTarget]; ok {
+		return fmt.Errorf("machine mount destination cannot be %q: consider another location or a subdirectory of an existing location", mountTarget)
+	}
+	return nil
+}
+
+func promptUpdateSystemConn() (bool, error) {
+	fmt.Println("Warning: The machine being started is not set as your default Podman connection.")
+	fmt.Println("As such, Podman commands may not work correctly.")
+	fmt.Print(`Set the default Podman connection to this machine? [y/N] `)
+	reader := bufio.NewReader(os.Stdin)
+	answer, err := reader.ReadString('\n')
+	if err != nil {
+		return false, err
+	}
+	return len(answer) > 0 && (answer[0] == 'y' || answer[0] == 'Y'), nil
 }

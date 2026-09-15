@@ -3,29 +3,32 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
+	"slices"
 	"strconv"
 	"strings"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/common/pkg/ssh"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/validate"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/libpod/shutdown"
-	"github.com/containers/podman/v5/pkg/bindings"
-	"github.com/containers/podman/v5/pkg/checkpoint/crutils"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/parallel"
-	"github.com/containers/podman/v5/version"
-	"github.com/containers/storage"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/common/pkg/ssh"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/system"
+	"go.podman.io/podman/v6/cmd/podman/validate"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/libpod/shutdown"
+	"go.podman.io/podman/v6/pkg/bindings"
+	"go.podman.io/podman/v6/pkg/checkpoint/crutils"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/parallel"
+	"go.podman.io/podman/v6/version"
+	"go.podman.io/storage"
 	"sigs.k8s.io/yaml"
 )
 
@@ -39,6 +42,21 @@ Description:
 
 {{if or .Runnable .HasSubCommands}}{{.UsageString}}{{end}}`
 
+// indentExamples is a Cobra template function registered via cobra.AddTemplateFunc.
+// It prepends two spaces to every non-empty line in a command's Example string
+// so that examples are consistently indented in --help output.
+// Example strings in source must be flush-left (no leading whitespace);
+// this is enforced by TestExampleFormat.
+func indentExamples(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		if line != "" {
+			lines[i] = "  " + line
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 // UsageTemplate is the usage template for podman commands
 // This blocks the displaying of the global options. The main podman
 // command should not use this.
@@ -50,7 +68,7 @@ Aliases:
   {{.NameAndAliases}}{{end}}{{if .HasExample}}
 
 Examples:
-  {{.Example}}{{end}}{{if .HasAvailableSubCommands}}
+{{.Example | indentExamples}}{{end}}{{if .HasAvailableSubCommands}}
 
 Available Commands:{{range .Commands}}{{if (or .IsAvailableCommand (eq .Name "help"))}}
   {{rpad .Name .NamePadding }} {{.Short}}{{end}}{{end}}{{end}}{{if .HasAvailableLocalFlags}}
@@ -62,7 +80,10 @@ Options:
 
 var (
 	rootCmd = &cobra.Command{
-		Use:                   filepath.Base(os.Args[0]) + " [options]",
+		// In shell completion, there is `.exe` suffix on Windows.
+		// This does not provide the same experience across platforms
+		// and was mentioned in [#16499](https://github.com/containers/podman/issues/16499).
+		Use:                   strings.TrimSuffix(filepath.Base(os.Args[0]), ".exe") + " [options]",
 		Long:                  "Manage pods, containers and images",
 		SilenceUsage:          true,
 		SilenceErrors:         true,
@@ -89,6 +110,8 @@ var (
 )
 
 func init() {
+	cobra.AddTemplateFunc("indentExamples", indentExamples)
+
 	// Hooks are called before PersistentPreRunE(). These hooks affect global
 	// state and are executed after processing the command-line, but before
 	// actually running the command.
@@ -103,7 +126,7 @@ func init() {
 	rootFlags(rootCmd, registry.PodmanConfig())
 
 	// backwards compat still allow --cni-config-dir
-	rootCmd.Flags().SetNormalizeFunc(func(f *pflag.FlagSet, name string) pflag.NormalizedName {
+	rootCmd.Flags().SetNormalizeFunc(func(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 		if name == "cni-config-dir" {
 			name = "network-config-dir"
 		}
@@ -113,7 +136,7 @@ func init() {
 }
 
 func Execute() {
-	if err := rootCmd.ExecuteContext(registry.GetContextWithOptions()); err != nil {
+	if cmd, err := rootCmd.ExecuteContextC(registry.Context()); err != nil {
 		if registry.GetExitCode() == 0 {
 			registry.SetExitCode(define.ExecErrorCodeGeneric)
 		}
@@ -122,7 +145,7 @@ func Execute() {
 				fmt.Fprintln(os.Stderr, "Cannot connect to Podman. Please verify your connection to the Linux system using `podman system connection list`, or try `podman machine init` and `podman machine start` to manage a new Linux VM")
 			}
 		}
-		fmt.Fprintln(os.Stderr, formatError(err))
+		fmt.Fprintln(os.Stderr, formatError(err, cmd))
 	}
 
 	_ = shutdown.Stop()
@@ -162,6 +185,9 @@ func readRemoteCliFlags(cmd *cobra.Command, podmanConfig *entities.PodmanConfig)
 		}
 		podmanConfig.URI = con.URI
 		podmanConfig.Identity = con.Identity
+		podmanConfig.TLSCertFile = con.TLSCert
+		podmanConfig.TLSKeyFile = con.TLSKey
+		podmanConfig.TLSCAFile = con.TLSCA
 		podmanConfig.MachineMode = con.IsMachine
 	case url.Changed:
 		podmanConfig.URI = url.Value.String()
@@ -174,6 +200,9 @@ func readRemoteCliFlags(cmd *cobra.Command, podmanConfig *entities.PodmanConfig)
 			}
 			podmanConfig.URI = con.URI
 			podmanConfig.Identity = con.Identity
+			podmanConfig.TLSCertFile = con.TLSCert
+			podmanConfig.TLSKeyFile = con.TLSKey
+			podmanConfig.TLSCAFile = con.TLSCA
 			podmanConfig.MachineMode = con.IsMachine
 		}
 	case host.Changed:
@@ -208,6 +237,9 @@ func setupRemoteConnection(podmanConfig *entities.PodmanConfig) string {
 		}
 		podmanConfig.URI = con.URI
 		podmanConfig.Identity = con.Identity
+		podmanConfig.TLSCertFile = con.TLSCert
+		podmanConfig.TLSKeyFile = con.TLSKey
+		podmanConfig.TLSCAFile = con.TLSCA
 		podmanConfig.MachineMode = con.IsMachine
 		return con.Name
 	case hostEnv != "":
@@ -220,6 +252,9 @@ func setupRemoteConnection(podmanConfig *entities.PodmanConfig) string {
 		if err == nil {
 			podmanConfig.URI = con.URI
 			podmanConfig.Identity = con.Identity
+			podmanConfig.TLSCertFile = con.TLSCert
+			podmanConfig.TLSKeyFile = con.TLSKey
+			podmanConfig.TLSCAFile = con.TLSCA
 			podmanConfig.MachineMode = con.IsMachine
 			return con.Name
 		}
@@ -230,6 +265,8 @@ func setupRemoteConnection(podmanConfig *entities.PodmanConfig) string {
 
 func persistentPreRunE(cmd *cobra.Command, args []string) error {
 	logrus.Debugf("Called %s.PersistentPreRunE(%s)", cmd.Name(), strings.Join(os.Args, " "))
+
+	checkSupportedCgroups()
 
 	// Help, completion and commands with subcommands are special cases, no need for more setup
 	// Completion cmd is used to generate the shell scripts
@@ -243,6 +280,9 @@ func persistentPreRunE(cmd *cobra.Command, args []string) error {
 	if !registry.IsRemote() {
 		if cmd.Flag("hooks-dir").Changed {
 			podmanConfig.ContainersConf.Engine.HooksDir.Set(podmanConfig.HooksDir)
+		}
+		if cmd.Flag("cdi-spec-dir").Changed {
+			podmanConfig.ContainersConf.Engine.CdiSpecDirs.Set(podmanConfig.CdiSpecDirs)
 		}
 
 		// Currently it is only possible to restore a container with the same runtime
@@ -286,60 +326,7 @@ func persistentPreRunE(cmd *cobra.Command, args []string) error {
 				}
 			}
 		}
-	}
 
-	if err := readRemoteCliFlags(cmd, podmanConfig); err != nil {
-		return fmt.Errorf("read cli flags: %w", err)
-	}
-
-	// Special case if command is hidden completion command ("__complete","__completeNoDesc")
-	// Since __completeNoDesc is an alias the cm.Name is always __complete
-	if cmd.Name() == cobra.ShellCompRequestCmd {
-		// Parse the cli arguments after the completion cmd (always called as second argument)
-		// This ensures that the --url, --identity and --connection flags are properly set
-		compCmd, _, err := cmd.Root().Traverse(os.Args[2:])
-		if err != nil {
-			return err
-		}
-		// If we don't complete the root cmd hide all root flags
-		// so they won't show up in the completions on subcommands.
-		if compCmd != compCmd.Root() {
-			compCmd.Root().Flags().VisitAll(func(flag *pflag.Flag) {
-				flag.Hidden = true
-			})
-		}
-		// No need for further setup the completion logic setups the engines as needed.
-		requireCleanup = false
-		return nil
-	}
-
-	// Prep the engines
-	if _, err := registry.NewImageEngine(cmd, args); err != nil {
-		// Note: this is gross, but it is the hand we are dealt
-		if registry.IsRemote() && errors.As(err, &bindings.ConnectError{}) && cmd.Name() == "info" && cmd.Parent() == cmd.Root() {
-			clientDesc, err := getClientInfo()
-			// we eat the error here. if this fails, they just don't any client info
-			if err == nil {
-				b, _ := yaml.Marshal(clientDesc)
-				fmt.Println(string(b))
-			}
-		}
-		return err
-	}
-	if _, err := registry.NewContainerEngine(cmd, args); err != nil {
-		return err
-	}
-
-	// Hard code TMPDIR functions to use /var/tmp, if user did not override
-	if _, ok := os.LookupEnv("TMPDIR"); !ok {
-		if tmpdir, err := podmanConfig.ContainersConfDefaultsRO.ImageCopyTmpDir(); err != nil {
-			logrus.Warnf("Failed to retrieve default tmp dir: %s", err.Error())
-		} else {
-			os.Setenv("TMPDIR", tmpdir)
-		}
-	}
-
-	if !registry.IsRemote() {
 		if cmd.Flag("cpu-profile").Changed {
 			f, err := os.Create(podmanConfig.CPUProfile)
 			if err != nil {
@@ -368,6 +355,71 @@ func persistentPreRunE(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
+
+	if err := readRemoteCliFlags(cmd, podmanConfig); err != nil {
+		return fmt.Errorf("read cli flags: %w", err)
+	}
+
+	// Special case if command is hidden completion command ("__complete","__completeNoDesc")
+	// Since __completeNoDesc is an alias the cm.Name is always __complete
+	if cmd.Name() == cobra.ShellCompRequestCmd {
+		// Parse the cli arguments after the completion cmd (always called as second argument)
+		// This ensures that the --url, --identity and --connection flags are properly set
+		compCmd, _, err := cmd.Root().Traverse(os.Args[2:])
+		if err != nil {
+			return err
+		}
+		// If we don't complete the root cmd hide all root flags
+		// so they won't show up in the completions on subcommands.
+		if compCmd != compCmd.Root() {
+			compCmd.Root().Flags().VisitAll(func(flag *pflag.Flag) {
+				flag.Hidden = true
+			})
+		}
+		// No need for further setup the completion logic setups the engines as needed.
+		requireCleanup = false
+		return nil
+	}
+
+	// Prep the engines
+	// Container engine MUST be first.
+	// We have special handling in there for passing flags to the runtime, that is ignored by the image engine.
+	// Which creates a container engine, because there isn't an entrypoint to Libimage that isn't Libpod.
+	if _, err := registry.NewContainerEngine(cmd, args); err != nil {
+		// Note: this is gross, but it is the hand we are dealt
+		if registry.IsRemote() && errors.As(err, &bindings.ConnectError{}) && cmd.Parent() == cmd.Root() {
+			switch cmd.Name() {
+			case "info":
+				clientDesc, err := getClientInfo()
+				// we eat the error here. if this fails, they just don't any client info
+				if err == nil {
+					b, _ := yaml.Marshal(clientDesc)
+					fmt.Println(string(b))
+				}
+			case "version":
+				versions, err := define.GetVersion()
+				if err == nil {
+					if printErr := system.PrintVersion(cmd, &entities.SystemVersionReport{Client: &versions}); printErr != nil {
+						logrus.Debugf("Failed to print client version information: %v", printErr)
+					}
+				}
+			}
+		}
+		return err
+	}
+	if _, err := registry.NewImageEngine(cmd, args); err != nil {
+		return err
+	}
+
+	// Hard code TMPDIR functions to use /var/tmp, if user did not override
+	if _, ok := os.LookupEnv("TMPDIR"); !ok {
+		if tmpdir, err := podmanConfig.ContainersConfDefaultsRO.ImageCopyTmpDir(); err != nil {
+			logrus.Warnf("Failed to retrieve default tmp dir: %v", err)
+		} else {
+			os.Setenv("TMPDIR", tmpdir)
+		}
+	}
+
 	// Setup Rootless environment, IFF:
 	// 1) in ABI mode
 	// 2) running as non-root
@@ -387,7 +439,7 @@ func persistentPreRunE(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func persistentPostRunE(cmd *cobra.Command, args []string) error {
+func persistentPostRunE(cmd *cobra.Command, _ []string) error {
 	logrus.Debugf("Called %s.PersistentPostRunE(%s)", cmd.Name(), strings.Join(os.Args, " "))
 
 	if registry.IsRemote() {
@@ -415,29 +467,38 @@ func persistentPostRunE(cmd *cobra.Command, args []string) error {
 
 func configHook() {
 	if dockerConfig != "" {
+		// NOTE: we dont allow pointing --config to a regular file. Code assumed config is a directory
+		// We do allow though pointing at a nonexistent path. Some downstream code will create the folder
+		// at runtime if it does not yet exist.
+		statInfo, err := os.Stat(dockerConfig)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			// Cases where the folder does not exist are allowed, BUT cases where some other Stat() error
+			// is returned should fail
+			fmt.Fprintf(os.Stderr, "Supplied --config folder (%s) exists but is not accessible: %v\n", dockerConfig, err)
+			os.Exit(1)
+		}
+		if err == nil && !statInfo.IsDir() {
+			// Cases where it does exist but is a file should fail
+			fmt.Fprintf(os.Stderr, "Supplied --config file (%s) is not a directory\n", dockerConfig)
+			os.Exit(1)
+		}
 		if err := os.Setenv("DOCKER_CONFIG", dockerConfig); err != nil {
-			fmt.Fprintf(os.Stderr, "cannot set DOCKER_CONFIG=%s: %s", dockerConfig, err.Error())
+			fmt.Fprintf(os.Stderr, "cannot set DOCKER_CONFIG=%s: %v\n", dockerConfig, err)
 			os.Exit(1)
 		}
 	}
 }
 
 func loggingHook() {
-	var found bool
 	if debug {
-		if logLevel != defaultLogLevel {
+		if rootCmd.Flag("log-level").Changed {
 			fmt.Fprintf(os.Stderr, "Setting --log-level and --debug is not allowed\n")
 			os.Exit(1)
 		}
 		logLevel = "debug"
 	}
-	for _, l := range common.LogLevels {
-		if l == strings.ToLower(logLevel) {
-			found = true
-			break
-		}
-	}
-	if !found {
+
+	if !slices.Contains(common.LogLevels, strings.ToLower(logLevel)) {
 		fmt.Fprintf(os.Stderr, "Log Level %q is not supported, choose from: %s\n", logLevel, strings.Join(common.LogLevels, ", "))
 		os.Exit(1)
 	}
@@ -468,7 +529,7 @@ func stdOutHook() {
 
 			// if we couldn't open the file for write, then just bail with an error.
 		} else {
-			fmt.Fprintf(os.Stderr, "unable to open file for standard output: %s\n", err.Error())
+			fmt.Fprintf(os.Stderr, "unable to open file for standard output: %v\n", err)
 			os.Exit(1)
 		}
 	}
@@ -494,7 +555,7 @@ func rootFlags(cmd *cobra.Command, podmanConfig *entities.PodmanConfig) {
 	_ = lFlags.MarkHidden("host")
 
 	configFlagName := "config"
-	lFlags.StringVar(&dockerConfig, "config", "", "Location of authentication config file")
+	lFlags.StringVar(&dockerConfig, "config", "", "Path to directory containing authentication config file")
 	_ = cmd.RegisterFlagCompletionFunc(configFlagName, completion.AutocompleteDefault)
 
 	// Context option added just for compatibility with DockerCLI.
@@ -504,6 +565,22 @@ func rootFlags(cmd *cobra.Command, podmanConfig *entities.PodmanConfig) {
 	identityFlagName := "identity"
 	lFlags.StringVar(&podmanConfig.Identity, identityFlagName, podmanConfig.Identity, "path to SSH identity file, (CONTAINER_SSHKEY)")
 	_ = cmd.RegisterFlagCompletionFunc(identityFlagName, completion.AutocompleteDefault)
+
+	tlsCertFileFlagName := "tls-cert"
+	lFlags.StringVar(&podmanConfig.TLSCertFile, tlsCertFileFlagName, podmanConfig.TLSCertFile, "path to TLS client certificate PEM file for remote.")
+	_ = cmd.RegisterFlagCompletionFunc(tlsCertFileFlagName, completion.AutocompleteDefault)
+
+	tlsKeyFileFlagName := "tls-key"
+	lFlags.StringVar(&podmanConfig.TLSKeyFile, tlsKeyFileFlagName, podmanConfig.TLSKeyFile, "path to TLS client certificate private key PEM file for remote.")
+	_ = cmd.RegisterFlagCompletionFunc(tlsKeyFileFlagName, completion.AutocompleteDefault)
+
+	tlsCAFileFlagName := "tls-ca"
+	lFlags.StringVar(&podmanConfig.TLSCAFile, tlsCAFileFlagName, podmanConfig.TLSCAFile, "path to TLS certificate Authority PEM file for remote.")
+	_ = cmd.RegisterFlagCompletionFunc(tlsCAFileFlagName, completion.AutocompleteDefault)
+
+	tlsDetailsFlagName := "tls-details"
+	lFlags.StringVar(&podmanConfig.TLSDetailsFile, tlsDetailsFlagName, "", "Path to a containers-tls-details.yaml(5) file")
+	_ = cmd.RegisterFlagCompletionFunc(tlsDetailsFlagName, completion.AutocompleteDefault)
 
 	// Flags that control or influence any kind of output.
 	outFlagName := "out"
@@ -517,7 +594,7 @@ func rootFlags(cmd *cobra.Command, podmanConfig *entities.PodmanConfig) {
 	pFlags := cmd.PersistentFlags()
 	if registry.IsRemote() {
 		if err := lFlags.MarkHidden("remote"); err != nil {
-			logrus.Warnf("Unable to mark --remote flag as hidden: %s", err.Error())
+			logrus.Warnf("Unable to mark --remote flag as hidden: %v", err)
 		}
 		podmanConfig.Remote = true
 	} else {
@@ -529,9 +606,6 @@ func rootFlags(cmd *cobra.Command, podmanConfig *entities.PodmanConfig) {
 		lFlags.StringArray(moduleFlagName, nil, "Load the containers.conf(5) module")
 		_ = cmd.RegisterFlagCompletionFunc(moduleFlagName, common.AutocompleteContainersConfModules)
 
-		// A *hidden* flag to change the database backend.
-		pFlags.StringVar(&podmanConfig.ContainersConf.Engine.DBBackend, "db-backend", podmanConfig.ContainersConfDefaultsRO.Engine.DBBackend, "Database backend to use")
-
 		cgroupManagerFlagName := "cgroup-manager"
 		pFlags.StringVar(&podmanConfig.ContainersConf.Engine.CgroupManager, cgroupManagerFlagName, podmanConfig.ContainersConfDefaultsRO.Engine.CgroupManager, "Cgroup manager to use (\"cgroupfs\"|\"systemd\")")
 		_ = cmd.RegisterFlagCompletionFunc(cgroupManagerFlagName, common.AutocompleteCgroupManager)
@@ -542,12 +616,6 @@ func rootFlags(cmd *cobra.Command, podmanConfig *entities.PodmanConfig) {
 		conmonFlagName := "conmon"
 		pFlags.StringVar(&podmanConfig.ConmonPath, conmonFlagName, "", "Path of the conmon binary")
 		_ = cmd.RegisterFlagCompletionFunc(conmonFlagName, completion.AutocompleteDefault)
-
-		// TODO (5.0): --network-cmd-path is deprecated, remove this option with the next major release
-		// We need to find all the places that use r.config.Engine.NetworkCmdPath and remove it
-		networkCmdPathFlagName := "network-cmd-path"
-		pFlags.StringVar(&podmanConfig.ContainersConf.Engine.NetworkCmdPath, networkCmdPathFlagName, podmanConfig.ContainersConfDefaultsRO.Engine.NetworkCmdPath, "Path to the command for configuring the network")
-		_ = cmd.RegisterFlagCompletionFunc(networkCmdPathFlagName, completion.AutocompleteDefault)
 
 		networkConfigDirFlagName := "network-config-dir"
 		pFlags.StringVar(&podmanConfig.ContainersConf.Network.NetworkConfigDir, networkConfigDirFlagName, podmanConfig.ContainersConfDefaultsRO.Network.NetworkConfigDir, "Path of the configuration directory for networks")
@@ -563,6 +631,10 @@ func rootFlags(cmd *cobra.Command, podmanConfig *entities.PodmanConfig) {
 		pFlags.StringArrayVar(&podmanConfig.HooksDir, hooksDirFlagName, podmanConfig.ContainersConfDefaultsRO.Engine.HooksDir.Get(), "Set the OCI hooks directory path (may be set multiple times)")
 		_ = cmd.RegisterFlagCompletionFunc(hooksDirFlagName, completion.AutocompleteDefault)
 
+		cdiSpecDirFlagName := "cdi-spec-dir"
+		pFlags.StringArrayVar(&podmanConfig.CdiSpecDirs, cdiSpecDirFlagName, podmanConfig.ContainersConfDefaultsRO.Engine.CdiSpecDirs.Get(), "Set the CDI spec directory path (may be set multiple times)")
+		_ = cmd.RegisterFlagCompletionFunc(cdiSpecDirFlagName, completion.AutocompleteDefault)
+
 		pFlags.IntVar(&podmanConfig.MaxWorks, "max-workers", (runtime.NumCPU()*3)+1, "The maximum number of workers for parallel operations")
 
 		namespaceFlagName := "namespace"
@@ -570,9 +642,11 @@ func rootFlags(cmd *cobra.Command, podmanConfig *entities.PodmanConfig) {
 		_ = cmd.RegisterFlagCompletionFunc(namespaceFlagName, completion.AutocompleteNone)
 		_ = pFlags.MarkHidden(namespaceFlagName)
 
+		// Keep network-backend flag as hidden for backward compatibility with cleanup commands from 5.x containers
 		networkBackendFlagName := "network-backend"
-		pFlags.StringVar(&podmanConfig.ContainersConf.Network.NetworkBackend, networkBackendFlagName, podmanConfig.ContainersConfDefaultsRO.Network.NetworkBackend, `Network backend to use ("cni"|"netavark")`)
-		_ = cmd.RegisterFlagCompletionFunc(networkBackendFlagName, common.AutocompleteNetworkBackend)
+		var networkBackendDeprecated string
+		pFlags.StringVar(&networkBackendDeprecated, networkBackendFlagName, "", "Deprecated: Network backend (flag kept for backward compatibility)")
+		_ = cmd.RegisterFlagCompletionFunc(networkBackendFlagName, completion.AutocompleteNone)
 		_ = pFlags.MarkHidden(networkBackendFlagName)
 
 		rootFlagName := "root"
@@ -615,7 +689,6 @@ func rootFlags(cmd *cobra.Command, podmanConfig *entities.PodmanConfig) {
 		// Hide these flags for both ABI and Tunneling
 		for _, f := range []string{
 			"cpu-profile",
-			"db-backend",
 			"default-mounts-file",
 			"max-workers",
 			"memory-profile",
@@ -624,7 +697,7 @@ func rootFlags(cmd *cobra.Command, podmanConfig *entities.PodmanConfig) {
 			"trace",
 		} {
 			if err := pFlags.MarkHidden(f); err != nil {
-				logrus.Warnf("Unable to mark %s flag as hidden: %s", f, err.Error())
+				logrus.Warnf("Unable to mark %s flag as hidden: %v", f, err)
 			}
 		}
 	}
@@ -649,11 +722,11 @@ func rootFlags(cmd *cobra.Command, podmanConfig *entities.PodmanConfig) {
 		pFlags.StringArrayVar(&podmanConfig.RuntimeFlags, runtimeflagFlagName, []string{}, "add global flags for the container runtime")
 		_ = rootCmd.RegisterFlagCompletionFunc(runtimeflagFlagName, completion.AutocompleteNone)
 
-		pFlags.BoolVar(&podmanConfig.Syslog, "syslog", false, "Output logging information to syslog as well as the console (default false)")
+		pFlags.BoolVar(&podmanConfig.Syslog, "syslog", false, "Output podman-internal logs to syslog as well as the console (default false)")
 	}
 }
 
-func formatError(err error) string {
+func formatError(err error, cmd *cobra.Command) string {
 	var message string
 	switch {
 	case errors.Is(err, define.ErrOCIRuntime):
@@ -664,7 +737,9 @@ func formatError(err error) string {
 			define.ErrOCIRuntime.Error(),
 			strings.TrimSuffix(err.Error(), ": "+define.ErrOCIRuntime.Error()),
 		)
-	case errors.Is(err, storage.ErrDuplicateName):
+	case errors.Is(err, storage.ErrDuplicateName) && cmd != nil && cmd.Flags().Lookup("replace") != nil:
+		// Only suggest --replace when the invoked command actually has
+		// the flag (e.g. "manifest create" does not).
 		message = fmt.Sprintf("Error: %s, or use --replace to instruct Podman to do so.", err.Error())
 	default:
 		if logrus.IsLevelEnabled(logrus.TraceLevel) {

@@ -6,13 +6,14 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/containers/common/pkg/auth"
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/image/v5/types"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/auth"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/image/v5/pkg/cli/basetls/tlsdetails"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 type loginOptionsWrapper struct {
@@ -30,8 +31,8 @@ var (
 		Args:              cobra.MaximumNArgs(1),
 		ValidArgsFunction: common.AutocompleteRegistries,
 		Example: `podman login quay.io
-  podman login --username ... --password ... quay.io
-  podman login --authfile dir/auth.json quay.io`,
+podman login --username ... --password ... quay.io
+podman login --authfile dir/auth.json quay.io`,
 	}
 )
 
@@ -65,9 +66,13 @@ func init() {
 // Implementation of podman-login.
 func login(cmd *cobra.Command, args []string) error {
 	var skipTLS types.OptionalBool
-
 	if cmd.Flags().Changed("tls-verify") {
 		skipTLS = types.NewOptionalBool(!loginOptions.tlsVerify)
+	}
+
+	baseTLSConfig, err := tlsdetails.BaseTLSFromOptionalFile(registry.PodmanConfig().TLSDetailsFile)
+	if err != nil {
+		return err
 	}
 
 	secretName := cmd.Flag("secret").Value.String()
@@ -78,7 +83,7 @@ func login(cmd *cobra.Command, args []string) error {
 		if len(loginOptions.Username) == 0 {
 			loginOptions.Username = secretName
 		}
-		var inspectOpts = entities.SecretInspectOptions{
+		inspectOpts := entities.SecretInspectOptions{
 			ShowSecret: true,
 		}
 		inspected, errs, _ := registry.ContainerEngine().SecretInspect(context.Background(), []string{secretName}, inspectOpts)
@@ -97,25 +102,8 @@ func login(cmd *cobra.Command, args []string) error {
 
 	sysCtx := &types.SystemContext{
 		DockerInsecureSkipTLSVerify: skipTLS,
+		BaseTLSConfig:               baseTLSConfig.TLSConfig(),
 	}
-	setRegistriesConfPath(sysCtx)
 	loginOptions.GetLoginSet = cmd.Flag("get-login").Changed
 	return auth.Login(context.Background(), sysCtx, &loginOptions.LoginOptions, args)
-}
-
-// setRegistriesConfPath sets the registries.conf path for the specified context.
-// NOTE: this is a verbatim copy from c/common/libimage which we're not using
-// to prevent leaking c/storage into this file.  Maybe this should go into c/image?
-func setRegistriesConfPath(systemContext *types.SystemContext) {
-	if systemContext.SystemRegistriesConfPath != "" {
-		return
-	}
-	if envOverride, ok := os.LookupEnv("CONTAINERS_REGISTRIES_CONF"); ok {
-		systemContext.SystemRegistriesConfPath = envOverride
-		return
-	}
-	if envOverride, ok := os.LookupEnv("REGISTRIES_CONFIG_PATH"); ok {
-		systemContext.SystemRegistriesConfPath = envOverride
-		return
-	}
 }

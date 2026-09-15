@@ -1,13 +1,14 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package libpod
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
-	"path/filepath"
 
-	"github.com/containers/podman/v5/libpod/define"
+	"go.podman.io/podman/v6/libpod/define"
 )
 
 // Creates a new volume
@@ -29,8 +30,9 @@ func (v *Volume) teardownStorage() error {
 		return nil
 	}
 
-	// TODO: Should this be converted to use v.config.MountPoint?
-	return os.RemoveAll(filepath.Join(v.runtime.config.Engine.VolumePath, v.Name()))
+	// Remove the whole volume directory rather than v.config.MountPoint,
+	// which only points at the _data subdirectory, so no state is left behind.
+	return os.RemoveAll(v.runtime.volumePath(v.Name()))
 }
 
 // Volumes with options set, or a filesystem type, or a device to mount need to
@@ -75,6 +77,23 @@ func (v *Volume) needsMount() bool {
 	}
 	// Local driver with options other than uid,gid needs mount
 	return len(v.config.Options) > index
+}
+
+func isDirEmpty(path string) (bool, error) {
+	dir, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer dir.Close()
+
+	_, err = dir.Readdirnames(1)
+	if err == nil {
+		return false, nil
+	}
+	if errors.Is(err, io.EOF) {
+		return true, nil
+	}
+	return false, err
 }
 
 // update() updates the volume state from the DB.

@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package libpod
 
@@ -6,11 +6,11 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
-	"sync"
+	"time"
 
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/libpod/events"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/libpod/events"
 )
 
 // newEventer returns an eventer that can be used to read/write events
@@ -50,7 +50,7 @@ func (c *Container) newContainerEventWithInspectData(status events.Status, healt
 	e.Image = c.config.RootfsImageName
 	e.Type = events.Container
 	e.HealthStatus = healthCheckResult.Status
-	if c.config.HealthLogDestination == define.HealthCheckEventsLoggerDestination {
+	if c.HealthCheckLogDestination() == define.HealthCheckEventsLoggerDestination {
 		if len(healthCheckResult.Log) > 0 {
 			logData, err := json.Marshal(healthCheckResult.Log[len(healthCheckResult.Log)-1])
 			if err != nil {
@@ -80,7 +80,7 @@ func (c *Container) newContainerEventWithInspectData(status events.Status, healt
 			return nil
 		}()
 		if err != nil {
-			return fmt.Errorf("adding inspect data to container-create event: %v", err)
+			return fmt.Errorf("adding inspect data to container-create event: %w", err)
 		}
 	}
 
@@ -106,9 +106,11 @@ func (c *Container) newContainerExitedEvent(exitCode int32) {
 	intExitCode := int(exitCode)
 	e.ContainerExitCode = &intExitCode
 
-	e.Details = events.Details{
-		Attributes: c.Labels(),
+	attrs := c.Labels()
+	if c.state.OOMKilled {
+		e.OOMKilled = &c.state.OOMKilled
 	}
+	e.Details = events.Details{Attributes: attrs}
 
 	if err := c.runtime.eventer.Write(e); err != nil {
 		logrus.Errorf("Unable to write container exited event: %q", err)
@@ -124,15 +126,26 @@ func (c *Container) newExecDiedEvent(sessionID string, exitCode int) {
 	e.Type = events.Container
 	intExitCode := exitCode
 	e.ContainerExitCode = &intExitCode
-	e.Attributes = make(map[string]string)
-	e.Attributes["execID"] = sessionID
 
-	e.Details = events.Details{
-		Attributes: c.Labels(),
-	}
+	attrs := c.Labels()
+	attrs["execID"] = sessionID
+	e.Attributes = attrs
 
 	if err := c.runtime.eventer.Write(e); err != nil {
 		logrus.Errorf("Unable to write exec died event: %q", err)
+	}
+}
+
+// NewNetworkEvent creates a new event based on a network create/remove
+func (r *Runtime) NewNetworkEvent(status events.Status, netName, netID, netDriver string) {
+	e := events.NewEvent(status)
+	e.Network = netName
+	e.ID = netID
+	e.Attributes = make(map[string]string)
+	e.Attributes["driver"] = netDriver
+	e.Type = events.Network
+	if err := r.eventer.Write(e); err != nil {
+		logrus.Errorf("Unable to write network event: %q", err)
 	}
 }
 
@@ -154,6 +167,7 @@ func (p *Pod) newPodEvent(status events.Status) {
 	e.ID = p.ID()
 	e.Name = p.Name()
 	e.Type = events.Pod
+	e.Attributes = p.Labels()
 	if err := p.runtime.eventer.Write(e); err != nil {
 		logrus.Errorf("Unable to write pod event: %q", err)
 	}
@@ -174,8 +188,19 @@ func (v *Volume) newVolumeEvent(status events.Status) {
 	e := events.NewEvent(status)
 	e.Name = v.Name()
 	e.Type = events.Volume
+	e.Attributes = v.Labels()
 	if err := v.runtime.eventer.Write(e); err != nil {
 		logrus.Errorf("Unable to write volume event: %q", err)
+	}
+}
+
+// NewSecretEvent creates a new event for a libpod secret
+func (r *Runtime) NewSecretEvent(status events.Status, secretID string) {
+	e := events.NewEvent(status)
+	e.ID = secretID
+	e.Type = events.Secret
+	if err := r.eventer.Write(e); err != nil {
+		logrus.Errorf("Unable to write secret event: %q", err)
 	}
 }
 
@@ -187,7 +212,7 @@ func (r *Runtime) Events(ctx context.Context, options events.ReadOptions) error 
 
 // GetEvents reads the event log and returns events based on input filters
 func (r *Runtime) GetEvents(ctx context.Context, filters []string) ([]*events.Event, error) {
-	eventChannel := make(chan *events.Event)
+	eventChannel := make(chan events.ReadResult)
 	options := events.ReadOptions{
 		EventChannel: eventChannel,
 		Filters:      filters,
@@ -195,45 +220,21 @@ func (r *Runtime) GetEvents(ctx context.Context, filters []string) ([]*events.Ev
 		Stream:       false,
 	}
 
-	logEvents := make([]*events.Event, 0, len(eventChannel))
-	readLock := sync.Mutex{}
-	readLock.Lock()
-	go func() {
-		for e := range eventChannel {
-			logEvents = append(logEvents, e)
-		}
-		readLock.Unlock()
-	}()
-
-	readErr := r.eventer.Read(ctx, options)
-	readLock.Lock() // Wait for the events to be consumed.
-	return logEvents, readErr
-}
-
-// GetLastContainerEvent takes a container name or ID and an event status and returns
-// the last occurrence of the container event
-func (r *Runtime) GetLastContainerEvent(ctx context.Context, nameOrID string, containerEvent events.Status) (*events.Event, error) {
-	// FIXME: events should be read in reverse order!
-	// https://github.com/containers/podman/issues/14579
-
-	// check to make sure the event.Status is valid
-	if _, err := events.StringToStatus(containerEvent.String()); err != nil {
-		return nil, err
-	}
-	filters := []string{
-		fmt.Sprintf("container=%s", nameOrID),
-		fmt.Sprintf("event=%s", containerEvent),
-		"type=container",
-	}
-	containerEvents, err := r.GetEvents(ctx, filters)
+	err := r.eventer.Read(ctx, options)
 	if err != nil {
 		return nil, err
 	}
-	if len(containerEvents) < 1 {
-		return nil, fmt.Errorf("%s not found: %w", containerEvent.String(), events.ErrEventNotFound)
+
+	logEvents := make([]*events.Event, 0, len(eventChannel))
+	for evt := range eventChannel {
+		// we ignore any error here, this is only used on the backup
+		// GetExecDiedEvent() died path as best effort anyway
+		if evt.Error == nil {
+			logEvents = append(logEvents, evt.Event)
+		}
 	}
-	// return the last element in the slice
-	return containerEvents[len(containerEvents)-1], nil
+
+	return logEvents, nil
 }
 
 // GetExecDiedEvent takes a container name or ID, exec session ID, and returns
@@ -256,4 +257,33 @@ func (r *Runtime) GetExecDiedEvent(ctx context.Context, nameOrID, execSessionID 
 		return nil, fmt.Errorf("exec died event for session %s (container %s) not found: %w", execSessionID, nameOrID, events.ErrEventNotFound)
 	}
 	return containerEvents[len(containerEvents)-1], nil
+}
+
+// spawnEventForwarder starts a goroutine that reads events from the given channel, transforms and forwards them to the eventer.
+func spawnEventForwarder[T any](eventer events.Eventer, toLibpodEvent func(libEvent T) events.Event, eventChannel <-chan T, shutdownChan chan bool) {
+	go func() {
+		sawShutdown := false
+		for {
+			// Make sure to read and write all events before
+			// shutting down.
+			for len(eventChannel) > 0 {
+				libEvent := <-eventChannel
+				libpodEvent := toLibpodEvent(libEvent)
+				if err := eventer.Write(libpodEvent); err != nil {
+					logrus.Errorf("Unable to write event of type %T: %q", libEvent, err)
+				}
+			}
+
+			if sawShutdown {
+				close(shutdownChan)
+				return
+			}
+
+			select {
+			case <-shutdownChan:
+				sawShutdown = true
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+	}()
 }

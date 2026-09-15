@@ -1,19 +1,15 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package libpod
 
 import (
-	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
 
 func Test_generateName(t *testing.T) {
-	state, path, _, err := getEmptyBoltState()
-	assert.NoError(t, err)
-	defer os.RemoveAll(path)
-	defer state.Close()
+	state, _ := getEmptySqliteState(t)
 
 	r := &Runtime{
 		state: state,

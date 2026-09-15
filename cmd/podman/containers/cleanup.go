@@ -4,14 +4,14 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/utils"
-	"github.com/containers/podman/v5/cmd/podman/validate"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/utils"
+	"go.podman.io/podman/v6/cmd/podman/validate"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 var (
@@ -31,13 +31,11 @@ var (
 		},
 		ValidArgsFunction: common.AutocompleteContainersExited,
 		Example: `podman container cleanup ctrID1 ctrID2 ctrID3
-  podman container cleanup --all`,
+podman container cleanup --all`,
 	}
 )
 
-var (
-	cleanupOptions entities.ContainerCleanupOptions
-)
+var cleanupOptions entities.ContainerCleanupOptions
 
 func init() {
 	registry.Commands = append(registry.Commands, registry.CliCommand{
@@ -61,10 +59,8 @@ func init() {
 	validate.AddLatestFlag(cleanupCommand, &cleanupOptions.Latest)
 }
 
-func cleanup(cmd *cobra.Command, args []string) error {
-	var (
-		errs utils.OutputErrors
-	)
+func cleanup(_ *cobra.Command, args []string) error {
+	var errs utils.OutputErrors
 
 	if cleanupOptions.Exec != "" {
 		switch {
@@ -77,7 +73,7 @@ func cleanup(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	responses, err := registry.ContainerEngine().ContainerCleanup(registry.GetContext(), args, cleanupOptions)
+	responses, err := registry.ContainerEngine().ContainerCleanup(registry.Context(), args, cleanupOptions)
 	if err != nil {
 		// `podman container cleanup` is almost always run in the
 		// background. Our only way of relaying information to the user

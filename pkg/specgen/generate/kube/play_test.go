@@ -8,15 +8,16 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/containers/common/pkg/secrets"
-	"github.com/containers/podman/v5/libpod/define"
-	v1 "github.com/containers/podman/v5/pkg/k8s.io/api/core/v1"
-	"github.com/containers/podman/v5/pkg/k8s.io/apimachinery/pkg/api/resource"
-	v12 "github.com/containers/podman/v5/pkg/k8s.io/apimachinery/pkg/apis/meta/v1"
-	"github.com/containers/podman/v5/pkg/k8s.io/apimachinery/pkg/util/intstr"
-	"github.com/containers/podman/v5/pkg/specgen"
-	"github.com/docker/docker/pkg/meminfo"
+	spec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/stretchr/testify/assert"
+	"go.podman.io/common/pkg/secrets"
+	"go.podman.io/podman/v6/libpod/define"
+	v1 "go.podman.io/podman/v6/pkg/k8s.io/api/core/v1"
+	"go.podman.io/podman/v6/pkg/k8s.io/apimachinery/pkg/api/resource"
+	v12 "go.podman.io/podman/v6/pkg/k8s.io/apimachinery/pkg/apis/meta/v1"
+	"go.podman.io/podman/v6/pkg/k8s.io/apimachinery/pkg/util/intstr"
+	"go.podman.io/podman/v6/pkg/specgen"
+	"go.podman.io/storage/pkg/system"
 	"sigs.k8s.io/yaml"
 )
 
@@ -446,8 +447,8 @@ func TestEnvVarValue(t *testing.T) {
 	secretsManager := createSecrets(t, d)
 	stringNumCPUs := strconv.Itoa(runtime.NumCPU())
 
-	mi, err := meminfo.Read()
-	assert.Nil(t, err)
+	mi, err := system.ReadMemInfo()
+	assert.NoError(t, err)
 	stringMemTotal := strconv.FormatInt(mi.MemTotal, 10)
 
 	tests := []struct {
@@ -1396,6 +1397,70 @@ func TestTCPLivenessProbe(t *testing.T) {
 				assert.Equal(t, int(test.specGenerator.ContainerHealthCheckConfig.HealthCheckOnFailureAction), define.HealthCheckOnFailureActionRestart)
 				assert.Contains(t, test.specGenerator.ContainerHealthCheckConfig.HealthConfig.Test, test.expectedHost)
 				assert.Contains(t, test.specGenerator.ContainerHealthCheckConfig.HealthConfig.Test, test.expectedPort)
+			}
+		})
+	}
+}
+
+func TestDeviceResource(t *testing.T) {
+	tests := []struct {
+		name          string
+		specGenerator specgen.SpecGenerator
+		container     v1.Container
+		succeed       bool
+		devices       []spec.LinuxDevice
+	}{
+		{
+			"ParseQualifiedCDI",
+			specgen.SpecGenerator{},
+			v1.Container{
+				Resources: v1.ResourceRequirements{
+					Limits: v1.ResourceList{
+						"nvidia.com/gpu=0": resource.MustParse("1"),
+					},
+				},
+			},
+			true,
+			[]spec.LinuxDevice{
+				{Path: "nvidia.com/gpu=0"},
+			},
+		},
+		{
+			"ParsePodmanDeviceResource",
+			specgen.SpecGenerator{},
+			v1.Container{
+				Resources: v1.ResourceRequirements{
+					Requests: v1.ResourceList{
+						"podman.io/device=/dev/kmsg": resource.MustParse("1"),
+					},
+				},
+			},
+			true,
+			[]spec.LinuxDevice{
+				{Path: "/dev/kmsg"},
+			},
+		},
+		{
+			"InvalidCDI",
+			specgen.SpecGenerator{},
+			v1.Container{
+				Resources: v1.ResourceRequirements{
+					Limits: v1.ResourceList{
+						"foobar.net/class=///": resource.MustParse("1"),
+					},
+				},
+			},
+			false,
+			[]spec.LinuxDevice{},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := setupContainerDevices(&test.specGenerator, test.container)
+			assert.Equal(t, err == nil, test.succeed)
+			if err == nil {
+				assert.Equal(t, test.specGenerator.Devices, test.devices)
 			}
 		})
 	}

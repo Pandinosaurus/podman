@@ -12,11 +12,11 @@ import (
 	"strings"
 	"text/template"
 
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/pkg/errorhandling"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/pkg/errorhandling"
 )
 
 var composeCommand = &cobra.Command{
@@ -26,11 +26,11 @@ var composeCommand = &cobra.Command{
 
 The default compose providers are docker-compose and podman-compose.  If installed, docker-compose takes precedence since it is the original implementation of the Compose specification and is widely used on the supported platforms (i.e., Linux, Mac OS, Windows).
 
-If you want to change the default behavior or have a custom installation path for your provider of choice, please change the compose_provider field in containers.conf(5).  You may also set PODMAN_COMPOSE_PROVIDER environment variable.`,
+If you want to change the default behavior or have a custom installation path for your provider of choice, please change the compose_providers field in the ` + "`[engine]`" + ` table of containers.conf(5) to compose_providers = ["/path/to/provider"]. You may also set the PODMAN_COMPOSE_PROVIDER environment variable.`,
 	RunE:              composeMain,
 	ValidArgsFunction: composeCompletion,
 	Example: `podman compose -f nginx.yaml up --detach
-  podman --log-level=debug compose -f many-images.yaml pull`,
+podman --log-level=debug compose -f many-images.yaml pull`,
 	DisableFlagParsing: true,
 	Annotations:        map[string]string{registry.ParentNSRequired: ""}, // don't join user NS for SSH to work correctly
 }
@@ -44,7 +44,7 @@ func init() {
 	registry.Commands = append(registry.Commands, registry.CliCommand{Command: composeCommand})
 }
 
-func composeCompletion(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+func composeCompletion(_ *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 	var stdout strings.Builder
 
 	args = append(args, toComplete)
@@ -92,7 +92,7 @@ func composeProvider() (string, error) {
 		lookupErrors = append(lookupErrors, err)
 	}
 
-	return "", fmt.Errorf("looking up compose provider failed\n%v", errorhandling.JoinErrors(lookupErrors))
+	return "", fmt.Errorf("looking up compose provider failed\n%w", errorhandling.JoinErrors(lookupErrors))
 }
 
 // composeDockerHost returns the value to be set in the DOCKER_HOST environment
@@ -219,7 +219,7 @@ func composeProviderExec(args []string, stdout io.Writer, stderr io.Writer, warn
 
 	if err := cmd.Run(); err != nil {
 		// Make sure podman returns with the same exit code as the compose provider.
-		if exitErr, isExit := err.(*exec.ExitError); isExit {
+		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
 			registry.SetExitCode(exitErr.ExitCode())
 		}
 		// Format the error to make it explicit that error did not come
@@ -254,7 +254,7 @@ func composeMain(cmd *cobra.Command, args []string) error {
 	// after `podman compose [ARGS]` are passed to the compose provider.
 	// For now, we only look for the --help flag.
 	fs := pflag.NewFlagSet("args", pflag.ContinueOnError)
-	fs.ParseErrorsWhitelist.UnknownFlags = true
+	fs.ParseErrorsAllowlist.UnknownFlags = true
 	fs.SetInterspersed(false)
 	fs.BoolP("help", "h", false, "")
 	if err := fs.Parse(args); err != nil {

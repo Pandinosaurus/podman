@@ -8,18 +8,19 @@ import (
 	"os"
 	"strings"
 
-	"github.com/containers/buildah/pkg/volumes"
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/validate"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"go.podman.io/buildah/pkg/volumes"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/validate"
 )
 
 var (
 	systemResetDescription = `Reset podman storage back to default state
 
   All containers will be stopped and removed, and all images, volumes, networks and container content will be removed.
+  This command does not restart podman.service and podman.socket systemd units. You may need to manually restart it after running this command.
 `
 	systemResetCommand = &cobra.Command{
 		Annotations:       map[string]string{registry.EngineMode: registry.ABIMode},
@@ -43,7 +44,7 @@ func init() {
 	flags.BoolVarP(&forceFlag, "force", "f", false, "Do not prompt for confirmation")
 }
 
-func reset(cmd *cobra.Command, args []string) {
+func reset(_ *cobra.Command, _ []string) {
 	// Get all the external containers in use
 	listCtn, err := registry.ContainerEngine().ContainerListExternal(registry.Context())
 	if err != nil {

@@ -3,14 +3,14 @@
 package system
 
 import (
-	"github.com/containers/podman/v5/pkg/machine/connection"
-	"github.com/containers/podman/v5/pkg/machine/define"
-	"github.com/containers/podman/v5/pkg/machine/env"
-	p "github.com/containers/podman/v5/pkg/machine/provider"
-	"github.com/containers/podman/v5/pkg/machine/shim"
-	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
-	"github.com/containers/podman/v5/utils"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/podman/v6/pkg/machine/connection"
+	"go.podman.io/podman/v6/pkg/machine/define"
+	"go.podman.io/podman/v6/pkg/machine/env"
+	p "go.podman.io/podman/v6/pkg/machine/provider"
+	"go.podman.io/podman/v6/pkg/machine/shim"
+	"go.podman.io/podman/v6/pkg/machine/vmconfigs"
+	"go.podman.io/podman/v6/utils"
 )
 
 func resetMachine() error {
@@ -42,7 +42,7 @@ func resetMachine() error {
 		}
 
 		if state == define.Running {
-			if err := shim.Stop(mc, provider, dirs, true); err != nil {
+			if err := shim.Stop(mc, provider, true); err != nil {
 				logrus.Errorf("unable to stop running machine %s: %q", mc.Name, err)
 			}
 		}
@@ -67,7 +67,7 @@ func resetMachine() error {
 		logrus.Errorf("unable to remove machine data dir %q: %q", dirs.DataDir.GetPath(), err)
 	}
 
-	if err := utils.GuardedRemoveAll(dirs.RuntimeDir.GetPath()); err != nil {
+	if err := utils.RemoveFilesExcept(dirs.RuntimeDir.GetPath(), "podman.sock"); err != nil {
 		logrus.Errorf("unable to remove machine runtime dir %q: %q", dirs.RuntimeDir.GetPath(), err)
 	}
 

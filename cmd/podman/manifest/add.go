@@ -7,15 +7,15 @@ import (
 	"os"
 	"strings"
 
-	"github.com/containers/common/pkg/auth"
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/image/v5/types"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/util"
 	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/auth"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/util"
 )
 
 // manifestAddOptsWrapper wraps entities.ManifestAddOptions and prevents
@@ -42,7 +42,7 @@ var (
 		Args:              cobra.MinimumNArgs(2),
 		ValidArgsFunction: common.AutocompleteImages,
 		Example: `podman manifest add mylist:v1.11 image:v1.11-amd64
-  podman manifest add mylist:v1.11 transport:imageName`,
+podman manifest add mylist:v1.11 transport:imageName`,
 	}
 )
 
@@ -179,7 +179,7 @@ func add(cmd *cobra.Command, args []string) error {
 		if manifestAddOpts.artifactConfigFile != "" {
 			configBytes, err := os.ReadFile(manifestAddOpts.artifactConfigFile)
 			if err != nil {
-				return fmt.Errorf("%v", err)
+				return err
 			}
 			manifestAddOpts.artifactOptions.Config = string(configBytes)
 		}

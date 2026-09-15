@@ -1,6 +1,7 @@
 package containers
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"os"
@@ -9,18 +10,17 @@ import (
 	"strings"
 	"time"
 
-	tm "github.com/buger/goterm"
-	"github.com/containers/common/libnetwork/types"
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/common/pkg/report"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/utils"
-	"github.com/containers/podman/v5/cmd/podman/validate"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/docker/go-units"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/libnetwork/types"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/common/pkg/report"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/utils"
+	"go.podman.io/podman/v6/cmd/podman/validate"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 var (
@@ -33,8 +33,8 @@ var (
 		Args:              validate.NoArgs,
 		ValidArgsFunction: completion.AutocompleteNone,
 		Example: `podman ps -a
-  podman ps -a --format "{{.ID}}  {{.Image}}  {{.Labels}}  {{.Mounts}}"
-  podman ps --size --sort names`,
+podman ps -a --format "{{.ID}}  {{.Image}}  {{.Labels}}  {{.Mounts}}"
+podman ps --size --sort names`,
 	}
 
 	psContainerCommand = &cobra.Command{
@@ -47,6 +47,7 @@ var (
 		Example:           strings.ReplaceAll(psCommand.Example, "podman ps", "podman container ps"),
 	}
 )
+
 var (
 	listOpts = entities.ContainerListOptions{
 		Filters: make(map[string][]string),
@@ -107,6 +108,7 @@ func listFlagSet(cmd *cobra.Command) {
 
 	flags.SetNormalizeFunc(utils.AliasFlags)
 }
+
 func checkFlags(c *cobra.Command) error {
 	// latest, and last are mutually exclusive.
 	if listOpts.Last >= 0 && listOpts.Latest {
@@ -143,7 +145,7 @@ func jsonOut(responses []entities.ListContainer) error {
 		entities.ListContainer
 		Created int64
 	}
-	r := make([]jsonFormat, 0)
+	r := make([]jsonFormat, 0, len(responses))
 	for _, con := range responses {
 		con.CreatedAt = units.HumanDuration(time.Since(con.Created)) + " ago"
 		con.Status = psReporter{con}.Status()
@@ -172,7 +174,7 @@ func quietOut(responses []entities.ListContainer) {
 }
 
 func getResponses() ([]entities.ListContainer, error) {
-	responses, err := registry.ContainerEngine().ContainerList(registry.GetContext(), listOpts)
+	responses, err := registry.ContainerEngine().ContainerList(registry.Context(), listOpts)
 	if err != nil {
 		return nil, err
 	}
@@ -266,9 +268,7 @@ func ps(cmd *cobra.Command, _ []string) error {
 				responses = append(responses, psReporter{r})
 			}
 
-			tm.Clear()
-			tm.MoveCursor(1, 1)
-			tm.Flush()
+			common.ClearScreen()
 
 			if err := headers(); err != nil {
 				return err
@@ -342,7 +342,13 @@ func (l psReporter) ImageID() string {
 	return l.ListContainer.ImageID
 }
 
-// Labels returns a map of the pod's labels
+// Labels returns the container's labels as a sorted, comma-separated list of
+// key=value pairs, matching Docker CLI output format.
+func (l psReporter) Labels() string {
+	return common.FormatLabels(l.ListContainer.Labels)
+}
+
+// Label returns the value of a single container label by name.
 func (l psReporter) Label(name string) string {
 	return l.ListContainer.Labels[name]
 }
@@ -376,12 +382,9 @@ func (l psReporter) Status() string {
 		state = fmt.Sprintf("Exited (%d) %s ago", l.ExitCode, t)
 	default:
 		// Need to capitalize the first letter to match Docker.
-
-		// strings.Title is deprecated since go 1.18
-		// However for our use case it is still fine. The recommended replacement
-		// is adding about 400kb binary size so let's keep using this for now.
-		//nolint:staticcheck
-		state = strings.Title(l.ListContainer.State)
+		if s := l.ListContainer.State; len(s) > 0 {
+			state = strings.ToUpper(s[:1]) + s[1:]
+		}
 	}
 	hc := l.ListContainer.Status
 	if hc != "" {
@@ -491,40 +494,84 @@ func portsToString(ports []types.PortMapping, exposedPorts map[uint16][]string) 
 	if len(ports) == 0 && len(exposedPorts) == 0 {
 		return ""
 	}
+	portMap := make(map[string]struct{})
+
 	sb := &strings.Builder{}
 	for _, port := range ports {
 		hostIP := port.HostIP
 		if hostIP == "" {
 			hostIP = "0.0.0.0"
 		}
-		protocols := strings.Split(port.Protocol, ",")
-		for _, protocol := range protocols {
-			if port.Range > 1 {
-				fmt.Fprintf(sb, "%s:%d-%d->%d-%d/%s, ",
-					hostIP, port.HostPort, port.HostPort+port.Range-1,
-					port.ContainerPort, port.ContainerPort+port.Range-1, protocol)
-			} else {
-				fmt.Fprintf(sb, "%s:%d->%d/%s, ",
-					hostIP, port.HostPort,
-					port.ContainerPort, protocol)
+		if port.Range > 1 {
+			fmt.Fprintf(sb, "%s:%d-%d->%d-%d/%s, ",
+				hostIP, port.HostPort, port.HostPort+port.Range-1,
+				port.ContainerPort, port.ContainerPort+port.Range-1, port.Protocol)
+			for i := range port.Range {
+				portMap[fmt.Sprintf("%d/%s", port.ContainerPort+i, port.Protocol)] = struct{}{}
 			}
+		} else {
+			fmt.Fprintf(sb, "%s:%d->%d/%s, ",
+				hostIP, port.HostPort,
+				port.ContainerPort, port.Protocol)
+			portMap[fmt.Sprintf("%d/%s", port.ContainerPort, port.Protocol)] = struct{}{}
 		}
 	}
 
-	// iterating a map is not deterministic so let's convert slice first and sort by port to make it deterministic
-	sortedPorts := make([]uint16, 0, len(exposedPorts))
-	for port := range exposedPorts {
-		sortedPorts = append(sortedPorts, port)
-	}
-	slices.Sort(sortedPorts)
-	for _, port := range sortedPorts {
-		for _, protocol := range exposedPorts[port] {
-			// exposed ports do not have a host part and are just written as "NUM/PROTO"
-			fmt.Fprintf(sb, "%d/%s, ", port, protocol)
+	// iterating a map is not deterministic so let's convert slice first and sort by protocol and port to make it deterministic
+	sortedPorts := make([]exposedPort, 0, len(exposedPorts))
+	for port, protocols := range exposedPorts {
+		for _, proto := range protocols {
+			sortedPorts = append(sortedPorts, exposedPort{num: port, protocol: proto})
 		}
+	}
+	slices.SortFunc(sortedPorts, func(a, b exposedPort) int {
+		protoCmp := cmp.Compare(a.protocol, b.protocol)
+		if protoCmp != 0 {
+			return protoCmp
+		}
+		return cmp.Compare(a.num, b.num)
+	})
+
+	var prevPort *exposedPort
+	for _, port := range sortedPorts {
+		// only if it was not published already so we do not have duplicates
+		if _, ok := portMap[fmt.Sprintf("%d/%s", port.num, port.protocol)]; ok {
+			continue
+		}
+
+		if prevPort != nil {
+			// if the prevPort is one below us we know it is a range, do not print it and just increase the range by one
+			if prevPort.protocol == port.protocol && prevPort.num == port.num-prevPort.portRange-1 {
+				prevPort.portRange++
+				continue
+			}
+			// the new port is not a range with the previous one so print it
+			printExposedPort(prevPort, sb)
+		}
+		prevPort = &port
+	}
+	// do not forget to print the last port
+	if prevPort != nil {
+		printExposedPort(prevPort, sb)
 	}
 
 	display := sb.String()
 	// make sure to trim the last ", " of the string
 	return display[:len(display)-2]
+}
+
+type exposedPort struct {
+	num      uint16
+	protocol string
+	// portRange is 0 indexed
+	portRange uint16
+}
+
+func printExposedPort(port *exposedPort, sb *strings.Builder) {
+	// exposed ports do not have a host part and are just written as "NUM[-RANGE]/PROTO"
+	if port.portRange > 0 {
+		fmt.Fprintf(sb, "%d-%d/%s, ", port.num, port.num+port.portRange, port.protocol)
+	} else {
+		fmt.Fprintf(sb, "%d/%s, ", port.num, port.protocol)
+	}
 }

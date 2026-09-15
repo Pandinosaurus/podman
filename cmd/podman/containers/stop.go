@@ -7,13 +7,13 @@ import (
 	"os"
 	"strings"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/utils"
-	"github.com/containers/podman/v5/cmd/podman/validate"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/utils"
+	"go.podman.io/podman/v6/cmd/podman/validate"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 var (
@@ -30,7 +30,7 @@ var (
 		},
 		ValidArgsFunction: common.AutocompleteContainersRunning,
 		Example: `podman stop ctrID
-  podman stop --time 2 mywebserver 6e534f14da9d`,
+podman stop --time 2 mywebserver 6e534f14da9d`,
 	}
 
 	containerStopCommand = &cobra.Command{
@@ -43,7 +43,7 @@ var (
 		},
 		ValidArgsFunction: stopCommand.ValidArgsFunction,
 		Example: `podman container stop ctrID
-  podman container stop --time 2 mywebserver 6e534f14da9d`,
+podman container stop --time 2 mywebserver 6e534f14da9d`,
 	}
 )
 
@@ -51,8 +51,9 @@ var (
 	stopOptions = entities.StopOptions{
 		Filters: make(map[string][]string),
 	}
-	stopCidFiles = []string{}
-	stopTimeout  int
+	stopCidFiles  = []string{}
+	stopTimeout   int
+	stopAsService bool
 )
 
 func stopFlags(cmd *cobra.Command) {
@@ -72,6 +73,10 @@ func stopFlags(cmd *cobra.Command) {
 	filterFlagName := "filter"
 	flags.StringArrayVarP(&filters, filterFlagName, "f", []string{}, "Filter output based on conditions given")
 	_ = cmd.RegisterFlagCompletionFunc(filterFlagName, common.AutocompletePsFilters)
+
+	serviceFlagName := "service"
+	flags.BoolVar(&stopAsService, serviceFlagName, false, "Stop as service (do not mark as stopped by user)")
+	_ = flags.MarkHidden(serviceFlagName)
 
 	if registry.IsRemote() {
 		_ = flags.MarkHidden("cidfile")
@@ -97,9 +102,11 @@ func init() {
 }
 
 func stop(cmd *cobra.Command, args []string) error {
-	var (
-		errs utils.OutputErrors
-	)
+	if registry.IsRemote() && stopAsService {
+		return fmt.Errorf("--service is not supported on remote connections")
+	}
+
+	var errs utils.OutputErrors
 	args = utils.RemoveSlash(args)
 
 	if cmd.Flag("time").Changed {
@@ -114,7 +121,7 @@ func stop(cmd *cobra.Command, args []string) error {
 			}
 			return fmt.Errorf("reading CIDFile: %w", err)
 		}
-		id := strings.Split(string(content), "\n")[0]
+		id, _, _ := strings.Cut(string(content), "\n")
 		args = append(args, id)
 	}
 
@@ -126,7 +133,15 @@ func stop(cmd *cobra.Command, args []string) error {
 		stopOptions.Filters[fname] = append(stopOptions.Filters[fname], filter)
 	}
 
-	responses, err := registry.ContainerEngine().ContainerStop(context.Background(), args, stopOptions)
+	var (
+		responses []*entities.StopReport
+		err       error
+	)
+	if stopAsService {
+		responses, err = registry.ContainerEngine().ContainerStopService(context.Background(), args, stopOptions)
+	} else {
+		responses, err = registry.ContainerEngine().ContainerStop(context.Background(), args, stopOptions)
+	}
 	if err != nil {
 		return err
 	}

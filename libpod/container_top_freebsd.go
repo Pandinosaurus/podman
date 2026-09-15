@@ -10,10 +10,10 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/util"
 	"github.com/google/shlex"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/util"
 )
 
 var isDescriptor = map[string]bool{}
@@ -57,7 +57,7 @@ func (c *Container) Top(descriptors []string) ([]string, error) {
 		}
 	}
 	if supportedDescriptors {
-		descriptors = []string{"-ao", strings.Join(descriptors, ",")}
+		descriptors = []string{"-o", strings.Join(descriptors, ",")}
 	}
 
 	// Note that the descriptors to ps(1) must be shlexed (see #12452).
@@ -79,11 +79,7 @@ func (c *Container) Top(descriptors []string) ([]string, error) {
 		return nil, fmt.Errorf("getting jail name: %w", err)
 	}
 
-	args := []string{
-		"-J",
-		jailName,
-	}
-	args = append(args, psDescriptors...)
+	args := append([]string{"-J", jailName}, psDescriptors...)
 
 	output, err := execPS(args)
 	if err != nil {

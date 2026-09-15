@@ -3,30 +3,30 @@ package e2e_test
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
-	"github.com/containers/podman/v5/pkg/machine"
-	"github.com/containers/podman/v5/pkg/machine/define"
-	"github.com/containers/storage/pkg/stringid"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/format"
 	. "github.com/onsi/gomega/gexec"
 	"github.com/onsi/gomega/types"
+	"go.podman.io/podman/v6/pkg/machine"
+	"go.podman.io/podman/v6/pkg/machine/define"
+	"go.podman.io/storage/pkg/stringid"
 )
 
 var originalHomeDir = os.Getenv("HOME")
 
 const (
-	defaultTimeout = 10 * time.Minute
+	defaultTimeout = 3 * time.Minute
 )
 
 type machineCommand interface {
@@ -45,12 +45,12 @@ type machineSession struct {
 
 type machineTestBuilder struct {
 	cmd          []string
+	stdin        io.Reader
 	imagePath    string
 	name         string
 	names        []string
 	podmanBinary string
 	timeout      time.Duration
-	isInit       bool
 }
 
 // waitWithTimeout waits for a command to complete for a given
@@ -75,7 +75,7 @@ func (ms *machineSession) Bytes() []byte {
 func (ms *machineSession) outputToStringSlice() []string {
 	var results []string
 	output := string(ms.Out.Contents())
-	for _, line := range strings.Split(output, "\n") {
+	for line := range strings.SplitSeq(output, "\n") {
 		if line != "" {
 			results = append(results, line)
 		}
@@ -141,24 +141,22 @@ func (m *machineTestBuilder) setCmd(mc machineCommand) *machineTestBuilder {
 		m.names = append(m.names, m.name)
 	}
 	m.cmd = mc.buildCmd(m)
-
-	_, ok := mc.(*initMachine)
-	m.isInit = ok
-
+	m.stdin = nil
 	return m
 }
 
-func (m *machineTestBuilder) setTimeout(timeout time.Duration) *machineTestBuilder { //nolint: unparam
-	m.timeout = timeout
+// setStdin sets the stdin for the next command to be run
+func (m *machineTestBuilder) setStdin(data io.Reader) *machineTestBuilder {
+	m.stdin = data
 	return m
 }
 
-// toQemuInspectInfo is only for inspecting qemu machines.  Other providers will need
+// toInspectInfo is only for inspecting qemu machines.  Other providers will need
 // to make their own.
-func (m *machineTestBuilder) toQemuInspectInfo() ([]machine.InspectInfo, int, error) {
+func (m *machineTestBuilder) toInspectInfo() ([]machine.InspectInfo, int, error) {
 	args := []string{"machine", "inspect"}
 	args = append(args, m.names...)
-	session, err := runWrapper(m.podmanBinary, args, defaultTimeout, true)
+	session, err := runWrapper(m.podmanBinary, args, nil, defaultTimeout, true)
 	if err != nil {
 		return nil, -1, err
 	}
@@ -168,41 +166,24 @@ func (m *machineTestBuilder) toQemuInspectInfo() ([]machine.InspectInfo, int, er
 }
 
 func (m *machineTestBuilder) runWithoutWait() (*machineSession, error) {
-	return runWrapper(m.podmanBinary, m.cmd, m.timeout, false)
+	return runWrapper(m.podmanBinary, m.cmd, m.stdin, m.timeout, false)
 }
 
 func (m *machineTestBuilder) run() (*machineSession, error) {
-	s, err := runWrapper(m.podmanBinary, m.cmd, m.timeout, true)
-	// debug for the slow init on macos
-	// The image file is not consistent, sometimes it is sparse sometimes not.
-	if m.isInit && runtime.GOOS == "darwin" {
-		c := exec.Command("du", "-ah", filepath.Join(os.Getenv("HOME"), ".local/share/containers/podman/machine/applehv"))
-		c.Stderr = os.Stderr
-		c.Stdout = os.Stdout
-		GinkgoWriter.Println(c.Args)
-		_ = c.Run()
-
-		c = exec.Command("ls", "-lh", filepath.Join(os.Getenv("HOME"), ".local/share/containers/podman/machine/applehv"))
-		c.Stderr = os.Stderr
-		c.Stdout = os.Stdout
-		GinkgoWriter.Println(c.Args)
-		_ = c.Run()
-
-		c = exec.Command("stat", filepath.Join(os.Getenv("HOME"), ".local/share/containers/podman/machine/applehv", m.name+"-arm64.raw"))
-		c.Stderr = os.Stderr
-		c.Stdout = os.Stdout
-		GinkgoWriter.Println(c.Args)
-		_ = c.Run()
-	}
+	s, err := runWrapper(m.podmanBinary, m.cmd, m.stdin, m.timeout, true)
 	return s, err
 }
 
-func runWrapper(podmanBinary string, cmdArgs []string, timeout time.Duration, wait bool) (*machineSession, error) {
+func runWrapper(podmanBinary string, cmdArgs []string, stdinData io.Reader, timeout time.Duration, wait bool) (*machineSession, error) {
 	if len(os.Getenv("DEBUG")) > 0 {
 		cmdArgs = append([]string{"--log-level=debug"}, cmdArgs...)
 	}
 	GinkgoWriter.Println(podmanBinary + " " + strings.Join(cmdArgs, " "))
 	c := exec.Command(podmanBinary, cmdArgs...)
+	if stdinData != nil {
+		c.Stdin = stdinData
+	}
+
 	session, err := Start(c, GinkgoWriter, GinkgoWriter)
 	if err != nil {
 		Fail(fmt.Sprintf("Unable to start session: %q", err))
@@ -228,24 +209,24 @@ func BeValidJSON() *ValidJSONMatcher {
 	return &ValidJSONMatcher{}
 }
 
-func (matcher *ValidJSONMatcher) Match(actual interface{}) (success bool, err error) {
+func (matcher *ValidJSONMatcher) Match(actual any) (success bool, err error) {
 	s, ok := actual.(string)
 	if !ok {
 		return false, fmt.Errorf("ValidJSONMatcher expects a string, not %q", actual)
 	}
 
-	var i interface{}
+	var i any
 	if err := json.Unmarshal([]byte(s), &i); err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
-func (matcher *ValidJSONMatcher) FailureMessage(actual interface{}) (message string) {
+func (matcher *ValidJSONMatcher) FailureMessage(actual any) (message string) {
 	return format.Message(actual, "to be valid JSON")
 }
 
-func (matcher *ValidJSONMatcher) NegatedFailureMessage(actual interface{}) (message string) {
+func (matcher *ValidJSONMatcher) NegatedFailureMessage(actual any) (message string) {
 	return format.Message(actual, "to _not_ be valid JSON")
 }
 
@@ -272,22 +253,4 @@ func isVmtype(vmType define.VMType) bool {
 // isWSL is a simple wrapper to determine if the testprovider is WSL
 func isWSL() bool {
 	return isVmtype(define.WSLVirt)
-}
-
-// Only used on Windows
-//
-//nolint:unparam,unused
-func runSystemCommand(binary string, cmdArgs []string, timeout time.Duration, wait bool) (*machineSession, error) {
-	GinkgoWriter.Println(binary + " " + strings.Join(cmdArgs, " "))
-	c := exec.Command(binary, cmdArgs...)
-	session, err := Start(c, GinkgoWriter, GinkgoWriter)
-	if err != nil {
-		Fail(fmt.Sprintf("Unable to start session: %q", err))
-		return nil, err
-	}
-	ms := machineSession{session}
-	if wait {
-		ms.waitWithTimeout(timeout)
-	}
-	return &ms, nil
 }

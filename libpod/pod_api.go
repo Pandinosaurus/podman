@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package libpod
 
@@ -6,14 +6,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"sort"
+	"strings"
 
-	"github.com/containers/common/pkg/cgroups"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/libpod/events"
-	"github.com/containers/podman/v5/pkg/parallel"
-	"github.com/containers/podman/v5/pkg/rootless"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/libpod/events"
+	"go.podman.io/podman/v6/pkg/parallel"
 )
 
 // startInitContainers starts a pod's init containers.
@@ -24,7 +25,7 @@ func (p *Pod) startInitContainers(ctx context.Context) error {
 	}
 	// Now iterate init containers
 	for _, initCon := range initCtrs {
-		if err := initCon.Start(ctx, true); err != nil {
+		if err := initCon.startNoPodLock(ctx, true); err != nil {
 			return err
 		}
 		// Check that the init container waited correctly and the exit
@@ -156,50 +157,43 @@ func (p *Pod) stopWithTimeout(ctx context.Context, cleanup bool, timeout int) (m
 		return nil, err
 	}
 
-	// Stopping pods is not ordered by dependency. We haven't seen any case
-	// where this would actually matter.
-
-	ctrErrChan := make(map[string]<-chan error)
-
-	// Enqueue a function for each container with the parallel executor.
-	for _, ctr := range allCtrs {
-		c := ctr
-		logrus.Debugf("Adding parallel job to stop container %s", c.ID())
-		retChan := parallel.Enqueue(ctx, func() error {
-			// Can't batch these without forcing Stop() to hold the
-			// lock for the full duration of the timeout.
-			// We probably don't want to do that.
-			var err error
-			if timeout > -1 {
-				err = c.StopWithTimeout(uint(timeout))
-			} else {
-				err = c.Stop()
-			}
-			if err != nil && !errors.Is(err, define.ErrCtrStateInvalid) && !errors.Is(err, define.ErrCtrStopped) {
-				return err
-			}
-
-			if cleanup {
-				err := c.Cleanup(ctx, false)
-				if err != nil && !errors.Is(err, define.ErrCtrStateInvalid) && !errors.Is(err, define.ErrCtrStopped) {
-					return err
-				}
-			}
-
-			return nil
-		})
-
-		ctrErrChan[c.ID()] = retChan
-	}
-
 	p.newPodEvent(events.Stop)
 
-	ctrErrors := make(map[string]error)
+	var ctrErrors map[string]error
 
-	// Get returned error for every container we worked on
-	for id, channel := range ctrErrChan {
-		if err := <-channel; err != nil {
-			ctrErrors[id] = err
+	// Try and generate a graph of the pod for ordered stop.
+	graph, err := BuildContainerGraph(allCtrs)
+	if err != nil {
+		// Can't do an ordered stop, do it the old fashioned way.
+		logrus.Warnf("Unable to build graph for pod %s, switching to unordered stop: %v", p.ID(), err)
+
+		ctrErrors = make(map[string]error)
+		for _, ctr := range allCtrs {
+			var err error
+			if timeout > -1 {
+				err = ctr.StopWithTimeout(uint(timeout))
+			} else {
+				err = ctr.Stop()
+			}
+			if err != nil && !errors.Is(err, define.ErrCtrStateInvalid) && !errors.Is(err, define.ErrCtrStopped) {
+				ctrErrors[ctr.ID()] = err
+			} else if cleanup {
+				err := ctr.Cleanup(ctx, false)
+				if err != nil && !errors.Is(err, define.ErrCtrStateInvalid) && !errors.Is(err, define.ErrCtrStopped) {
+					ctrErrors[ctr.ID()] = err
+				}
+			}
+		}
+	} else {
+		var realTimeout *uint
+		if timeout > -1 {
+			innerTimeout := uint(timeout)
+			realTimeout = &innerTimeout
+		}
+
+		ctrErrors, err = stopContainerGraph(ctx, graph, p, realTimeout, cleanup)
+		if err != nil {
+			return nil, err
 		}
 	}
 
@@ -346,16 +340,6 @@ func (p *Pod) Pause(ctx context.Context) (map[string]error, error) {
 
 	if !p.valid {
 		return nil, define.ErrPodRemoved
-	}
-
-	if rootless.IsRootless() {
-		cgroupv2, err := cgroups.IsCgroup2UnifiedMode()
-		if err != nil {
-			return nil, fmt.Errorf("failed to determine cgroupversion: %w", err)
-		}
-		if !cgroupv2 {
-			return nil, fmt.Errorf("can not pause pods containing rootless containers with cgroup V1: %w", define.ErrNoCgroups)
-		}
 	}
 
 	allCtrs, err := p.runtime.state.PodContainers(p)
@@ -597,7 +581,6 @@ func containerStatusFromContainers(allCtrs []*Container) (map[string]define.Cont
 	status := make(map[string]define.ContainerStatus, len(allCtrs))
 	for _, ctr := range allCtrs {
 		state, err := ctr.State()
-
 		if err != nil {
 			return nil, err
 		}
@@ -640,10 +623,9 @@ func (p *Pod) Inspect() (*define.InspectPodData, error) {
 			ctrStatuses[c.ID()] = c.state.State
 		}
 	}
-	podState, err := createPodStatusResults(ctrStatuses)
-	if err != nil {
-		return nil, err
-	}
+	slices.SortFunc(ctrs, func(a, b define.InspectPodContainerInfo) int { return strings.Compare(a.ID, b.ID) })
+
+	podState := createPodStatusResults(ctrStatuses)
 
 	namespaces := map[string]bool{
 		"pid":    p.config.UsePodPID,
@@ -661,6 +643,7 @@ func (p *Pod) Inspect() (*define.InspectPodData, error) {
 			sharesNS = append(sharesNS, nsStr)
 		}
 	}
+	sort.Strings(sharesNS)
 
 	// Infra config contains detailed information on the pod's infra
 	// container.
@@ -675,8 +658,8 @@ func (p *Pod) Inspect() (*define.InspectPodData, error) {
 		}
 		infraConfig = new(define.InspectPodInfraConfig)
 		infraConfig.HostNetwork = p.NetworkMode() == "host"
-		infraConfig.StaticIP = infra.config.ContainerNetworkConfig.StaticIP
 		infraConfig.NoManageResolvConf = infra.config.UseImageResolvConf
+		infraConfig.NoManageHostname = infra.config.UseImageHostname
 		infraConfig.NoManageHosts = infra.config.UseImageHosts
 		infraConfig.CPUPeriod = p.CPUPeriod()
 		infraConfig.CPUQuota = p.CPUQuota()
@@ -709,14 +692,17 @@ func (p *Pod) Inspect() (*define.InspectPodData, error) {
 			infraConfig.HostAdd = make([]string, 0, len(infra.config.HostAdd))
 			infraConfig.HostAdd = append(infraConfig.HostAdd, infra.config.HostAdd...)
 		}
+		if len(infra.config.BaseHostsFile) > 0 {
+			infraConfig.HostsFile = infra.config.BaseHostsFile
+		}
 
 		networks, err := infra.networks()
 		if err != nil {
 			return nil, err
 		}
 		netNames := make([]string, 0, len(networks))
-		for name := range networks {
-			netNames = append(netNames, name)
+		for _, network := range networks {
+			netNames = append(netNames, network.Name)
 		}
 		if len(netNames) > 0 {
 			infraConfig.Networks = netNames

@@ -5,7 +5,7 @@ import (
 	"io"
 	"net/url"
 
-	"github.com/containers/podman/v5/pkg/bindings/internal/util"
+	"go.podman.io/podman/v6/pkg/bindings/internal/util"
 )
 
 // Changed returns true if named field has been set
@@ -61,6 +61,36 @@ func (o *ModifyOptions) GetAnnotations() map[string]string {
 		return z
 	}
 	return o.Annotations
+}
+
+// WithIndexAnnotations set annotations to add to the manifest list as a whole
+func (o *ModifyOptions) WithIndexAnnotations(value map[string]string) *ModifyOptions {
+	o.IndexAnnotations = value
+	return o
+}
+
+// GetIndexAnnotations returns value of annotations to add to the manifest list as a whole
+func (o *ModifyOptions) GetIndexAnnotations() map[string]string {
+	if o.IndexAnnotations == nil {
+		var z map[string]string
+		return z
+	}
+	return o.IndexAnnotations
+}
+
+// WithIndexSubject set indexSubject is a subject value to set in the manifest list itself
+func (o *ModifyOptions) WithIndexSubject(value string) *ModifyOptions {
+	o.IndexSubject = &value
+	return o
+}
+
+// GetIndexSubject returns value of indexSubject is a subject value to set in the manifest list itself
+func (o *ModifyOptions) GetIndexSubject() string {
+	if o.IndexSubject == nil {
+		var z string
+		return z
+	}
+	return *o.IndexSubject
 }
 
 // WithArch set arch overrides the architecture for the image

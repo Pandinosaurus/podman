@@ -7,16 +7,21 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
-	"github.com/containers/common/libimage/define"
-	podmanRegistry "github.com/containers/podman/v5/hack/podman-registry-go"
-	. "github.com/containers/podman/v5/test/utils"
-	"github.com/containers/storage/pkg/archive"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	. "github.com/onsi/gomega/gexec"
+	imgspec "github.com/opencontainers/image-spec/specs-go"
 	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
+	"go.podman.io/common/libimage/define"
+	"go.podman.io/image/v5/docker/reference"
+	manifest "go.podman.io/image/v5/manifest"
+	"go.podman.io/image/v5/transports/alltransports"
+	podmanRegistry "go.podman.io/podman/v6/hack/podman-registry-go"
+	. "go.podman.io/podman/v6/test/utils"
+	"go.podman.io/storage/pkg/archive"
 )
 
 // validateManifestHasAllArchs checks that the specified manifest has all
@@ -68,7 +73,6 @@ func verifyInstanceCompression(descriptor []imgspecv1.Descriptor, compression st
 }
 
 var _ = Describe("Podman manifest", func() {
-
 	const (
 		imageList                      = "docker://quay.io/libpod/testimage:00000004"
 		imageListInstance              = "docker://quay.io/libpod/testimage@sha256:1385ce282f3a959d0d6baf45636efe686c1e14c3e7240eb31907436f7bc531fa"
@@ -193,7 +197,7 @@ var _ = Describe("Podman manifest", func() {
 	})
 
 	It("push with --add-compression and --force-compression", func() {
-		if podmanTest.Host.Arch == "ppc64le" {
+		if runtime.GOARCH == "ppc64le" {
 			Skip("No registry image for ppc64le")
 		}
 		if isRootless() {
@@ -368,7 +372,7 @@ add_compression = ["zstd"]`), 0o644)
 	})
 
 	It("annotate", func() {
-		session := podmanTest.Podman([]string{"manifest", "create", "foo"})
+		session := podmanTest.Podman([]string{"manifest", "create", "--annotation", "up=down", "foo"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 		session = podmanTest.Podman([]string{"manifest", "add", "foo", imageListInstance})
@@ -377,12 +381,50 @@ add_compression = ["zstd"]`), 0o644)
 		session = podmanTest.Podman([]string{"manifest", "annotate", "--annotation", "hello=world,withcomma", "--arch", "bar", "foo", imageListARM64InstanceDigest})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
+		session = podmanTest.Podman([]string{"manifest", "annotate", "--index", "--annotation", "top=bottom", "foo"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
 		session = podmanTest.Podman([]string{"manifest", "inspect", "foo"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
-		Expect(session.OutputToString()).To(ContainSubstring(`"architecture": "bar"`))
-		// Check added annotation
-		Expect(session.OutputToString()).To(ContainSubstring(`"hello": "world,withcomma"`))
+		// Extract the digest from the name of the image that we just added to the list
+		ref, err := alltransports.ParseImageName(imageListInstance)
+		Expect(err).ToNot(HaveOccurred())
+		dockerReference := ref.DockerReference()
+		referenceWithDigest, ok := dockerReference.(reference.Canonical)
+		Expect(ok).To(BeTrueBecause("we started with a canonical reference"))
+		// Check that the index has all of the information we've just added to it
+		encoded, err := json.Marshal(&imgspecv1.Index{
+			Versioned: imgspec.Versioned{
+				SchemaVersion: 2,
+			},
+			// media type forced because we need to be able to represent annotations
+			MediaType: imgspecv1.MediaTypeImageIndex,
+			Manifests: []imgspecv1.Descriptor{
+				{
+					// from imageListInstance
+					MediaType: manifest.DockerV2Schema2MediaType,
+					Digest:    referenceWithDigest.Digest(),
+					Size:      527,
+					// OS from imageListInstance(?), Architecture/Variant as above
+					Platform: &imgspecv1.Platform{
+						Architecture: "bar",
+						OS:           "linux",
+					},
+					// added above
+					Annotations: map[string]string{
+						"hello": "world,withcomma",
+					},
+				},
+			},
+			// added above
+			Annotations: map[string]string{
+				"top": "bottom",
+				"up":  "down",
+			},
+		})
+		Expect(err).ToNot(HaveOccurred())
+		Expect(session.OutputToString()).To(MatchJSON(encoded))
 	})
 
 	It("remove digest", func() {
@@ -561,7 +603,7 @@ RUN touch /file
 		Expect(output).To(ContainSubstring("Storing list signatures"))
 	})
 
-	It("push must retry", func() {
+	It("push must retry with defaults", func() {
 		SkipIfRemote("warning is not relayed in remote setup")
 		session := podmanTest.Podman([]string{"manifest", "create", "foo", imageList})
 		session.WaitWithDefaultTimeout()
@@ -573,10 +615,23 @@ RUN touch /file
 		Expect(push.ErrorToString()).To(MatchRegexp("Copying blob.*Failed, retrying in 1s \\.\\.\\. \\(1/3\\).*Copying blob.*Failed, retrying in 2s"))
 	})
 
+	It("push must retry with options", func() {
+		podmanTest.PodmanExitCleanly("manifest", "create", "foo", imageList)
+
+		push := podmanTest.Podman([]string{"manifest", "push", "--all", "--retry", "2", "--retry-delay", "100ms", "--tls-verify=false", "--remove-signatures", "foo", "localhost:7000/bogus"})
+		push.WaitWithDefaultTimeout()
+		Expect(push).Should(ExitWithError(125, "connect: connection refused"))
+		// The retrying warning is not relayed in the remote setup, so only
+		// assert it for the local client.
+		if !IsRemote() {
+			Expect(push.ErrorToString()).To(MatchRegexp("Copying blob.*Failed, retrying in 100ms \\.\\.\\. \\(1/2\\).*Copying blob.*Failed, retrying in 100ms \\.\\.\\. \\(2/2\\)"))
+		}
+	})
+
 	It("authenticated push", func() {
 		registryOptions := &podmanRegistry.Options{
 			PodmanPath: podmanTest.PodmanBinary,
-			PodmanArgs: podmanTest.MakeOptions(nil, false, false),
+			PodmanArgs: podmanTest.MakeOptions(nil, PodmanExecOptions{}),
 			Image:      "docker-archive:" + imageTarPath(REGISTRY_IMAGE),
 		}
 
@@ -639,6 +694,7 @@ RUN touch /file
 	})
 
 	It("push --rm to local directory", func() {
+		SkipIfNotAMD64() // https://github.com/containers/podman/issues/28273
 		SkipIfRemote("manifest push to dir not supported in remote mode")
 		session := podmanTest.Podman([]string{"manifest", "create", "foo"})
 		session.WaitWithDefaultTimeout()

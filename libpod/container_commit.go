@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package libpod
 
@@ -6,15 +6,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"slices"
 	"strings"
 
-	"github.com/containers/buildah"
-	"github.com/containers/common/libimage"
-	is "github.com/containers/image/v5/storage"
-	"github.com/containers/image/v5/types"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/libpod/events"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/buildah"
+	"go.podman.io/common/libimage"
+	is "go.podman.io/image/v5/storage"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/libpod/events"
+	"go.podman.io/podman/v6/libpod/shutdown"
 )
 
 // ContainerCommitOptions is a struct used to commit a container to an image
@@ -47,11 +50,22 @@ func (c *Container) Commit(ctx context.Context, destImage string, options Contai
 		}
 	}
 
-	if c.state.State == define.ContainerStateRunning && options.Pause {
+	if (c.state.State == define.ContainerStateRunning || c.state.State == define.ContainerStateStopping) && options.Pause {
+		// The container lock is held, so no concurrent Commit can
+		// register a handler with the same name.
+		handlerName := fmt.Sprintf("commit-unpause-%s", c.ID())
+		if err := shutdown.Register(handlerName, func(sig os.Signal) error {
+			logrus.Debugf("Received %v, unpausing container %q", sig, c.ID())
+			return c.unpause()
+		}); err != nil && !errors.Is(err, shutdown.ErrHandlerExists) {
+			logrus.Errorf("Registering shutdown handler for container %q: %v", c.ID(), err)
+		}
 		if err := c.pause(); err != nil {
+			_ = shutdown.Unregister(handlerName)
 			return nil, fmt.Errorf("pausing container %q to commit: %w", c.ID(), err)
 		}
 		defer func() {
+			_ = shutdown.Unregister(handlerName)
 			if err := c.unpause(); err != nil {
 				logrus.Errorf("Unpausing container %q: %v", c.ID(), err)
 			}
@@ -66,16 +80,16 @@ func (c *Container) Commit(ctx context.Context, destImage string, options Contai
 		SignaturePolicyPath:   options.SignaturePolicyPath,
 		ReportWriter:          options.ReportWriter,
 		Squash:                options.Squash,
-		SystemContext:         c.runtime.imageContext,
+		SystemContext:         &c.runtime.imageContext,
 		PreferredManifestType: options.PreferredManifestType,
 		OverrideChanges:       append(append([]string{}, options.Changes...), options.CommitOptions.OverrideChanges...),
 		OverrideConfig:        options.CommitOptions.OverrideConfig,
 	}
 	importBuilder, err := buildah.ImportBuilder(ctx, c.runtime.store, builderOptions)
-	importBuilder.Format = options.PreferredManifestType
 	if err != nil {
 		return nil, err
 	}
+	importBuilder.Format = options.PreferredManifestType
 	if options.Author != "" {
 		importBuilder.SetMaintainer(options.Author)
 	}
@@ -130,14 +144,7 @@ func (c *Container) Commit(ctx context.Context, destImage string, options Contai
 		// Only include anonymous named volumes added by the user by
 		// default.
 		for _, v := range c.config.NamedVolumes {
-			include := false
-			for _, userVol := range c.config.UserVolumes {
-				if userVol == v.Dest {
-					include = true
-					break
-				}
-			}
-			if include {
+			if slices.Contains(c.config.UserVolumes, v.Dest) {
 				vol, err := c.runtime.GetVolume(v.Name)
 				if err != nil {
 					return nil, fmt.Errorf("volume %s used in container %s has been removed: %w", v.Name, c.ID(), err)

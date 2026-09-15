@@ -6,9 +6,9 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/signal"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/signal"
 )
 
 // Image-related runtime using an ssh-tunnel to utilize Podman service
@@ -46,9 +46,6 @@ func remoteProxySignals(ctrID string, killFunc func(string) error) {
 	go func() {
 		for s := range sigBuffer {
 			syscallSignal := s.(syscall.Signal)
-			if signal.IsSignalIgnoredBySigProxy(syscallSignal) {
-				continue
-			}
 			signalName, err := signal.ParseSysSignalToName(syscallSignal)
 			if err != nil {
 				logrus.Infof("Ceasing signal %v forwarding to container %s as it has stopped: %s", s, ctrID, err)

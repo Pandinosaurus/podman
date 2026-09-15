@@ -12,7 +12,7 @@ import (
 )
 
 func IsSimpleType(f reflect.Value) bool {
-	if _, ok := f.Interface().(fmt.Stringer); ok {
+	if _, ok := reflect.TypeAssert[fmt.Stringer](f); ok {
 		return true
 	}
 
@@ -25,7 +25,7 @@ func IsSimpleType(f reflect.Value) bool {
 }
 
 func SimpleTypeToParam(f reflect.Value) string {
-	if s, ok := f.Interface().(fmt.Stringer); ok {
+	if s, ok := reflect.TypeAssert[fmt.Stringer](f); ok {
 		return s.String()
 	}
 
@@ -45,20 +45,20 @@ func SimpleTypeToParam(f reflect.Value) string {
 	panic("the input parameter is not a simple type")
 }
 
-func Changed(o interface{}, fieldName string) bool {
+func Changed(o any, fieldName string) bool {
 	r := reflect.ValueOf(o)
 	value := reflect.Indirect(r).FieldByName(fieldName)
 	return !value.IsNil()
 }
 
-func ToParams(o interface{}) (url.Values, error) {
+func ToParams(o any) (url.Values, error) {
 	params := url.Values{}
 	if o == nil || reflect.ValueOf(o).IsNil() {
 		return params, nil
 	}
 	json := jsoniter.ConfigCompatibleWithStandardLibrary
 	s := reflect.ValueOf(o)
-	if reflect.Ptr == s.Kind() {
+	if reflect.Pointer == s.Kind() {
 		s = s.Elem()
 	}
 	sType := s.Type()
@@ -69,7 +69,7 @@ func ToParams(o interface{}) (url.Values, error) {
 		}
 		fieldName = strings.ToLower(fieldName)
 		f := s.Field(i)
-		if reflect.Ptr == f.Kind() {
+		if reflect.Pointer == f.Kind() {
 			f = f.Elem()
 		}
 		paramName := fieldName
@@ -92,7 +92,7 @@ func ToParams(o interface{}) (url.Values, error) {
 				}
 			}
 		case f.Kind() == reflect.Map:
-			lowerCaseKeys := make(map[string]interface{})
+			lowerCaseKeys := make(map[string]any)
 			iter := f.MapRange()
 			for iter.Next() {
 				lowerCaseKeys[iter.Key().Interface().(string)] = iter.Value().Interface()
@@ -106,12 +106,4 @@ func ToParams(o interface{}) (url.Values, error) {
 		}
 	}
 	return params, nil
-}
-
-func MapToArrayString(data map[string]string) []string {
-	l := make([]string, 0)
-	for k, v := range data {
-		l = append(l, k+"="+v)
-	}
-	return l
 }

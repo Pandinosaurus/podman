@@ -6,15 +6,15 @@ import (
 	"os"
 	"strings"
 
-	"github.com/containers/common/pkg/auth"
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/common/pkg/report"
-	"github.com/containers/image/v5/types"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/util"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/auth"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/common/pkg/report"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/util"
 )
 
 // searchOptionsWrapper wraps entities.ImagePullOptions and prevents leaking
@@ -49,8 +49,8 @@ var (
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: completion.AutocompleteNone,
 		Example: `podman search --filter=is-official --limit 3 alpine
-  podman search registry.fedoraproject.org/  # only works with v2 registries
-  podman search --format "table {{.Index}} {{.Name}}" registry.fedoraproject.org/fedora`,
+podman search registry.fedoraproject.org/  # only works with v2 registries
+podman search --format "table {{.Index}} {{.Name}}" registry.fedoraproject.org/fedora`,
 	}
 
 	imageSearchCmd = &cobra.Command{
@@ -61,8 +61,8 @@ var (
 		Args:              searchCmd.Args,
 		ValidArgsFunction: searchCmd.ValidArgsFunction,
 		Example: `podman image search --filter=is-official --limit 3 alpine
-  podman image search registry.fedoraproject.org/  # only works with v2 registries
-  podman image search --format "table {{.Index}} {{.Name}}" registry.fedoraproject.org/fedora`,
+podman image search registry.fedoraproject.org/  # only works with v2 registries
+podman image search --format "table {{.Index}} {{.Name}}" registry.fedoraproject.org/fedora`,
 	}
 )
 
@@ -153,7 +153,7 @@ func imageSearch(cmd *cobra.Command, args []string) error {
 		searchOptions.Password = creds.Password
 	}
 
-	searchReport, err := registry.ImageEngine().Search(registry.GetContext(), searchTerm, searchOptions.ImageSearchOptions)
+	searchReport, err := registry.ImageEngine().Search(registry.Context(), searchTerm, searchOptions.ImageSearchOptions)
 	if err != nil {
 		return err
 	}
@@ -164,7 +164,7 @@ func imageSearch(cmd *cobra.Command, args []string) error {
 	isJSON := report.IsJSON(searchOptions.Format)
 	for i, element := range searchReport {
 		d := strings.ReplaceAll(element.Description, "\n", " ")
-		if len(d) > 44 && !(searchOptions.NoTrunc || isJSON) {
+		if len(d) > 44 && (!searchOptions.NoTrunc && !isJSON) {
 			d = strings.TrimSpace(d[:44]) + "..."
 		}
 		searchReport[i].Description = d
@@ -212,7 +212,7 @@ func imageSearch(cmd *cobra.Command, args []string) error {
 	return rpt.Execute(searchReport)
 }
 
-func printArbitraryJSON(v interface{}) error {
+func printArbitraryJSON(v any) error {
 	prettyJSON, err := json.MarshalIndent(v, "", "    ")
 	if err != nil {
 		return err

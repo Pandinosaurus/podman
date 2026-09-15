@@ -2,19 +2,20 @@ package inspect
 
 import (
 	"context"
-	"encoding/json" // due to a bug in json-iterator it cannot be used here
 	"errors"
 	"fmt"
 	"os"
-	"regexp"
 	"strings"
 
-	"github.com/containers/common/pkg/report"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/validate"
-	"github.com/containers/podman/v5/pkg/domain/entities"
+	"go.podman.io/storage/pkg/regexp"
+
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/report"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/utils"
+	"go.podman.io/podman/v6/cmd/podman/validate"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 // AddInspectFlagSet takes a command and adds the inspect flags and returns an
@@ -76,7 +77,7 @@ func newInspector(options entities.InspectOptions) (*inspector, error) {
 // inspect inspects the specified container/image names or IDs.
 func (i *inspector) inspect(namesOrIDs []string) error {
 	// data - dumping place for inspection results.
-	var data []interface{}
+	var data []any
 	var errs []error
 	ctx := context.Background()
 
@@ -151,23 +152,32 @@ func (i *inspector) inspect(namesOrIDs []string) error {
 		for i := range volumeData {
 			data = append(data, volumeData[i])
 		}
+	case common.ArtifactType:
+		for _, name := range namesOrIDs {
+			artifactData, err := i.imageEngine.ArtifactInspect(ctx, name, entities.ArtifactInspectOptions{})
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			data = append(data, artifactData)
+		}
 	default:
-		return fmt.Errorf("invalid type %q: must be %q, %q, %q, %q, %q, or %q", i.options.Type,
-			common.ImageType, common.ContainerType, common.PodType, common.NetworkType, common.VolumeType, common.AllType)
+		return fmt.Errorf("invalid type %q: must be %q, %q, %q, %q, %q, %q, or %q", i.options.Type,
+			common.ImageType, common.ContainerType, common.PodType, common.NetworkType, common.VolumeType, common.ArtifactType, common.AllType)
 	}
 	// Always print an empty array
 	if data == nil {
-		data = []interface{}{}
+		data = []any{}
 	}
 
 	var err error
 	switch {
 	case report.IsJSON(i.options.Format) || i.options.Format == "":
-		err = printJSON(data)
+		err = utils.PrintGenericJSON(data)
 	default:
 		// Landing here implies user has given a custom --format
 		var rpt *report.Formatter
-		format := inspectNormalize(i.options.Format, i.options.Type)
+		format := InspectNormalize(i.options.Format, i.options.Type)
 		rpt, err = report.New(os.Stdout, "inspect").Parse(report.OriginUser, format)
 		if err != nil {
 			return err
@@ -191,17 +201,8 @@ func (i *inspector) inspect(namesOrIDs []string) error {
 	return nil
 }
 
-func printJSON(data interface{}) error {
-	enc := json.NewEncoder(os.Stdout)
-	// by default, json marshallers will force utf=8 from
-	// a string. this breaks healthchecks that use <,>, &&.
-	enc.SetEscapeHTML(false)
-	enc.SetIndent("", "     ")
-	return enc.Encode(data)
-}
-
-func (i *inspector) inspectAll(ctx context.Context, namesOrIDs []string) ([]interface{}, []error, error) {
-	var data []interface{}
+func (i *inspector) inspectAll(ctx context.Context, namesOrIDs []string) ([]any, []error, error) {
+	var data []any
 	allErrs := []error{}
 	for _, name := range namesOrIDs {
 		ctrData, errs, err := i.containerEngine.ContainerInspect(ctx, []string{name}, i.options)
@@ -228,7 +229,7 @@ func (i *inspector) inspectAll(ctx context.Context, namesOrIDs []string) ([]inte
 			data = append(data, volumeData[0])
 			continue
 		}
-		networkData, errs, err := registry.ContainerEngine().NetworkInspect(ctx, namesOrIDs, i.options)
+		networkData, errs, err := registry.ContainerEngine().NetworkInspect(ctx, []string{name}, i.options)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -245,6 +246,11 @@ func (i *inspector) inspectAll(ctx context.Context, namesOrIDs []string) ([]inte
 			data = append(data, podData[0])
 			continue
 		}
+		artifactData, err := i.imageEngine.ArtifactInspect(ctx, name, entities.ArtifactInspectOptions{})
+		if err == nil {
+			data = append(data, artifactData)
+			continue
+		}
 		if len(errs) > 0 {
 			allErrs = append(allErrs, fmt.Errorf("no such object: %q", name))
 			continue
@@ -253,9 +259,25 @@ func (i *inspector) inspectAll(ctx context.Context, namesOrIDs []string) ([]inte
 	return data, allErrs, nil
 }
 
-func inspectNormalize(row string, inspectType string) string {
-	m := regexp.MustCompile(`{{\s*\.Id\s*}}`)
-	row = m.ReplaceAllString(row, "{{.ID}}")
+var idRegex = regexp.Delayed(`{{\s*\.Id\s*}}`)
+
+// InspectNormalize modifies a given row string based on the specified inspect type.
+// It replaces specific field names within the row string for standardization.
+// For the `image` inspect type, it includes additional field replacements like `.Config.Healthcheck`.
+//
+// Parameters:
+// - row: The input string that represents a data row to be modified.
+// - inspectType: The type of inspection (e.g., "image") to determine specific replacements.
+//
+// Returns:
+// - A new string with the necessary replacements applied based on the inspect type.
+//
+// InspectNormalize does not need to be exported but to avoid de-duplication of code. We had to export it.
+// It can be reverted back once `podman artifact inspect` can use [Inspect] to fetch artifact data instead of
+// fetching it itself.
+// The reason why we did it in this way can be further read [here](https://github.com/containers/podman/pull/27182#issuecomment-3402465389).
+func InspectNormalize(row string, inspectType string) string {
+	row = idRegex.ReplaceAllString(row, "{{.ID}}")
 
 	r := strings.NewReplacer(
 		".Src", ".Source",

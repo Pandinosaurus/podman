@@ -9,21 +9,21 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/common/pkg/sysinfo"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/containers"
-	"github.com/containers/podman/v5/cmd/podman/parse"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/utils"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/specgen"
-	"github.com/containers/podman/v5/pkg/specgenutil"
-	"github.com/containers/podman/v5/pkg/util"
-	"github.com/docker/docker/pkg/parsers"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/common/pkg/sysinfo"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/containers"
+	"go.podman.io/podman/v6/cmd/podman/parse"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/utils"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/specgen"
+	"go.podman.io/podman/v6/pkg/specgenutil"
+	"go.podman.io/podman/v6/pkg/util"
+	"go.podman.io/storage/pkg/parsers"
 )
 
 var (
@@ -39,7 +39,7 @@ var (
 		RunE:              create,
 		ValidArgsFunction: completion.AutocompleteNone,
 		Example: `podman pod create
-  podman pod create --label foo=bar mypod`,
+podman pod create --label foo=bar mypod`,
 	}
 )
 
@@ -233,17 +233,17 @@ func create(cmd *cobra.Command, args []string) error {
 		}
 	}
 	sort.Ints(vals)
+loop:
 	for ind, core := range vals {
 		switch {
 		case core > int(cpuSet):
 			if copy == "" {
 				copy = "0-" + strconv.Itoa(int(cpuSet))
 				infraOptions.CPUSetCPUs = copy
-				break
 			} else {
 				infraOptions.CPUSetCPUs = copy
-				break
 			}
+			break loop
 		case ind != 0:
 			copy += "," + strconv.Itoa(core)
 		default:
@@ -252,6 +252,7 @@ func create(cmd *cobra.Command, args []string) error {
 	}
 	createOptions.Cpus = infraOptions.CPUS
 	createOptions.CpusetCpus = infraOptions.CPUSetCPUs
+
 	podSpec := specgen.NewPodSpecGenerator()
 	podSpec, err = entities.ToPodSpecGen(*podSpec, &createOptions)
 	if err != nil {
@@ -265,6 +266,7 @@ func create(cmd *cobra.Command, args []string) error {
 		}
 		podSpec.InfraContainerSpec = specgen.NewSpecGenerator(imageName, false)
 		podSpec.InfraContainerSpec.RawImageName = rawImageName
+		podSpec.InfraContainerSpec.BaseHostsFile = podSpec.PodNetworkConfig.HostsFile
 		podSpec.InfraContainerSpec.NetworkOptions = podSpec.NetworkOptions
 		podSpec.InfraContainerSpec.RestartPolicy = podSpec.RestartPolicy
 		err = specgenutil.FillOutSpecGen(podSpec.InfraContainerSpec, &infraOptions, []string{})

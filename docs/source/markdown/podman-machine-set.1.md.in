@@ -15,6 +15,8 @@ then the settings will be applied to `podman-machine-default`.
 
 Rootless only.
 
+Default Podman machine settings can be set via the [machine] section in the containers.conf(5) file.
+
 ## OPTIONS
 
 #### **--cpus**=*number*
@@ -30,6 +32,13 @@ Can only be increased. Only supported for QEMU machines.
 #### **--help**
 
 Print usage statement.
+
+#### **--import-native-ca**
+
+Import the host's trusted CA certificates into the machine.
+When set to true, the certificates from the host system are imported during machine startup.
+This allows containers running in the machine to trust the same Certificate Authorities
+as the host OS. The default value is `false`.
 
 #### **--memory**, **-m**=*number*
 
@@ -93,7 +102,7 @@ $ podman machine set --rootful myvm
 ```
 
 ## SEE ALSO
-**[podman(1)](podman.1.md)**, **[podman-machine(1)](podman-machine.1.md)**
+**[podman(1)](podman.1.md)**, **[podman-machine(1)](podman-machine.1.md)**, **containers.conf(5)**
 
 ## HISTORY
 February 2022, Originally compiled by Jason Greene <jason.greene@redhat.com>

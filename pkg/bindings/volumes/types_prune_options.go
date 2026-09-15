@@ -4,7 +4,7 @@ package volumes
 import (
 	"net/url"
 
-	"github.com/containers/podman/v5/pkg/bindings/internal/util"
+	"go.podman.io/podman/v6/pkg/bindings/internal/util"
 )
 
 // Changed returns true if named field has been set
@@ -30,4 +30,19 @@ func (o *PruneOptions) GetFilters() map[string][]string {
 		return z
 	}
 	return o.Filters
+}
+
+// WithDryRun set field DryRun to given value
+func (o *PruneOptions) WithDryRun(value bool) *PruneOptions {
+	o.DryRun = &value
+	return o
+}
+
+// GetDryRun returns value of field DryRun
+func (o *PruneOptions) GetDryRun() bool {
+	if o.DryRun == nil {
+		var z bool
+		return z
+	}
+	return *o.DryRun
 }

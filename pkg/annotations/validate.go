@@ -3,10 +3,11 @@ package annotations
 import (
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 
-	"github.com/containers/podman/v5/libpod/define"
+	"go.podman.io/storage/pkg/regexp"
+
+	"go.podman.io/podman/v6/libpod/define"
 )
 
 // regexErrorMsg returns a string explanation of a regex validation failure.
@@ -25,14 +26,16 @@ func regexErrorMsg(msg string, fmt string, examples ...string) string {
 	return msg
 }
 
-const dns1123LabelFmt string = "[a-z0-9]([-a-z0-9]*[a-z0-9])?"
-const dns1123SubdomainFmt string = dns1123LabelFmt + "(\\." + dns1123LabelFmt + ")*"
-const dns1123SubdomainErrorMsg string = "annotations must be formatted as a valid lowercase RFC1123 subdomain of lower case alphanumeric characters, '-' or '.', and must start and end with an alphanumeric character"
+const (
+	dns1123LabelFmt          string = "[a-z0-9]([-a-z0-9]*[a-z0-9])?"
+	dns1123SubdomainFmt      string = dns1123LabelFmt + "(\\." + dns1123LabelFmt + ")*"
+	dns1123SubdomainErrorMsg string = "annotations must be formatted as a valid lowercase RFC1123 subdomain of lower case alphanumeric characters, '-' or '.', and must start and end with an alphanumeric character"
+)
 
 // DNS1123SubdomainMaxLength is a subdomain's max length in DNS (RFC 1123)
 const DNS1123SubdomainMaxLength int = 253
 
-var dns1123SubdomainRegexp = regexp.MustCompile("^" + dns1123SubdomainFmt + "$")
+var dns1123SubdomainRegexp = regexp.Delayed("^" + dns1123SubdomainFmt + "$")
 
 // isDNS1123Subdomain tests for a string that conforms to the definition of a
 // subdomain in DNS (RFC 1123).
@@ -48,13 +51,15 @@ func isDNS1123Subdomain(value string) error {
 	return nil
 }
 
-const qnameCharFmt string = "[A-Za-z0-9]"
-const qnameExtCharFmt string = "[-A-Za-z0-9_.]"
-const qualifiedNameFmt string = "(" + qnameCharFmt + qnameExtCharFmt + "*)?" + qnameCharFmt
-const qualifiedNameErrMsg string = "must consist of alphanumeric characters, '-', '_' or '.', and must start and end with an alphanumeric character"
-const qualifiedNameMaxLength int = 63
+const (
+	qnameCharFmt           string = "[A-Za-z0-9]"
+	qnameExtCharFmt        string = "[-A-Za-z0-9_.]"
+	qualifiedNameFmt       string = "(" + qnameCharFmt + qnameExtCharFmt + "*)?" + qnameCharFmt
+	qualifiedNameErrMsg    string = "must consist of alphanumeric characters, '-', '_' or '.', and must start and end with an alphanumeric character"
+	qualifiedNameMaxLength int    = 63
+)
 
-var qualifiedNameRegexp = regexp.MustCompile("^" + qualifiedNameFmt + "$")
+var qualifiedNameRegexp = regexp.Delayed("^" + qualifiedNameFmt + "$")
 
 // isQualifiedName tests whether the value passed is what Kubernetes calls a
 // "qualified name".  This is a format used in various places throughout the
@@ -98,9 +103,9 @@ func isQualifiedName(value string) error {
 func validateAnnotationsSize(annotations map[string]string) error {
 	var totalSize int64
 	for k, v := range annotations {
-		totalSize += (int64)(len(k)) + (int64)(len(v))
+		totalSize += int64(len(k)) + int64(len(v))
 	}
-	if totalSize > (int64)(define.TotalAnnotationSizeLimitB) {
+	if totalSize > int64(define.TotalAnnotationSizeLimitB) {
 		return fmt.Errorf("annotations size %d is larger than limit %d", totalSize, define.TotalAnnotationSizeLimitB)
 	}
 	return nil

@@ -10,7 +10,8 @@ buildahVersion: *[0-9.]\\\+
 conmon:\\\s\\\+package:
 distribution:
 logDriver:
-ociRuntime:\\\s\\\+name:
+ociRuntime:\\\s\\\+features:
+ociRuntime:.* name: [a-z0-9]
 os:
 rootless:
 registries:
@@ -44,15 +45,16 @@ host.conmon.path          | $expr_path
 host.conmon.package       | .*conmon.*
 host.cgroupManager        | \\\(systemd\\\|cgroupfs\\\)
 host.cgroupVersion        | v[12]
+host.memFree              | [0-9]\\\+
+host.memAvailable         | [0-9]\\\+
+host.memTotal             | [0-9]\\\+
 host.networkBackendInfo   | .*dns.*package.*
 host.ociRuntime.path      | $expr_path
 host.pasta                | .*executable.*package.*
 host.rootlessNetworkCmd   | pasta
-store.configFile          | $expr_path
 store.graphDriverName     | [a-z0-9]\\\+\\\$
 store.graphRoot           | $expr_path
 store.imageStore.number   | 1
-host.slirp4netns.executable | $expr_path
 "
 
     defer-assertion-failures
@@ -64,66 +66,41 @@ host.slirp4netns.executable | $expr_path
     done < <(parse_table "$tests")
 }
 
-@test "podman info - confirm desired runtime" {
-    if [[ -z "$CI_DESIRED_RUNTIME" ]]; then
-        # When running in Cirrus, CI_DESIRED_RUNTIME *must* be defined
-        # in .cirrus.yml so we can double-check that all CI VMs are
-        # using crun/runc as desired.
-        if [[ -n "$CIRRUS_CI" ]]; then
-            die "CIRRUS_CI is set, but CI_DESIRED_RUNTIME is not! See #14912"
-        fi
-
-        # Not running under Cirrus (e.g., gating tests, or dev laptop).
-        # Totally OK to skip this test.
-        skip "CI_DESIRED_RUNTIME is unset--OK, because we're not in Cirrus"
-    fi
-
-    run_podman info --format '{{.Host.OCIRuntime.Name}}'
-    is "$output" "$CI_DESIRED_RUNTIME" "CI_DESIRED_RUNTIME (from .cirrus.yml)"
-}
-
 @test "podman info - confirm desired network backend" {
-    run_podman info --format '{{.Host.NetworkBackend}}'
-    is "$output" "netavark" "netavark backend"
-}
-
-@test "podman info - confirm desired database" {
-    # Always run this and preserve its value. We will check again in 999-*.bats
-    run_podman info --format '{{.Host.DatabaseBackend}}'
-    db_backend="$output"
-    echo "$db_backend" > $BATS_SUITE_TMPDIR/db-backend
-
-    if [[ -z "$CI_DESIRED_DATABASE" ]]; then
-        # When running in Cirrus, CI_DESIRED_DATABASE *must* be defined
-        # in .cirrus.yml so we can double-check that all CI VMs are
-        # using netavark or cni as desired.
-        if [[ -n "$CIRRUS_CI" ]]; then
-            die "CIRRUS_CI is set, but CI_DESIRED_DATABASE is not! See #16389"
+    if [[ -z "$CI_DESIRED_NETWORK" ]]; then
+        # When running on RHEL, CI_DESIRED_NETWORK *must* be defined
+        # in gating.yaml for RHEL testing.
+        local osrelease=/etc/os-release
+        if [[ -e $osrelease ]]; then
+            local osname=$(source $osrelease; echo $NAME)
+            if [[ $osname =~ Red.Hat ]]; then
+                die "CI_DESIRED_NETWORK must be set in gating.yaml for RHEL testing"
+            fi
         fi
 
-        # Not running under Cirrus (e.g., gating tests, or dev laptop).
-        # Totally OK to skip this test.
-        skip "CI_DESIRED_DATABASE is unset--OK, because we're not in Cirrus"
+        # Everywhere other than RHEL, the only supported network is netavark
+        CI_DESIRED_NETWORK="netavark"
     fi
 
-    is "$db_backend" "$CI_DESIRED_DATABASE" "CI_DESIRED_DATABASE (from .cirrus.yml)"
+    run_podman info --format '{{.Host.NetworkBackend}}'
+    is "$output" "$CI_DESIRED_NETWORK" ".Host.NetworkBackend"
 }
 
 @test "podman info - confirm desired storage driver" {
     if [[ -z "$CI_DESIRED_STORAGE" ]]; then
-        # When running in Cirrus, CI_DESIRED_STORAGE *must* be defined
-        # in .cirrus.yml so we can double-check that all CI VMs are
-        # using overlay or vfs as desired.
-        if [[ -n "$CIRRUS_CI" ]]; then
-            die "CIRRUS_CI is set, but CI_DESIRED_STORAGE is not! See #20161"
+        # In our CI, CI_DESIRED_STORAGE *must* be set by hack/ci/runner.sh
+        # so we can double-check that all CI VMs are using overlay or vfs
+        # as desired.
+        if [[ -n "$PODMAN_CI" ]]; then
+            die "PODMAN_CI is set, but CI_DESIRED_STORAGE is not! See #20161"
         fi
 
-        # Not running under Cirrus (e.g., gating tests, or dev laptop).
+        # Not running in podman CI (e.g., gating tests, or dev laptop).
         # Totally OK to skip this test.
-        skip "CI_DESIRED_STORAGE is unset--OK, because we're not in Cirrus"
+        skip "CI_DESIRED_STORAGE is unset--OK, because we're not in podman CI"
     fi
 
-    is "$(podman_storage_driver)" "$CI_DESIRED_STORAGE" "podman storage driver is not CI_DESIRED_STORAGE (from .cirrus.yml)"
+    is "$(podman_storage_driver)" "$CI_DESIRED_STORAGE" "podman storage driver is not CI_DESIRED_STORAGE"
 
     # Confirm desired setting of composefs
     if [[ "$CI_DESIRED_STORAGE" = "overlay" ]]; then
@@ -164,6 +141,19 @@ host.slirp4netns.executable | $expr_path
     # storage-driver=vfs, until we have kernels that support rootless overlay
     # mounts.
     is "$output" ".*graphOptions: {}" "output includes graphOptions: {}"
+}
+
+@test "podman info - additional image stores" {
+    skip_if_remote "--storage-opt flag is not supported for remote"
+    driver=$(podman_storage_driver)
+    store1=$PODMAN_TMPDIR/store1
+    store2=$PODMAN_TMPDIR/store2
+    mkdir -p $store1 $store2
+    run_podman info --storage-opt=$driver'.imagestore='$store1 \
+                    --storage-opt=$driver'.imagestore='$store2 \
+                    --format '{{index .Store.GraphOptions "'$driver'.additionalImageStores"}}\n{{index .Store.GraphOptions "'$driver'.imagestore"}}'
+    assert "${lines[0]}" == "["$store1" "$store2"]" "output includes additional image stores"
+    assert "${lines[1]}" == "$store2" "old imagestore output"
 }
 
 @test "podman info netavark " {
@@ -260,20 +250,25 @@ EOF
 
 }
 
-@test "podman - BoltDB cannot create new databases" {
-    skip_if_remote "DB checks only work for local Podman"
+@test "podman - empty string defaults for certain values" {
+    skip_if_remote "Test uses nonstandard paths for c/storage directories"
+
+    # We just want this to be empty - so graph driver will be set to the empty string
+    touch $PODMAN_TMPDIR/storage.conf
 
     safe_opts=$(podman_isolation_opts ${PODMAN_TMPDIR})
 
-    CI_DESIRED_DATABASE= run_podman 125 $safe_opts --db-backend=boltdb info
-    assert "$output" =~ "deprecated, no new BoltDB databases can be created" \
-           "without CI_DESIRED_DATABASE"
+    # Force all custom directories so we don't pick up an existing database
+    CONTAINERS_STORAGE_CONF=$PODMAN_TMPDIR/storage.conf run_podman $safe_opts info --format {{.Store.GraphDriverName}}
 
-    CI_DESIRED_DATABASE=boltdb run_podman $safe_opts --log-level=debug --db-backend=boltdb info
-    assert "$output" =~ "Allowing deprecated database backend" \
-           "with CI_DESIRED_DATABASE"
+    # Now add a valid graph driver to storage.conf
+    cat >$PODMAN_TMPDIR/storage.conf <<EOF
+[storage]
+driver="$(podman_storage_driver)"
+EOF
 
-    run_podman $safe_opts system reset --force
+    # Second run of Podman should still succeed after editing the graph driver.
+    CONTAINERS_STORAGE_CONF=$PODMAN_TMPDIR/storage.conf run_podman $safe_opts info --format {{.Store.GraphDriverName}}
 }
 
 # vim: filetype=sh

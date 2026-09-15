@@ -14,13 +14,13 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/containernetworking/plugins/pkg/ns"
-	"github.com/containers/common/libnetwork/types"
-	"github.com/containers/common/pkg/rootlessport"
 	rkport "github.com/rootless-containers/rootlesskit/v2/pkg/port"
 	rkbuiltin "github.com/rootless-containers/rootlesskit/v2/pkg/port/builtin"
 	rkportutil "github.com/rootless-containers/rootlesskit/v2/pkg/port/portutil"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/libnetwork/types"
+	"go.podman.io/common/pkg/netns"
+	"go.podman.io/common/pkg/rootlessport"
 	"golang.org/x/sys/unix"
 )
 
@@ -84,7 +84,7 @@ func parent() error {
 	}
 
 	socketDir := filepath.Join(cfg.TmpDir, "rp")
-	err = os.MkdirAll(socketDir, 0700)
+	err = os.MkdirAll(socketDir, 0o700)
 	if err != nil {
 		return err
 	}
@@ -137,11 +137,11 @@ func parent() error {
 	cmd.Stdout = &logrusWriter{prefix: "child"}
 	cmd.Stderr = cmd.Stdout
 	cmd.Env = append(os.Environ(), reexecChildEnvOpaque+"="+string(opaqueJSON))
-	childNS, err := ns.GetNS(cfg.NetNSPath)
+	childNS, err := netns.GetNS(cfg.NetNSPath)
 	if err != nil {
 		return err
 	}
-	if err := childNS.Do(func(_ ns.NetNS) error {
+	if err := childNS.Do(func(_ netns.NetNS) error {
 		logrus.Infof("Starting child driver in child netns (%q %v)", cmd.Path, cmd.Args)
 		return cmd.Start()
 	}); err != nil {
@@ -194,14 +194,15 @@ outer:
 		return err
 	}
 
-	// we only need to have a socket to reload ports when we run under rootless cni
+	// we only need to have a socket to reload ports when we are using
+	// rootless bridge networking (RootlessCNI is set when netStatus != nil)
 	if cfg.RootlessCNI {
 		socketfile := filepath.Join(socketDir, cfg.ContainerID)
 		// make sure to remove the file if it exists to prevent EADDRINUSE
 		_ = os.Remove(socketfile)
 		// workaround to bypass the 108 char socket path limit
 		// open the fd and use the path to the fd as bind argument
-		fd, err := unix.Open(socketDir, unix.O_PATH, 0)
+		fd, err := unix.Open(socketDir, unix.O_PATH|unix.O_CLOEXEC, 0)
 		if err != nil {
 			return err
 		}
@@ -223,12 +224,12 @@ outer:
 
 	// https://github.com/containers/podman/issues/11248
 	// Copy /dev/null to stdout and stderr to prevent SIGPIPE errors
-	if f, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0755); err == nil {
+	if f, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0o755); err == nil {
 		unix.Dup2(int(f.Fd()), 1) //nolint:errcheck
 		unix.Dup2(int(f.Fd()), 2) //nolint:errcheck
 		f.Close()
 	}
-	// write and close ReadyFD (convention is same as slirp4netns --ready-fd)
+	// write and close ReadyFD to signal readiness
 	if _, err := readyW.Write([]byte("1")); err != nil {
 		return err
 	}
@@ -294,11 +295,22 @@ func handler(ctx context.Context, conn io.Reader, pm rkport.Manager) error {
 func exposePorts(pm rkport.Manager, portMappings []types.PortMapping, childIP string) error {
 	ctx := context.TODO()
 	for _, port := range portMappings {
-		protocols := strings.Split(port.Protocol, ",")
-		for _, protocol := range protocols {
+		for protocol := range strings.SplitSeq(port.Protocol, ",") {
 			hostIP := port.HostIP
-			if hostIP == "" {
-				hostIP = "0.0.0.0"
+			if hostIP != "" {
+				// go binds dual stack by default even when 0.0.0.0 is set as ip
+				// We want no host ip to mean dual stack (default), "0.0.0.0" ipv4 only
+				// and "::" ipv6 only. To do that the go std protocol strict uses tcp4/6.
+				ip := net.ParseIP(hostIP)
+				if ip.IsUnspecified() {
+					if ip.To4() != nil {
+						// is ipv4
+						protocol += "4"
+					} else {
+						// else is ipv6
+						protocol += "6"
+					}
+				}
 			}
 			for i := uint16(0); i < port.Range; i++ {
 				spec := rkport.Spec{
@@ -309,10 +321,8 @@ func exposePorts(pm rkport.Manager, portMappings []types.PortMapping, childIP st
 					ChildIP:    childIP,
 				}
 
-				for _, spec = range splitDualStackSpecIfWsl(spec) {
-					if err := validateAndAddPort(ctx, pm, spec); err != nil {
-						return err
-					}
+				if err := validateAndAddPort(ctx, pm, spec); err != nil {
+					return err
 				}
 			}
 		}

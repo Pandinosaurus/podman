@@ -13,9 +13,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/containers/podman/v5/libpod/define"
 	"github.com/coreos/go-systemd/v22/daemon"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/podman/v6/libpod/define"
 	"golang.org/x/sys/unix"
 )
 
@@ -145,7 +145,7 @@ func (p *NotifyProxy) listen() {
 			sBuilder.Write(buffer[:n])
 			var isBarrier, isReady bool
 
-			for _, line := range strings.Split(sBuilder.String(), "\n") {
+			for line := range strings.SplitSeq(sBuilder.String(), "\n") {
 				switch line {
 				case _notifyRdyMsg:
 					isReady = true
@@ -167,7 +167,7 @@ func (p *NotifyProxy) listen() {
 					}
 					for _, fd := range fds {
 						if err := unix.Close(fd); err != nil {
-							logrus.Errorf("closing fd passed on socket %q: %v", fd, err)
+							logrus.Errorf("closing fd passed on socket %d: %v", fd, err)
 							continue
 						}
 					}

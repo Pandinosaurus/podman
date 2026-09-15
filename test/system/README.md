@@ -86,12 +86,12 @@ Requirements
 - bats
 - jq
 - skopeo
-- nmap-ncat
 - httpd-tools
 - openssl
 - socat
 - buildah
 - gnupg
+- xfsprogs
 
 
 Further Details

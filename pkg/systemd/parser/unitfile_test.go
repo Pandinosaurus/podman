@@ -1,7 +1,9 @@
 package parser
 
 import (
+	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -119,7 +121,10 @@ After=dbus.socket
 
 [Service]
 BusName=org.freedesktop.login1
-CapabilityBoundingSet=CAP_SYS_ADMIN CAP_MAC_ADMIN CAP_AUDIT_CONTROL CAP_CHOWN CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE CAP_FOWNER CAP_SYS_TTY_CONFIG CAP_LINUX_IMMUTABLE
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_MAC_ADMIN CAP_AUDIT_CONTROL CAP_CHOWN CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE \
+# comment inside a continuation line \
+CAP_FOWNER \
+CAP_SYS_TTY_CONFIG CAP_LINUX_IMMUTABLE
 DeviceAllow=block-* r
 DeviceAllow=char-/dev/console rw
 DeviceAllow=char-drm rw
@@ -158,8 +163,8 @@ SystemCallFilter=@system-service
 
 # Increase the default a bit in order to allow many simultaneous logins since
 # we keep one fd open per session.
-LimitNOFILE=524288
-`
+LimitNOFILE=524288  \`
+
 const systemdnetworkdService = `#  SPDX-License-Identifier: LGPL-2.1-or-later
 #
 #  This file is part of systemd.
@@ -264,6 +269,23 @@ var sampleDropinPaths = map[string][]string{
 	sampleDropinTemplateInstance: sampleDropinTemplateInstancePaths,
 }
 
+func filterComments(input string) string {
+	lines := strings.Split(input, "\n")
+	filtered := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		filtered = append(filtered, line)
+	}
+	// merge continuation lines
+	joined := strings.ReplaceAll(strings.Join(filtered, "\n"), "\\\n", "")
+
+	// and remove any trailing new line, backslash or space
+	return strings.TrimRight(joined, "\n\\ ")
+}
+
 func TestRanges_Roundtrip(t *testing.T) {
 	for i := range samples {
 		sample := samples[i]
@@ -278,7 +300,7 @@ func TestRanges_Roundtrip(t *testing.T) {
 			panic(e)
 		}
 
-		assert.Equal(t, sample, asStr)
+		assert.Equal(t, filterComments(sample), filterComments(asStr))
 	}
 }
 
@@ -291,4 +313,99 @@ func TestUnitDropinPaths_Search(t *testing.T) {
 
 		assert.True(t, reflect.DeepEqual(expectedPaths, generatedPaths))
 	}
+}
+
+func TestCommentsIgnored(t *testing.T) {
+	unitWithComments := `[Container]
+# comment
+Name=my-container
+; another comment
+`
+	f := NewUnitFile()
+	if e := f.Parse(unitWithComments); e != nil {
+		panic(e)
+	}
+
+	groups := f.ListGroups()
+	assert.Len(t, groups, 1)
+	assert.Equal(t, "Container", groups[0])
+
+	comments := make([]string, 0, 2)
+	for _, line := range f.groups[0].lines {
+		if line.isComment {
+			comments = append(comments, line.value)
+		}
+	}
+
+	assert.Len(t, comments, 2)
+	assert.Equal(t, "# comment", comments[0])
+	assert.Equal(t, "; another comment", comments[1])
+}
+
+func TestLookupQuoteStripping(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{`"hello"`, "hello"},
+		{`hello`, "hello"},
+		{`"hello`, `"hello`},
+		{`/bin/sh -c "echo "hello""`, `/bin/sh -c "echo "hello""`},
+		{`"/bin/sh -c "echo "hello"""`, `/bin/sh -c "echo "hello""`},
+		{`""`, ""},
+		{`hello"`, `hello"`},
+		{`/bin/sh -c "echo 'hello world!'"`, `/bin/sh -c "echo 'hello world!'"`},
+	}
+
+	for _, tt := range tests {
+		t.Run(fmt.Sprintf("Lookup(%q)", tt.input), func(t *testing.T) {
+			unitData := "[Container]\nKey=" + tt.input + "\n"
+			f := NewUnitFile()
+			err := f.Parse(unitData)
+			assert.NoError(t, err)
+
+			val, ok := f.Lookup("Container", "Key")
+			assert.True(t, ok)
+			assert.Equal(t, tt.expected, val)
+		})
+	}
+}
+
+func TestLookupIntParsesSignedNumbers(t *testing.T) {
+	unit := NewUnitFile()
+	unit.Add("Service", "Positive", "42")
+	unit.Add("Service", "ExplicitPositive", "+42")
+	unit.Add("Service", "Negative", "-42")
+	unit.Add("Service", "Hex", "0x2a")
+	unit.Add("Service", "Octal", "052")
+
+	tests := []struct {
+		key      string
+		expected int64
+	}{
+		{"Positive", 42},
+		{"ExplicitPositive", 42},
+		{"Negative", -42},
+		{"Hex", 42},
+		{"Octal", 42},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.key, func(t *testing.T) {
+			assert.Equal(t, tt.expected, unit.LookupInt("Service", tt.key, 0))
+		})
+	}
+}
+
+func FuzzParser(f *testing.F) {
+	for _, sample := range samples {
+		f.Add([]byte(sample))
+	}
+
+	f.Fuzz(func(_ *testing.T, orig []byte) {
+		unitFile := NewUnitFile()
+		unitFile.Path = "foo/bar"
+		unitFile.Filename = "bar"
+		_ = unitFile.Parse(string(orig))
+	})
 }

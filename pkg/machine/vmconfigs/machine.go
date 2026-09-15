@@ -10,18 +10,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/containers/common/pkg/strongunits"
-	define2 "github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/errorhandling"
-	"github.com/containers/podman/v5/pkg/machine/connection"
-	"github.com/containers/podman/v5/pkg/machine/define"
-	"github.com/containers/podman/v5/pkg/machine/env"
-	"github.com/containers/podman/v5/pkg/machine/lock"
-	"github.com/containers/podman/v5/pkg/machine/ports"
-	"github.com/containers/storage/pkg/fileutils"
-	"github.com/containers/storage/pkg/ioutils"
-	"github.com/containers/storage/pkg/lockfile"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/pkg/strongunits"
+	"go.podman.io/podman/v6/pkg/errorhandling"
+	"go.podman.io/podman/v6/pkg/machine/connection"
+	"go.podman.io/podman/v6/pkg/machine/define"
+	"go.podman.io/podman/v6/pkg/machine/lock"
+	"go.podman.io/podman/v6/pkg/machine/ports"
+	"go.podman.io/storage/pkg/fileutils"
+	"go.podman.io/storage/pkg/ioutils"
+	"go.podman.io/storage/pkg/lockfile"
 )
 
 /*
@@ -61,7 +59,7 @@ func NewMachineConfig(opts define.InitOptions, dirs *define.MachineDirs, sshIden
 	// Given that we are locked now and check again that the config file does not exists,
 	// if it does it means the VM was already created and we should error.
 	if err := fileutils.Exists(cf.Path); err == nil {
-		return nil, fmt.Errorf("%s: %w", opts.Name, define.ErrVMAlreadyExists)
+		return nil, &define.ErrVMAlreadyExists{Name: opts.Name}
 	}
 
 	if vmtype != define.QemuVirt && len(opts.USBs) > 0 {
@@ -81,6 +79,10 @@ func NewMachineConfig(opts define.InitOptions, dirs *define.MachineDirs, sshIden
 		USBs:     usbs,
 	}
 	mc.Resources = mrc
+
+	if opts.Swap > 0 {
+		mc.Swap = strongunits.MiB(opts.Swap)
+	}
 
 	sshPort, err := ports.AllocateMachinePort()
 	if err != nil {
@@ -140,17 +142,6 @@ func (mc *MachineConfig) SetRootful(rootful bool) error {
 	mc.HostUser.Rootful = rootful
 	mc.HostUser.Modified = true
 	return nil
-}
-
-func (mc *MachineConfig) removeSystemConnection() error { //nolint:unused
-	return define2.ErrNotImplemented
-}
-
-// updateLastBoot writes the current time to the machine configuration file. it is
-// an non-locking method and assumes it is being called locked
-func (mc *MachineConfig) updateLastBoot() error { //nolint:unused
-	mc.LastUp = time.Now()
-	return mc.Write()
 }
 
 func (mc *MachineConfig) Remove(machines map[string]bool, saveIgnition, saveImage bool) ([]string, func() error, error) {
@@ -304,46 +295,13 @@ func (mc *MachineConfig) LogFile() (*define.VMFile, error) {
 	return rtDir.AppendToNewVMFile(mc.Name+".log", nil)
 }
 
-func (mc *MachineConfig) Kind() (define.VMType, error) {
-	// Not super in love with this approach
-	if mc.QEMUHypervisor != nil {
-		return define.QemuVirt, nil
-	}
-	if mc.AppleHypervisor != nil {
-		return define.AppleHvVirt, nil
-	}
-	if mc.HyperVHypervisor != nil {
-		return define.HyperVVirt, nil
-	}
-	if mc.WSLHypervisor != nil {
-		return define.WSLVirt, nil
-	}
-
-	return define.UnknownVirt, nil
+func (mc *MachineConfig) IsFirstBoot() bool {
+	return mc.LastUp.IsZero()
 }
 
-func (mc *MachineConfig) IsFirstBoot() (bool, error) {
-	never, err := time.Parse(time.RFC3339, "0001-01-01T00:00:00Z")
-	if err != nil {
-		return false, err
-	}
-	return mc.LastUp == never, nil
-}
-
-func (mc *MachineConfig) ConnectionInfo(vmtype define.VMType) (*define.VMFile, *define.VMFile, error) {
-	var (
-		socket *define.VMFile
-		pipe   *define.VMFile
-	)
-
-	if vmtype == define.HyperVVirt || vmtype == define.WSLVirt {
-		pipeName := env.WithPodmanPrefix(mc.Name)
-		pipe = &define.VMFile{Path: `\\.\pipe\` + pipeName}
-		return nil, pipe, nil
-	}
-
+func (mc *MachineConfig) ConnectionInfo(_ define.VMType) (*define.VMFile, *define.VMFile, error) {
 	socket, err := mc.APISocket()
-	return socket, nil, err
+	return socket, getPipe(mc.Name), err
 }
 
 // LoadMachineByName returns a machine config based on the vm name and provider
@@ -384,7 +342,7 @@ func loadMachineFromFQPath(path *define.VMFile) (*MachineConfig, error) {
 	}
 
 	if err = json.Unmarshal(b, mc); err != nil {
-		return nil, fmt.Errorf("unable to load machine config file: %q", err)
+		return nil, fmt.Errorf("unable to load machine config file: %w", err)
 	}
 	lock, err := lock.GetMachineLock(mc.Name, filepath.Dir(path.GetPath()))
 	mc.lock = lock
@@ -394,7 +352,7 @@ func loadMachineFromFQPath(path *define.VMFile) (*MachineConfig, error) {
 // LoadMachinesInDir returns all the machineconfigs located in given dir
 func LoadMachinesInDir(dirs *define.MachineDirs) (map[string]*MachineConfig, error) {
 	mcs := make(map[string]*MachineConfig)
-	if err := filepath.WalkDir(dirs.ConfigDir.GetPath(), func(path string, d fs.DirEntry, err error) error {
+	if err := filepath.WalkDir(dirs.ConfigDir.GetPath(), func(_ string, d fs.DirEntry, _ error) error {
 		if strings.HasSuffix(d.Name(), ".json") {
 			fullPath, err := dirs.ConfigDir.AppendToNewVMFile(d.Name(), nil)
 			if err != nil {

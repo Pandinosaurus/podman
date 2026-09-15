@@ -7,15 +7,15 @@ import (
 	"os"
 	"strings"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/parse"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/utils"
-	"github.com/containers/podman/v5/cmd/podman/validate"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/docker/go-units"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/parse"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/utils"
+	"go.podman.io/podman/v6/cmd/podman/validate"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 var (
@@ -48,13 +48,14 @@ func init() {
 	flags.BoolVarP(&force, "force", "f", false, "Do not prompt for confirmation.  The default is false")
 	flags.BoolVarP(&pruneOptions.All, "all", "a", false, "Remove all unused data")
 	flags.BoolVar(&pruneOptions.External, "external", false, "Remove container data in storage not controlled by podman")
+	flags.BoolVar(&pruneOptions.Build, "build", false, "Remove build containers")
 	flags.BoolVar(&pruneOptions.Volume, "volumes", false, "Prune volumes")
 	filterFlagName := "filter"
 	flags.StringArrayVar(&filters, filterFlagName, []string{}, "Provide filter values (e.g. 'label=<key>=<value>')")
 	_ = pruneCommand.RegisterFlagCompletionFunc(filterFlagName, common.AutocompletePruneFilters)
 }
 
-func prune(cmd *cobra.Command, args []string) error {
+func prune(_ *cobra.Command, _ []string) error {
 	var err error
 	// Prompt for confirmation if --force is not set, unless --external
 	if !force && !pruneOptions.External {
@@ -64,8 +65,12 @@ func prune(cmd *cobra.Command, args []string) error {
 			volumeString = `
 	- all volumes not used by at least one container`
 		}
-
-		fmt.Printf(createPruneWarningMessage(pruneOptions), volumeString, "Are you sure you want to continue? [y/N] ")
+		buildString := ""
+		if pruneOptions.Build {
+			buildString = `
+	- all build containers`
+		}
+		fmt.Printf(createPruneWarningMessage(pruneOptions), volumeString, buildString, "Are you sure you want to continue? [y/N] ")
 
 		answer, err := reader.ReadString('\n')
 		if err != nil {
@@ -115,7 +120,7 @@ func prune(cmd *cobra.Command, args []string) error {
 	}
 
 	if !pruneOptions.External {
-		fmt.Printf("Total reclaimed space: %s\n", units.HumanSize((float64)(response.ReclaimedSpace)))
+		fmt.Printf("Total reclaimed space: %s\n", units.HumanSize(float64(response.ReclaimedSpace)))
 	}
 	return nil
 }
@@ -124,7 +129,7 @@ func createPruneWarningMessage(pruneOpts entities.SystemPruneOptions) string {
 	if pruneOpts.All {
 		return `WARNING! This command removes:
 	- all stopped containers
-	- all networks not used by at least one container%s
+	- all networks not used by at least one container%s%s
 	- all images without at least one container associated with them
 	- all build cache
 
@@ -132,7 +137,7 @@ func createPruneWarningMessage(pruneOpts entities.SystemPruneOptions) string {
 	}
 	return `WARNING! This command removes:
 	- all stopped containers
-	- all networks not used by at least one container%s
+	- all networks not used by at least one container%s%s
 	- all dangling images
 	- all dangling build cache
 

@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/containers/common/pkg/report"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/report"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 var (
@@ -32,15 +32,13 @@ var (
 		RunE:              mount,
 		ValidArgsFunction: common.AutocompleteImages,
 		Example: `podman image mount imgID
-  podman image mount imgID1 imgID2 imgID3
-  podman image mount
-  podman image mount --all`,
+podman image mount imgID1 imgID2 imgID3
+podman image mount
+podman image mount --all`,
 	}
 )
 
-var (
-	mountOpts entities.ImageMountOptions
-)
+var mountOpts entities.ImageMountOptions
 
 func mountFlags(cmd *cobra.Command) {
 	flags := cmd.Flags()
@@ -65,7 +63,7 @@ func mount(cmd *cobra.Command, args []string) error {
 		return errors.New("when using the --all switch, you may not pass any image names or IDs")
 	}
 
-	reports, err := registry.ImageEngine().Mount(registry.GetContext(), args, mountOpts)
+	reports, err := registry.ImageEngine().Mount(registry.Context(), args, mountOpts)
 	if err != nil {
 		return err
 	}

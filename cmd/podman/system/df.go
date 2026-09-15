@@ -8,14 +8,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/common/pkg/report"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/validate"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/docker/go-units"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/common/pkg/report"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/validate"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 var (
@@ -34,9 +34,7 @@ var (
 	}
 )
 
-var (
-	dfOptions entities.SystemDfOptions
-)
+var dfOptions entities.SystemDfOptions
 
 func init() {
 	registry.Commands = append(registry.Commands, registry.CliCommand{
@@ -51,7 +49,7 @@ func init() {
 	_ = dfSystemCommand.RegisterFlagCompletionFunc(formatFlagName, common.AutocompleteFormat(&dfSummary{}))
 }
 
-func df(cmd *cobra.Command, args []string) error {
+func df(cmd *cobra.Command, _ []string) error {
 	reports, err := registry.ContainerEngine().SystemDf(registry.Context(), dfOptions)
 	if err != nil {
 		return err
@@ -69,9 +67,8 @@ func df(cmd *cobra.Command, args []string) error {
 
 func printSummary(cmd *cobra.Command, reports *entities.SystemDfReport) error {
 	var (
-		dfSummaries []*dfSummary
-		active      int
-		used        int64
+		active int
+		used   int64
 	)
 
 	visitedImages := make(map[string]bool)
@@ -93,7 +90,6 @@ func printSummary(cmd *cobra.Command, reports *entities.SystemDfReport) error {
 		RawSize:        reports.ImagesSize,        // The "raw" size is the sum of all layer sizes
 		RawReclaimable: reports.ImagesSize - used, // We can reclaim the date of "unused" images (i.e., the ones without containers)
 	}
-	dfSummaries = append(dfSummaries, &imageSummary)
 
 	// Containers
 	var (
@@ -115,7 +111,6 @@ func printSummary(cmd *cobra.Command, reports *entities.SystemDfReport) error {
 		RawSize:        conSize,
 		RawReclaimable: conReclaimable,
 	}
-	dfSummaries = append(dfSummaries, &containerSummary)
 
 	// Volumes
 	var (
@@ -135,7 +130,11 @@ func printSummary(cmd *cobra.Command, reports *entities.SystemDfReport) error {
 		RawSize:        volumesSize,
 		RawReclaimable: volumesReclaimable,
 	}
-	dfSummaries = append(dfSummaries, &volumeSummary)
+	dfSummaries := []*dfSummary{
+		&imageSummary,
+		&containerSummary,
+		&volumeSummary,
+	}
 
 	// need to give un-exported fields
 	hdrs := report.Headers(dfSummary{}, map[string]string{
@@ -172,7 +171,7 @@ func printJSON(data []*dfSummary) error {
 	return nil
 }
 
-func printVerbose(cmd *cobra.Command, reports *entities.SystemDfReport) error { //nolint:interfacer
+func printVerbose(cmd *cobra.Command, reports *entities.SystemDfReport) error {
 	rpt := report.New(os.Stdout, cmd.Name())
 	defer rpt.Flush()
 
@@ -233,7 +232,7 @@ func printVerbose(cmd *cobra.Command, reports *entities.SystemDfReport) error { 
 	return writeTemplate(rpt, hdrs, dfVolumes)
 }
 
-func writeTemplate(rpt *report.Formatter, hdrs []map[string]string, output interface{}) error {
+func writeTemplate(rpt *report.Formatter, hdrs []map[string]string, output any) error {
 	if rpt.RenderHeaders {
 		if err := rpt.Execute(hdrs); err != nil {
 			return err
@@ -275,7 +274,10 @@ func (d *dfContainer) ContainerID() string {
 }
 
 func (d *dfContainer) Image() string {
-	return d.SystemDfContainerReport.Image[0:12]
+	if len(d.SystemDfContainerReport.Image) >= 12 {
+		return d.SystemDfContainerReport.Image[0:12]
+	}
+	return ""
 }
 
 func (d *dfContainer) Command() string {
@@ -319,7 +321,7 @@ func (d *dfSummary) Reclaimable() string {
 	return fmt.Sprintf("%s (%d%%)", units.HumanSize(float64(d.RawReclaimable)), percent)
 }
 
-func (d dfSummary) MarshalJSON() ([]byte, error) {
+func (d *dfSummary) MarshalJSON() ([]byte, error) {
 	// need to create a new type here to prevent infinite recursion in MarshalJSON() call
 	type rawDf dfSummary
 
@@ -329,5 +331,5 @@ func (d dfSummary) MarshalJSON() ([]byte, error) {
 		TotalCount  int
 		Size        string
 		Reclaimable string
-	}{rawDf(d), d.Total, d.Size(), d.Reclaimable()})
+	}{rawDf(*d), d.Total, d.Size(), d.Reclaimable()})
 }

@@ -19,9 +19,9 @@ Create the file ```$GOPATH/src/github.com/containers/podman/cmd/podman/manifest/
 package manifest
 
 import (
-    "github.com/containers/podman/cmd/podman/registry"
-    "github.com/containers/podman/cmd/podman/validate"
-    "github.com/containers/podman/pkg/domain/entities"
+    "go.podman.io/podman/v6/cmd/podman/registry"
+    "go.podman.io/podman/v6/cmd/podman/validate"
+    "go.podman.io/podman/v6/pkg/domain/entities"
     "github.com/spf13/cobra"
 )
 
@@ -48,7 +48,7 @@ To "wire" in the `manifest` command, edit the file ```$GOPATH/src/github.com/con
 ```go
 package main
 
-import	_ "github.com/containers/podman/cmd/podman/manifest"
+import	_ "go.podman.io/podman/v6/cmd/podman/manifest"
 ```
 
 ## Adding a new sub command `podman manifest list`
@@ -57,8 +57,8 @@ Create the file ```$GOPATH/src/github.com/containers/podman/cmd/podman/manifest/
 package manifest
 
 import (
-    "github.com/containers/podman/cmd/podman/registry"
-    "github.com/containers/podman/pkg/domain/entities"
+    "go.podman.io/podman/v6/cmd/podman/registry"
+    "go.podman.io/podman/v6/pkg/domain/entities"
     "github.com/spf13/cobra"
 )
 
@@ -112,7 +112,7 @@ The complete set can be found in the `validate` package, here are some examples:
 
 ## Adding CLI flags
 
-When adding adding a new cli option that accepts a string array, there are two options to choose from: `StringSlice()` and `StringArray()`.
+When adding a new cli option that accepts a string array, there are two options to choose from: `StringSlice()` and `StringArray()`.
 They differ slightly in their behavior: `StringSlice()` allows the values to be comma separated so `--opt v1,v2 --opt v3` results in
 `[]string{"v1", "v2", "v3"}`, while `StringArray()`  would result in `[]string{"v1,v2", "v3"}`. Thus it is impossible to use values with comma in `StringSlice()`, which makes it unsuitable for flags that accept arbitrary values such as file paths as example. Also, because `StringSlice()` uses the csv lib to parse the values, it has special escaping rules for things like quotes, see https://github.com/containers/podman/issues/20064 for an example of how complicated things can get because of this.
 Thus use `StringSlice()` only when the option accepts predefined values that do not contain special characters, for example `--cap-add` and `--cap-drop` are a good example for this. Using `--cap-add NET_ADMIN,NET_RAW` is equal to `--cap-add NET_ADMIN --cap-add NET_RAW` so it is better suited to save some typing for users.

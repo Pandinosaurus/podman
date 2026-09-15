@@ -8,10 +8,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/containers/common/libnetwork/types"
-	"github.com/containers/common/pkg/config"
-	storageTypes "github.com/containers/storage/types"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/libnetwork/types"
+	"go.podman.io/common/pkg/config"
+	storageTypes "go.podman.io/storage/types"
 )
 
 // ReadPodIDFile reads the specified file and returns its content (i.e., first
@@ -21,7 +21,8 @@ func ReadPodIDFile(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("reading pod ID file: %w", err)
 	}
-	return strings.Split(string(content), "\n")[0], nil
+	id, _, _ := strings.Cut(string(content), "\n")
+	return id, nil
 }
 
 // ReadPodIDFiles reads the specified files and returns their content (i.e.,
@@ -62,7 +63,7 @@ func CreateExpose(expose []string) (map[uint16]string, error) {
 		}
 
 		var index uint16
-		for index = 0; index < len; index++ {
+		for index = range len {
 			portNum := start + index
 			protocols, ok := toReturn[portNum]
 			if !ok {
@@ -94,7 +95,7 @@ func CreatePortBindings(ports []string) ([]types.PortMapping, error) {
 		case 1:
 			// No protocol was provided
 		case 2:
-			proto = &(splitProto[1])
+			proto = &splitProto[1]
 		default:
 			return nil, errors.New("invalid port format - protocol can only be specified once")
 		}
@@ -131,14 +132,14 @@ func CreatePortBindings(ports []string) ([]types.PortMapping, error) {
 			}
 			ctrPort = splitPort[0]
 		case 2:
-			hostPort = &(splitPort[0])
+			hostPort = &splitPort[0]
 			ctrPort = splitPort[1]
 		case 3:
 			if haveV6 {
 				return nil, errors.New("invalid port format - when v6 address specified, must be [ipv6]:hostPort:ctrPort")
 			}
-			hostIP = &(splitPort[0])
-			hostPort = &(splitPort[1])
+			hostIP = &splitPort[0]
+			hostPort = &splitPort[1]
 			ctrPort = splitPort[2]
 		default:
 			return nil, errors.New("invalid port format - format is [[hostIP:]hostPort:]containerPort")
@@ -148,7 +149,6 @@ func CreatePortBindings(ports []string) ([]types.PortMapping, error) {
 		if err != nil {
 			return nil, err
 		}
-
 		toReturn = append(toReturn, newPort)
 	}
 
@@ -178,15 +178,12 @@ func parseSplitPort(hostIP, hostPort *string, ctrPort string, protocol *string) 
 	if hostIP != nil {
 		if *hostIP == "" {
 			return newPort, errors.New("must provide a non-empty container host IP to publish")
-		} else if *hostIP != "0.0.0.0" {
-			// If hostIP is 0.0.0.0, leave it unset - CNI treats
-			// 0.0.0.0 and empty differently, Docker does not.
-			testIP := net.ParseIP(*hostIP)
-			if testIP == nil {
-				return newPort, fmt.Errorf("cannot parse %q as an IP address", *hostIP)
-			}
-			newPort.HostIP = testIP.String()
 		}
+		testIP := net.ParseIP(*hostIP)
+		if testIP == nil {
+			return newPort, fmt.Errorf("cannot parse %q as an IP address", *hostIP)
+		}
+		newPort.HostIP = testIP.String()
 	}
 	if hostPort != nil {
 		if *hostPort == "" {
@@ -261,6 +258,48 @@ func parseAndValidatePort(port string) (uint16, error) {
 	return uint16(num), nil
 }
 
+// GlobalPodmanArgs returns the global podman CLI flags needed to ensure a
+// subprocess uses the same storage, runtime, and logging configuration as
+// the parent process. The returned slice does NOT include the podman binary
+// path or any subcommand-specific flags.
+func GlobalPodmanArgs(storageConfig storageTypes.StoreOptions, cfg *config.Config, syslog bool) []string {
+	args := []string{
+		"--root", storageConfig.GraphRoot,
+		"--runroot", storageConfig.RunRoot,
+		"--log-level", logrus.GetLevel().String(),
+		"--cgroup-manager", cfg.Engine.CgroupManager,
+		"--tmpdir", cfg.Engine.TmpDir,
+		"--network-config-dir", cfg.Network.NetworkConfigDir,
+		"--volumepath", cfg.Engine.VolumePath,
+		fmt.Sprintf("--transient-store=%t", storageConfig.TransientStore),
+	}
+	for _, dir := range cfg.Engine.HooksDir.Get() {
+		args = append(args, "--hooks-dir", dir)
+	}
+	if storageConfig.ImageStore != "" {
+		args = append(args, "--imagestore", storageConfig.ImageStore)
+	}
+	if cfg.Engine.OCIRuntime != "" {
+		args = append(args, "--runtime", cfg.Engine.OCIRuntime)
+	}
+	if storageConfig.GraphDriverName != "" {
+		args = append(args, "--storage-driver", storageConfig.GraphDriverName)
+	}
+	for _, opt := range storageConfig.GraphDriverOptions {
+		args = append(args, "--storage-opt", opt)
+	}
+	if cfg.Engine.EventsLogger != "" {
+		args = append(args, "--events-backend", cfg.Engine.EventsLogger)
+	}
+	if syslog {
+		args = append(args, "--syslog")
+	}
+	for _, module := range cfg.LoadedModules() {
+		args = append(args, "--module", module)
+	}
+	return args
+}
+
 func CreateExitCommandArgs(storageConfig storageTypes.StoreOptions, config *config.Config, syslog, rm, rmi, exec bool) ([]string, error) {
 	// We need a cleanup process for containers in the current model.
 	// But we can't assume that the caller is Podman - it could be another
@@ -273,47 +312,11 @@ func CreateExitCommandArgs(storageConfig storageTypes.StoreOptions, config *conf
 		return nil, err
 	}
 
-	command := []string{podmanPath,
-		"--root", storageConfig.GraphRoot,
-		"--runroot", storageConfig.RunRoot,
-		"--log-level", logrus.GetLevel().String(),
-		"--cgroup-manager", config.Engine.CgroupManager,
-		"--tmpdir", config.Engine.TmpDir,
-		"--network-config-dir", config.Network.NetworkConfigDir,
-		"--network-backend", config.Network.NetworkBackend,
-		"--volumepath", config.Engine.VolumePath,
-		"--db-backend", config.Engine.DBBackend,
-		fmt.Sprintf("--transient-store=%t", storageConfig.TransientStore),
-	}
-	if storageConfig.ImageStore != "" {
-		command = append(command, []string{"--imagestore", storageConfig.ImageStore}...)
-	}
-	if config.Engine.OCIRuntime != "" {
-		command = append(command, []string{"--runtime", config.Engine.OCIRuntime}...)
-	}
-	if storageConfig.GraphDriverName != "" {
-		command = append(command, []string{"--storage-driver", storageConfig.GraphDriverName}...)
-	}
-	for _, opt := range storageConfig.GraphDriverOptions {
-		command = append(command, []string{"--storage-opt", opt}...)
-	}
-	if config.Engine.EventsLogger != "" {
-		command = append(command, []string{"--events-backend", config.Engine.EventsLogger}...)
-	}
-
-	if syslog {
-		command = append(command, "--syslog")
-	}
-
-	// Make sure that loaded containers.conf modules are passed down to the
-	// callback as well.
-	for _, module := range config.LoadedModules() {
-		command = append(command, "--module", module)
-	}
+	command := append([]string{podmanPath}, GlobalPodmanArgs(storageConfig, config, syslog)...)
 
 	// --stopped-only is used to ensure we only cleanup stopped containers and do not race
 	// against other processes that did a cleanup() + init() again before we had the chance to run
-	command = append(command, []string{"container", "cleanup", "--stopped-only"}...)
+	command = append(command, "container", "cleanup", "--stopped-only")
 
 	if rm {
 		command = append(command, "--rm")

@@ -4,8 +4,8 @@ import (
 	"net"
 	"testing"
 
-	"github.com/containers/common/libnetwork/types"
 	"github.com/stretchr/testify/assert"
+	"go.podman.io/common/libnetwork/types"
 )
 
 func parsMacNoErr(mac string) types.HardwareAddr {
@@ -18,12 +18,13 @@ func TestParseNetworkFlag(t *testing.T) {
 	defaultNetName := "default"
 
 	tests := []struct {
-		name     string
-		args     []string
-		nsmode   Namespace
-		networks map[string]types.PerNetworkOptions
-		options  map[string][]string
-		err      string
+		name         string
+		args         []string
+		nsmode       Namespace
+		networks     map[string]types.PerNetworkOptions
+		networkOrder []string
+		options      map[string][]string
+		err          string
 	}{
 		{
 			name:     "empty input",
@@ -56,12 +57,12 @@ func TestParseNetworkFlag(t *testing.T) {
 			networks: map[string]types.PerNetworkOptions{
 				defaultNetName: {},
 			},
+			networkOrder: []string{defaultNetName},
 		},
 		{
-			name:     "slirp4netns mode",
-			args:     []string{"slirp4netns"},
-			nsmode:   Namespace{NSMode: Slirp},
-			networks: map[string]types.PerNetworkOptions{},
+			name: "slirp4netns mode",
+			args: []string{"slirp4netns"},
+			err:  "slirp4netns support has been removed, use --network=pasta instead; for existing containers, run `podman system migrate`",
 		},
 		{
 			name:     "from pod mode",
@@ -88,13 +89,9 @@ func TestParseNetworkFlag(t *testing.T) {
 			networks: map[string]types.PerNetworkOptions{},
 		},
 		{
-			name:     "slirp4netns mode with options",
-			args:     []string{"slirp4netns:cidr=10.0.0.0/24"},
-			nsmode:   Namespace{NSMode: Slirp},
-			networks: map[string]types.PerNetworkOptions{},
-			options: map[string][]string{
-				"slirp4netns": {"cidr=10.0.0.0/24"},
-			},
+			name: "slirp4netns mode with options",
+			args: []string{"slirp4netns:cidr=10.0.0.0/24"},
+			err:  "slirp4netns support has been removed, use --network=pasta instead; for existing containers, run `podman system migrate`",
 		},
 		{
 			name:   "bridge mode with options 1",
@@ -106,6 +103,7 @@ func TestParseNetworkFlag(t *testing.T) {
 					StaticMAC: parsMacNoErr("11:22:33:44:55:66"),
 				},
 			},
+			networkOrder: []string{defaultNetName},
 		},
 		{
 			name:   "bridge mode with options 2",
@@ -116,6 +114,7 @@ func TestParseNetworkFlag(t *testing.T) {
 					StaticIPs: []net.IP{net.ParseIP("10.0.0.1"), net.ParseIP("10.0.0.5")},
 				},
 			},
+			networkOrder: []string{defaultNetName},
 		},
 		{
 			name:   "bridge mode with ip6 option",
@@ -126,6 +125,7 @@ func TestParseNetworkFlag(t *testing.T) {
 					StaticIPs: []net.IP{net.ParseIP("fd10::")},
 				},
 			},
+			networkOrder: []string{defaultNetName},
 		},
 		{
 			name:   "bridge mode with alias option",
@@ -136,6 +136,7 @@ func TestParseNetworkFlag(t *testing.T) {
 					Aliases: []string{"myname", "myname2"},
 				},
 			},
+			networkOrder: []string{defaultNetName},
 		},
 		{
 			name:   "bridge mode with alias option",
@@ -146,6 +147,7 @@ func TestParseNetworkFlag(t *testing.T) {
 					Aliases: []string{"myname", "myname2"},
 				},
 			},
+			networkOrder: []string{defaultNetName},
 		},
 		{
 			name:   "bridge mode with interface option",
@@ -156,12 +158,37 @@ func TestParseNetworkFlag(t *testing.T) {
 					InterfaceName: "eth123",
 				},
 			},
+			networkOrder: []string{defaultNetName},
 		},
 		{
-			name:   "bridge mode with invalid option",
+			name:   "bridge mode with unknown option",
 			args:   []string{"bridge:abc=123"},
 			nsmode: Namespace{NSMode: Bridge},
-			err:    "unknown bridge network option: abc",
+			networks: map[string]types.PerNetworkOptions{
+				defaultNetName: {
+					InterfaceName: "",
+					Options: map[string]string{
+						"abc": "123",
+					},
+				},
+			},
+			networkOrder: []string{defaultNetName},
+		},
+		{
+			name:   "bridge mode with multiple unknown options",
+			args:   []string{"bridge:abc=123,xyz=789,other=a-much-longer-value"},
+			nsmode: Namespace{NSMode: Bridge},
+			networks: map[string]types.PerNetworkOptions{
+				defaultNetName: {
+					InterfaceName: "",
+					Options: map[string]string{
+						"abc":   "123",
+						"xyz":   "789",
+						"other": "a-much-longer-value",
+					},
+				},
+			},
+			networkOrder: []string{defaultNetName},
 		},
 		{
 			name:   "bridge mode with invalid ip",
@@ -176,12 +203,27 @@ func TestParseNetworkFlag(t *testing.T) {
 			err:    "address 123: invalid MAC address",
 		},
 		{
+			name:   "bridge mode with host interface name",
+			args:   []string{"bridge:host_interface_name=my-veth"},
+			nsmode: Namespace{NSMode: Bridge},
+			networks: map[string]types.PerNetworkOptions{
+				defaultNetName: {
+					InterfaceName: "",
+					Options: map[string]string{
+						"host_interface_name": "my-veth",
+					},
+				},
+			},
+			networkOrder: []string{defaultNetName},
+		},
+		{
 			name:   "network name",
 			args:   []string{"someName"},
 			nsmode: Namespace{NSMode: Bridge},
 			networks: map[string]types.PerNetworkOptions{
 				"someName": {},
 			},
+			networkOrder: []string{"someName"},
 		},
 		{
 			name:   "network name with options",
@@ -190,6 +232,7 @@ func TestParseNetworkFlag(t *testing.T) {
 			networks: map[string]types.PerNetworkOptions{
 				"someName": {StaticIPs: []net.IP{net.ParseIP("10.0.0.1")}},
 			},
+			networkOrder: []string{"someName"},
 		},
 		{
 			name:   "multiple networks",
@@ -199,6 +242,7 @@ func TestParseNetworkFlag(t *testing.T) {
 				"someName": {},
 				"net2":     {},
 			},
+			networkOrder: []string{"someName", "net2"},
 		},
 		{
 			name:   "multiple networks with options",
@@ -208,6 +252,7 @@ func TestParseNetworkFlag(t *testing.T) {
 				"someName": {StaticIPs: []net.IP{net.ParseIP("10.0.0.1")}},
 				"net2":     {StaticIPs: []net.IP{net.ParseIP("10.10.0.1")}},
 			},
+			networkOrder: []string{"someName", "net2"},
 		},
 		{
 			name:   "multiple networks with bridge mode first should map to default net",
@@ -217,6 +262,7 @@ func TestParseNetworkFlag(t *testing.T) {
 				defaultNetName: {},
 				"net2":         {},
 			},
+			networkOrder: []string{defaultNetName, "net2"},
 		},
 		{
 			name:   "conflicting network modes should error",
@@ -240,7 +286,7 @@ func TestParseNetworkFlag(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, got1, got2, err := ParseNetworkFlag(tt.args)
+			got, got1, got2, got3, err := ParseNetworkFlag(tt.args)
 			if tt.err != "" {
 				assert.EqualError(t, err, tt.err, tt.name)
 			} else {
@@ -249,7 +295,8 @@ func TestParseNetworkFlag(t *testing.T) {
 
 			assert.Equal(t, tt.nsmode, got, tt.name)
 			assert.Equal(t, tt.networks, got1, tt.name)
-			assert.Equal(t, tt.options, got2, tt.name)
+			assert.Equal(t, tt.networkOrder, got2, tt.name)
+			assert.Equal(t, tt.options, got3, tt.name)
 		})
 	}
 }

@@ -187,6 +187,11 @@ skip "podman-build fails with 'context must be a directory'" \
 skip "does not pass in Podman CI: needs investigation" \
      "bud with --no-hostname"
 
+# 2024-11-22 not really a useful test of podman (the push/pull uses buildah binary)
+#            and it flakes when run in parallel. We choose to go with CI speed.
+skip "not a useful podman test, and it breaks when run parallel" \
+     "bud: build push with --force-compression"
+
 ###############################################################################
 # BEGIN tests which are skipped because they make no sense under podman-remote
 
@@ -208,10 +213,6 @@ skip_if_remote "secret files not implemented under podman-remote" \
 
 skip_if_remote "--signature-policy does not work with podman-remote" \
                "buildah-bud-policy"
-
-skip_if_remote "--build-context option not implemented in podman-remote" \
-               "build-with-additional-build-context and COPY, additional context from host" \
-               "build-with-additional-build-context and RUN --mount=from=, additional-context not image and also test conflict with stagename" \
 
 skip_if_remote "env-variable for Containerfile.in pre-processing is not propagated on remote" \
                "bud with Containerfile.in, via envariable" \
@@ -235,13 +236,16 @@ skip_if_remote "--output option not implemented in podman-remote" \
                "build with custom build output and output rootfs to tar with no additional step" \
                "build with custom build output for single-stage-cached and output rootfs to directory" \
                "build with custom build output for multi-stage-cached and output rootfs to directory" \
-               "build with custom build output for multi-stage and output rootfs to directory"
+               "build with custom build output for multi-stage and output rootfs to directory" \
+               "build-with-two-outputs" \
+               "bud-with-source-date-epoch-env"
 
 # https://github.com/containers/podman/issues/14544
 skip_if_remote "logfile not implemented on remote" "bud-logfile-with-split-logfile-by-platform"
 
 skip_if_remote "envariables do not automatically work with -remote." \
-               "build proxy"
+               "build proxy" \
+               "build-test --mount=type=secret test from env with chroot isolation"
 
 # 2022-07-04 this is a new test in buildah; it's failing in treadmill
 skip_if_remote "FIXME FIXME FIXME: does this test make sense in remote?" \
@@ -257,12 +261,41 @@ skip_if_rootless "Flakes when run rootless, too. See Buildah PR 4190" \
 skip_if_remote "--events-backend does not work with podman-remote" \
 	       "build test default ulimits"
 
+skip_if_remote "--cert-dir option not working via remote and retry warnings are printed on the server" \
+            "build add https retry ca"
+
+skip_if_remote "Weird. This used to work remote, until Ed set TMPDIR in #5804" \
+               "bud-with-mount-cache-like-buildkit with buildah prune should clear the cache"
+
+# https://github.com/containers/podman/issues/25414
+skip_if_remote "This test needs unique TMPDIR for the test and podman-remote does not propagates ENV from client-side to server-end" \
+            "bud-with-mount-cache-like-buildkit"
+
+# 2025-04-01 skip test as it is incompatible with compat API in podman-remote
+skip_if_remote "compat API does not support oci-archive tags" \
+               "build-with-timestamp-applies-to-oci-archive"
+
+# 2025-10-212 "'build proxy' environment is not sent over the API, comment in https://github.com/containers/podman/pull/27343"
+skip_if_remote "http_proxy env is not sent via remote API" \
+               "build proxy - ADD URL"
+
+skip_if_remote "--metadata-file not supported in remote mode" \
+               "bud cache by format"
+
+skip_if_remote "BUILDAH_ISOLATION env var not propagated via podman-remote" \
+               "build-conflicting-isolation-chroot-and-network"
+
 ###############################################################################
 # BEGIN tests which are skipped due to actual podman or podman-remote bugs.
 
 skip_if_remote "different error messages between podman & podman-remote" \
                "bud with .dockerignore #2" \
                "bud with .dockerignore #4"
+
+# 2025-01-27: https://github.com/containers/podman/issues/25138
+skip_if_remote "FIXME #25138: mount cache not working one remote" \
+               "bud --layers with --mount type bind should burst cache if content is changed" \
+               "bud --layers with --mount type bind should burst and multiple mounts cache if content is changed"
 
 # END   tests which are skipped due to actual podman or podman-remote bugs.
 ###############################################################################
@@ -298,6 +331,40 @@ skip "FIXME: 2024-05-28 new VMs from #338" \
      "bud-git-context" \
      "bud-git-context-subdirectory" \
      "bud using gitrepo and branch"
+
+# 2025-04-01 FIXME wrong exit code from git related failures from #25756
+skip_if_remote "FIXME: 2025-04-01 git related errors returning wrong exit code" \
+               "bud with ADD with git repository source"
+#
+
+# 2026-05-08 FIXME: Tests that specifically requires bit-identical tar outputs and uses process substitution
+# Podman creates random temp dirs (/tmp/podman-build-context-*)
+# for /dev/fd context, which causes different build outputs each time.
+# FIXME: Don't use process substitution for Containerfile in buildah tests
+
+skip "Requires bit-identical tar outputs when using process substitution" \
+     "build-with-timestamp-applies-to-oci-archive" \
+     "build-with-timestamp-applies-to-oci-archive-with-base" \
+     "build-with-run-mount" \
+     "use-secret-to-env-variable" \
+     "use-secret-to-env-variable-and-file-path"
+
+skip_if_remote "remote builds only commit to local storage, and this test isn't worth working around that" \
+               "build --compression-format zstd to dir and oci-archive"
+
+# 2026-05-28 FIXME: The following tests failed with vendoring Buildah v1.44 into Podman in
+# preparation for Podman 6.0.  I suspect at least some of them will need to be adjusted due
+# configuration file changes. https://github.com/containers/podman/issues/28810
+
+skip "bud-source-date-epoch-arg" \
+     "bud-with-source-date-epoch-env" \
+     "bud-with-timestamp-config-effects" \
+     "bud --layers should not include pulled up parent directories of mount points" \
+     "bud should include excluded pulled up parent directories in squashed images" \
+     "bud-windows-host-process-container" \
+     "bud-windows-with-timestamp-reproducible" \
+     "bud-windows-with-source-date-epoch-reproducible" \
+     "bud-source-date-epoch-arg"
 
 # END   temporary workarounds that must be reevaluated periodically
 ###############################################################################

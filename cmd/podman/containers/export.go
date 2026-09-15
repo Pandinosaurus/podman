@@ -6,12 +6,12 @@ import (
 	"os"
 	"strings"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/parse"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/parse"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 	"golang.org/x/term"
 )
 
@@ -27,7 +27,7 @@ var (
 		Args:              cobra.ExactArgs(1),
 		ValidArgsFunction: common.AutocompleteContainers,
 		Example: `podman export ctrID > myCtr.tar
-  podman export --output="myCtr.tar" ctrID`,
+podman export --output="myCtr.tar" ctrID`,
 	}
 
 	containerExportCommand = &cobra.Command{
@@ -38,7 +38,7 @@ var (
 		RunE:              exportCommand.RunE,
 		ValidArgsFunction: exportCommand.ValidArgsFunction,
 		Example: `podman container export ctrID > myCtr.tar
-  podman container export --output="myCtr.tar" ctrID`,
+podman container export --output="myCtr.tar" ctrID`,
 	}
 )
 
@@ -68,7 +68,7 @@ func init() {
 	exportFlags(containerExportCommand)
 }
 
-func export(cmd *cobra.Command, args []string) error {
+func export(_ *cobra.Command, args []string) error {
 	if len(outputFile) == 0 {
 		file := os.Stdout
 		if term.IsTerminal(int(file.Fd())) {
@@ -81,7 +81,7 @@ func export(cmd *cobra.Command, args []string) error {
 		}
 		// open file here with O_WRONLY since on MacOS it can fail to open /dev/stderr in read mode for example
 		// https://github.com/containers/podman/issues/16870
-		file, err := os.OpenFile(outputFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+		file, err := os.OpenFile(outputFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 		if err != nil {
 			return err
 		}

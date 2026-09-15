@@ -6,34 +6,51 @@ import (
 	"os"
 	"sync"
 
-	"github.com/containers/image/v5/docker"
-	"github.com/containers/image/v5/types"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/hashicorp/go-multierror"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/image/v5/docker"
+	"go.podman.io/image/v5/docker/reference"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 type listBuilderOptions struct {
 	cleanup       bool
 	iidFile       string
+	iidFileRaw    string
 	authfile      string
 	skipTLSVerify *bool
 }
 
 type listLocal struct {
-	listName    string
+	listRef     reference.Named
 	localEngine entities.ImageEngine
 	options     listBuilderOptions
 }
 
+// untaggedImageRef returns the destination reference without a tag, e.g. "quay.io/example/repo".
+func (l *listLocal) untaggedImageRef() string {
+	return l.listRef.Name()
+}
+
+// taggedImageRef returns the full reference, e.g. "quay.io/example/repo:tag".
+func (l *listLocal) taggedImageRef() string {
+	return l.listRef.String()
+}
+
 // newManifestListBuilder returns a manifest list builder which saves a
-// manifest list and images to local storage.
-func newManifestListBuilder(listName string, localEngine entities.ImageEngine, options listBuilderOptions) *listLocal {
+// manifest list and images to local storage. Returns an error if listName
+// is not a valid image reference.
+func newManifestListBuilder(listName string, localEngine entities.ImageEngine, options listBuilderOptions) (*listLocal, error) {
+	ref, err := reference.ParseNamed(listName)
+	if err != nil {
+		return nil, fmt.Errorf("could not parse reference %q: %w", listName, err)
+	}
 	return &listLocal{
-		listName:    listName,
+		listRef:     ref,
 		options:     options,
 		localEngine: localEngine,
-	}
+	}, nil
 }
 
 // Build retrieves images from the build reports and assembles them into a
@@ -45,15 +62,15 @@ func (l *listLocal) build(ctx context.Context, images map[entities.BuildReport]e
 		skipTLSVerify = types.NewOptionalBool(*l.options.skipTLSVerify)
 	}
 
-	exists, err := l.localEngine.ManifestExists(ctx, l.listName)
+	exists, err := l.localEngine.ManifestExists(ctx, l.taggedImageRef())
 	if err != nil {
 		return "", err
 	}
 	// Create list if it doesn't exist
 	if !exists.Value {
-		_, err = l.localEngine.ManifestCreate(ctx, l.listName, []string{}, entities.ManifestCreateOptions{SkipTLSVerify: skipTLSVerify})
+		_, err = l.localEngine.ManifestCreate(ctx, l.taggedImageRef(), []string{}, entities.ManifestCreateOptions{SkipTLSVerify: skipTLSVerify})
 		if err != nil {
-			return "", fmt.Errorf("creating manifest list %q: %w", l.listName, err)
+			return "", fmt.Errorf("creating manifest list %q: %w", l.taggedImageRef(), err)
 		}
 	}
 
@@ -68,13 +85,13 @@ func (l *listLocal) build(ctx context.Context, images map[entities.BuildReport]e
 			logrus.Infof("pushing image %s", image.ID)
 			defer logrus.Infof("pushed image %s", image.ID)
 			// Push the image to the registry
-			report, err := engine.Push(ctx, image.ID, l.listName+docker.UnknownDigestSuffix, entities.ImagePushOptions{Authfile: l.options.authfile, Quiet: false, SkipTLSVerify: skipTLSVerify})
+			report, err := engine.Push(ctx, image.ID, l.untaggedImageRef()+docker.UnknownDigestSuffix, entities.ImagePushOptions{Authfile: l.options.authfile, Quiet: false, SkipTLSVerify: skipTLSVerify})
 			if err != nil {
 				return fmt.Errorf("pushing image %q to registry: %w", image, err)
 			}
 			refsMutex.Lock()
 			defer refsMutex.Unlock()
-			refs = append(refs, "docker://"+l.listName+"@"+report.ManifestDigest)
+			refs = append(refs, "docker://"+l.untaggedImageRef()+"@"+report.ManifestDigest)
 			return nil
 		})
 	}
@@ -108,28 +125,33 @@ func (l *listLocal) build(ctx context.Context, images map[entities.BuildReport]e
 
 	// Clear the list in the event it already existed
 	if exists.Value {
-		_, err = l.localEngine.ManifestListClear(ctx, l.listName)
+		_, err = l.localEngine.ManifestListClear(ctx, l.taggedImageRef())
 		if err != nil {
-			return "", fmt.Errorf("error clearing list %q", l.listName)
+			return "", fmt.Errorf("error clearing list %q: %w", l.taggedImageRef(), err)
 		}
 	}
 
 	// Add the images to the list
-	listID, err := l.localEngine.ManifestAdd(ctx, l.listName, refs, entities.ManifestAddOptions{Authfile: l.options.authfile, SkipTLSVerify: skipTLSVerify})
+	listID, err := l.localEngine.ManifestAdd(ctx, l.taggedImageRef(), refs, entities.ManifestAddOptions{Authfile: l.options.authfile, SkipTLSVerify: skipTLSVerify})
 	if err != nil {
 		return "", fmt.Errorf("adding images %q to list: %w", refs, err)
 	}
-	_, err = l.localEngine.ManifestPush(ctx, l.listName, l.listName, entities.ImagePushOptions{Authfile: l.options.authfile, SkipTLSVerify: skipTLSVerify})
+	_, err = l.localEngine.ManifestPush(ctx, l.taggedImageRef(), l.taggedImageRef(), entities.ImagePushOptions{Authfile: l.options.authfile, SkipTLSVerify: skipTLSVerify})
 	if err != nil {
 		return "", err
 	}
 
 	// Write the manifest list's ID file if we're expected to
 	if l.options.iidFile != "" {
-		if err := os.WriteFile(l.options.iidFile, []byte("sha256:"+listID), 0644); err != nil {
+		if err := os.WriteFile(l.options.iidFile, []byte("sha256:"+listID), 0o644); err != nil {
+			return "", err
+		}
+	}
+	if l.options.iidFileRaw != "" {
+		if err := os.WriteFile(l.options.iidFileRaw, []byte(listID), 0o644); err != nil {
 			return "", err
 		}
 	}
 
-	return l.listName, nil
+	return l.taggedImageRef(), nil
 }

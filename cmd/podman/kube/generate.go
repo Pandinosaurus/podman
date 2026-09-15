@@ -5,14 +5,14 @@ import (
 	"io"
 	"os"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/generate"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/utils"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/storage/pkg/fileutils"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/generate"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/utils"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/storage/pkg/fileutils"
 )
 
 var (
@@ -30,10 +30,10 @@ var (
 		Args:              cobra.MinimumNArgs(1),
 		ValidArgsFunction: common.AutocompleteForGenerate,
 		Example: `podman kube generate ctrID
-  podman kube generate podID
-  podman kube generate --service podID
-  podman kube generate volumeName
-  podman kube generate ctrID podID volumeName --service`,
+podman kube generate podID
+podman kube generate --service podID
+podman kube generate volumeName
+podman kube generate ctrID podID volumeName --service`,
 	}
 
 	generateKubeCmd = &cobra.Command{
@@ -93,7 +93,7 @@ func generateFlags(cmd *cobra.Command, podmanConfig *entities.PodmanConfig) {
 }
 
 func generateKube(cmd *cobra.Command, args []string) error {
-	report, err := registry.ContainerEngine().GenerateKube(registry.GetContext(), args, generateOptions)
+	report, err := registry.ContainerEngine().GenerateKube(registry.Context(), args, generateOptions)
 	if err != nil {
 		return err
 	}
@@ -109,7 +109,7 @@ func generateKube(cmd *cobra.Command, args []string) error {
 		if err := fileutils.Exists(generateFile); err == nil {
 			return fmt.Errorf("cannot write to %q; file exists", generateFile)
 		}
-		if err := os.WriteFile(generateFile, content, 0644); err != nil {
+		if err := os.WriteFile(generateFile, content, 0o644); err != nil {
 			return fmt.Errorf("cannot write to %q: %w", generateFile, err)
 		}
 		return nil

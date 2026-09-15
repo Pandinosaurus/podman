@@ -1,30 +1,27 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package compat
 
 import (
-	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
 
-	"github.com/containers/common/pkg/auth"
-	DockerClient "github.com/containers/image/v5/docker"
-	"github.com/containers/image/v5/types"
-	"github.com/containers/podman/v5/libpod"
-	"github.com/containers/podman/v5/pkg/api/handlers/utils"
-	api "github.com/containers/podman/v5/pkg/api/types"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/docker/docker/api/types/registry"
+	"github.com/moby/moby/api/types/registry"
+	"go.podman.io/common/pkg/auth"
+	DockerClient "go.podman.io/image/v5/docker"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/pkg/api/handlers/utils"
+	api "go.podman.io/podman/v6/pkg/api/types"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 func Auth(w http.ResponseWriter, r *http.Request) {
 	var authConfig registry.AuthConfig
-	err := json.NewDecoder(r.Body).Decode(&authConfig)
-	if err != nil {
-		utils.Error(w, http.StatusInternalServerError, fmt.Errorf("failed to parse request: %w", err))
+	if err := utils.ReadJSONFromBody(r, &authConfig); err != nil {
+		utils.Error(w, http.StatusBadRequest, err)
 		return
 	}
 
@@ -52,8 +49,7 @@ func Auth(w http.ResponseWriter, r *http.Request) {
 	} else {
 		var msg string
 
-		var unauthErr DockerClient.ErrUnauthorizedForCredentials
-		if errors.As(err, &unauthErr) {
+		if _, ok := errors.AsType[DockerClient.ErrUnauthorizedForCredentials](err); ok {
 			msg = "401 Unauthorized"
 		} else {
 			msg = err.Error()

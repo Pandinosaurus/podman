@@ -3,46 +3,39 @@
 package integration
 
 import (
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"os"
-	"strconv"
+	"os/exec"
+	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
+	"time"
 
-	"github.com/containernetworking/plugins/pkg/ns"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	. "github.com/containers/podman/v5/test/utils"
-	"github.com/containers/storage/pkg/stringid"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	. "github.com/onsi/gomega/gexec"
 	"github.com/vishvananda/netlink"
+	"go.podman.io/common/pkg/netns"
+	. "go.podman.io/podman/v6/test/utils"
+	"go.podman.io/storage/pkg/stringid"
 )
 
 var _ = Describe("Podman run networking", func() {
-
 	hostname, _ := os.Hostname()
 
 	It("podman verify network scoped DNS server and also verify updating network dns server", func() {
 		// Following test is only functional with netavark and aardvark
-		SkipIfCNI(podmanTest)
 		net := createNetworkName("IntTest")
 		session := podmanTest.Podman([]string{"network", "create", net, "--dns", "1.1.1.1"})
 		session.WaitWithDefaultTimeout()
 		defer podmanTest.removeNetwork(net)
 		Expect(session).Should(ExitCleanly())
 
-		session = podmanTest.Podman([]string{"network", "inspect", net})
-		session.WaitWithDefaultTimeout()
-		defer podmanTest.removeNetwork(net)
-		Expect(session).Should(ExitCleanly())
-		var results []entities.NetworkInspectReport
-		err := json.Unmarshal([]byte(session.OutputToString()), &results)
-		Expect(err).ToNot(HaveOccurred())
+		results := podmanTest.InspectNetwork(net)
 		Expect(results).To(HaveLen(1))
 		result := results[0]
 		Expect(result.Subnets).To(HaveLen(1))
@@ -76,20 +69,13 @@ var _ = Describe("Podman run networking", func() {
 
 	It("podman network dns multiple servers", func() {
 		// Following test is only functional with netavark and aardvark
-		SkipIfCNI(podmanTest)
 		net := createNetworkName("IntTest")
 		session := podmanTest.Podman([]string{"network", "create", net, "--dns", "1.1.1.1,8.8.8.8", "--dns", "8.4.4.8"})
 		session.WaitWithDefaultTimeout()
 		defer podmanTest.removeNetwork(net)
 		Expect(session).Should(ExitCleanly())
 
-		session = podmanTest.Podman([]string{"network", "inspect", net})
-		session.WaitWithDefaultTimeout()
-		defer podmanTest.removeNetwork(net)
-		Expect(session).Should(ExitCleanly())
-		var results []entities.NetworkInspectReport
-		err := json.Unmarshal([]byte(session.OutputToString()), &results)
-		Expect(err).ToNot(HaveOccurred())
+		results := podmanTest.InspectNetwork(net)
 		Expect(results).To(HaveLen(1))
 		result := results[0]
 		Expect(result.Subnets).To(HaveLen(1))
@@ -106,17 +92,14 @@ var _ = Describe("Podman run networking", func() {
 		Expect(session.OutputToString()).To(ContainSubstring("Non-authoritative answer: Name: google.com Address:"))
 
 		// Update DNS server
-		session = podmanTest.Podman([]string{"network", "update", net, "--dns-drop=1.1.1.1,8.8.8.8",
-			"--dns-drop", "8.4.4.8", "--dns-add", "127.0.0.253,127.0.0.254", "--dns-add", "127.0.0.255"})
+		session = podmanTest.Podman([]string{
+			"network", "update", net, "--dns-drop=1.1.1.1,8.8.8.8",
+			"--dns-drop", "8.4.4.8", "--dns-add", "127.0.0.253,127.0.0.254", "--dns-add", "127.0.0.255",
+		})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 
-		session = podmanTest.Podman([]string{"network", "inspect", net})
-		session.WaitWithDefaultTimeout()
-		defer podmanTest.removeNetwork(net)
-		Expect(session).Should(ExitCleanly())
-		err = json.Unmarshal([]byte(session.OutputToString()), &results)
-		Expect(err).ToNot(HaveOccurred())
+		results = podmanTest.InspectNetwork(net)
 		Expect(results).To(HaveLen(1))
 		Expect(results[0].NetworkDNSServers).To(Equal([]string{"127.0.0.253", "127.0.0.254", "127.0.0.255"}))
 
@@ -163,7 +146,6 @@ var _ = Describe("Podman run networking", func() {
 	It("podman verify resolv.conf with --dns + --network", func() {
 		// Following test is only functional with netavark and aardvark
 		// since new behaviour depends upon output from of statusBlock
-		SkipIfCNI(podmanTest)
 		net := createNetworkName("IntTest")
 		session := podmanTest.Podman([]string{"network", "create", net})
 		session.WaitWithDefaultTimeout()
@@ -377,8 +359,18 @@ var _ = Describe("Podman run networking", func() {
 	})
 
 	It("podman run --expose port range", func() {
+		session := podmanTest.Podman([]string{"run", "-d", "--expose", "1000-9999", ALPINE})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+
+		session = podmanTest.Podman([]string{"ps", "-a", "--format", "{{.Ports}}"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+		// This must use Equal() to ensure we do not see anything extra
+		Expect(session.OutputToString()).To(Equal("1000-9999/tcp"))
+
 		name := "testctr"
-		session := podmanTest.Podman([]string{"run", "-d", "--expose", "222-223", "-P", "--name", name, ALPINE, "sleep", "100"})
+		session = podmanTest.Podman([]string{"run", "-d", "--expose", "222-223", "-P", "--name", name, ALPINE, "sleep", "100"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 		inspectOut := podmanTest.InspectContainer(name)
@@ -396,12 +388,20 @@ var _ = Describe("Podman run networking", func() {
 		name := "testctr"
 		session := podmanTest.Podman([]string{"create", "-t", "--expose", "80", "-p", "80", "--name", name, ALPINE, "/bin/sh"})
 		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
 		inspectOut := podmanTest.InspectContainer(name)
 		Expect(inspectOut).To(HaveLen(1))
 		Expect(inspectOut[0].NetworkSettings.Ports).To(HaveLen(1))
 		Expect(inspectOut[0].NetworkSettings.Ports["80/tcp"]).To(HaveLen(1))
-		Expect(inspectOut[0].NetworkSettings.Ports["80/tcp"][0].HostPort).To(Not(Equal("80")))
+		hostPort := inspectOut[0].NetworkSettings.Ports["80/tcp"][0].HostPort
+		Expect(hostPort).To(Not(Equal("80")))
 		Expect(inspectOut[0].NetworkSettings.Ports["80/tcp"][0]).To(HaveField("HostIP", "0.0.0.0"))
+
+		session = podmanTest.Podman([]string{"ps", "-a", "--format", "{{.Ports}}"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+		// This must use Equal() to ensure we do not see the extra ", 80/tcp" from the exposed port
+		Expect(session.OutputToString()).To(Equal("0.0.0.0:" + hostPort + "->80/tcp"))
 	})
 
 	It("podman run --publish-all with EXPOSE port ranges in Dockerfile", func() {
@@ -417,6 +417,7 @@ EXPOSE 2004-2005/tcp`, ALPINE)
 		// Verify that the buildah is just passing through the EXPOSE keys
 		inspect := podmanTest.Podman([]string{"inspect", imageName})
 		inspect.WaitWithDefaultTimeout()
+		Expect(inspect).Should(ExitCleanly())
 		image := inspect.InspectImageJSON()
 		Expect(image).To(HaveLen(1))
 		Expect(image[0].Config.ExposedPorts).To(HaveLen(3))
@@ -424,9 +425,20 @@ EXPOSE 2004-2005/tcp`, ALPINE)
 		Expect(image[0].Config.ExposedPorts).To(HaveKey("2001-2003/tcp"))
 		Expect(image[0].Config.ExposedPorts).To(HaveKey("2004-2005/tcp"))
 
-		containerName := "testcontainer"
-		session := podmanTest.Podman([]string{"create", "--publish-all", "--name", containerName, imageName, "true"})
+		session := podmanTest.Podman([]string{"create", imageName})
 		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+
+		session = podmanTest.Podman([]string{"ps", "-a", "--format", "{{.Ports}}"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+		// This must use Equal() to ensure we do not see anything extra
+		Expect(session.OutputToString()).To(Equal("2001-2005/tcp"))
+
+		containerName := "testcontainer"
+		session = podmanTest.Podman([]string{"create", "--publish-all", "--name", containerName, imageName})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
 		inspectOut := podmanTest.InspectContainer(containerName)
 		Expect(inspectOut).To(HaveLen(1))
 
@@ -441,19 +453,22 @@ EXPOSE 2004-2005/tcp`, ALPINE)
 		Expect(inspectOut[0].HostConfig.PublishAllPorts).To(BeTrue())
 	})
 
-	It("podman run --net=host --expose includes port in inspect output", func() {
+	It("podman run --net=host --expose includes ports in inspect output", func() {
 		containerName := "testctr"
-		session := podmanTest.Podman([]string{"run", "--name", containerName, "-d", "--expose", "8080/tcp", NGINX_IMAGE, "sleep", "+inf"})
+		session := podmanTest.Podman([]string{"run", "--net=host", "--name", containerName, "-d", "--expose", "8080/tcp", NGINX_IMAGE, "sleep", "+inf"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 
 		inspectOut := podmanTest.InspectContainer(containerName)
 		Expect(inspectOut).To(HaveLen(1))
 
+		// Ports is empty. ExposedPorts is not.
+		Expect(inspectOut[0].NetworkSettings.Ports).To(BeEmpty())
+
 		// 80 from the image, 8080 from the expose
-		Expect(inspectOut[0].NetworkSettings.Ports).To(HaveLen(2))
-		Expect(inspectOut[0].NetworkSettings.Ports).To(HaveKey("80/tcp"))
-		Expect(inspectOut[0].NetworkSettings.Ports).To(HaveKey("8080/tcp"))
+		Expect(inspectOut[0].Config.ExposedPorts).To(HaveLen(2))
+		Expect(inspectOut[0].Config.ExposedPorts).To(HaveKey("80/tcp"))
+		Expect(inspectOut[0].Config.ExposedPorts).To(HaveKey("8080/tcp"))
 	})
 
 	It("podman run --net=container --expose exposed port from own container", func() {
@@ -469,8 +484,10 @@ EXPOSE 2004-2005/tcp`, ALPINE)
 
 		inspectOut := podmanTest.InspectContainer(ctr2)
 		Expect(inspectOut).To(HaveLen(1))
-		Expect(inspectOut[0].NetworkSettings.Ports).To(HaveLen(1))
-		Expect(inspectOut[0].NetworkSettings.Ports).To(HaveKey("8090/tcp"))
+		// Ports will not be populated. ExposedPorts will be.
+		Expect(inspectOut[0].NetworkSettings.Ports).To(BeEmpty())
+		Expect(inspectOut[0].Config.ExposedPorts).To(HaveLen(1))
+		Expect(inspectOut[0].Config.ExposedPorts).To(HaveKey("8090/tcp"))
 	})
 
 	It("podman run -p 127.0.0.1::8980/udp", func() {
@@ -524,112 +541,6 @@ EXPOSE 2004-2005/tcp`, ALPINE)
 		Expect(inspectOut[0].NetworkSettings.Ports["80/tcp"][0]).To(HaveField("HostPort", "9280"))
 		Expect(inspectOut[0].NetworkSettings.Ports["80/tcp"][0]).To(HaveField("HostIP", "0.0.0.0"))
 	})
-
-	It("podman run slirp4netns verify net.ipv6.conf.default.accept_dad=0", func() {
-		session := podmanTest.Podman([]string{"run", "--network", "slirp4netns:enable_ipv6=true", ALPINE, "ip", "addr"})
-		session.WaitWithDefaultTimeout()
-		Expect(session).Should(ExitCleanly())
-		// check the ipv6 setup id done without delay (https://github.com/containers/podman/issues/11062)
-		Expect(session.OutputToString()).To(ContainSubstring("inet6 fd00::"))
-
-		const ipv6ConfDefaultAcceptDadSysctl = "/proc/sys/net/ipv6/conf/all/accept_dad"
-
-		cat := SystemExec("cat", []string{ipv6ConfDefaultAcceptDadSysctl})
-		cat.WaitWithDefaultTimeout()
-		Expect(cat).Should(ExitCleanly())
-		sysctlValue := cat.OutputToString()
-
-		session = podmanTest.Podman([]string{"run", "--network", "slirp4netns:enable_ipv6=true", ALPINE, "cat", ipv6ConfDefaultAcceptDadSysctl})
-		session.WaitWithDefaultTimeout()
-		Expect(session).Should(ExitCleanly())
-		Expect(session.OutputToString()).To(Equal(sysctlValue))
-	})
-
-	It("podman run network expose host port 8080 to container port 8000 using invalid port handler", func() {
-		session := podmanTest.Podman([]string{"run", "--network", "slirp4netns:port_handler=invalid", "-dt", "-p", "8080:8000", ALPINE, "/bin/sh"})
-		session.WaitWithDefaultTimeout()
-		Expect(session).To(ExitWithError(126, `unknown port_handler for slirp4netns: "invalid"`))
-	})
-
-	It("podman run slirp4netns network with host loopback", func() {
-		session := podmanTest.Podman([]string{"run", "--cap-add", "net_raw", "--network", "slirp4netns:allow_host_loopback=true", ALPINE, "ping", "-c1", "10.0.2.2"})
-		session.WaitWithDefaultTimeout()
-		Expect(session).Should(ExitCleanly())
-	})
-
-	It("podman run slirp4netns network with mtu", func() {
-		session := podmanTest.Podman([]string{"run", "--network", "slirp4netns:mtu=9000", ALPINE, "ip", "addr"})
-		session.Wait(30)
-		Expect(session).Should(ExitCleanly())
-		Expect(session.OutputToString()).To(ContainSubstring("mtu 9000"))
-	})
-
-	It("podman run slirp4netns network with different cidr", func() {
-		slirp4netnsHelp := SystemExec("slirp4netns", []string{"--help"})
-		Expect(slirp4netnsHelp).Should(ExitCleanly())
-
-		networkConfiguration := "slirp4netns:cidr=192.168.0.0/24,allow_host_loopback=true"
-		session := podmanTest.Podman([]string{"run", "--cap-add", "net_raw", "--network", networkConfiguration, ALPINE, "ping", "-c1", "192.168.0.2"})
-		session.Wait(30)
-
-		if strings.Contains(slirp4netnsHelp.OutputToString(), "cidr") {
-			Expect(session).Should(ExitCleanly())
-		} else {
-			Expect(session).To(ExitWithError(125, "cidr not supported"))
-		}
-	})
-
-	for _, local := range []bool{true, false} {
-		testName := "HostIP"
-		if local {
-			testName = "127.0.0.1"
-		}
-		It(fmt.Sprintf("podman run network slirp4netns bind to %s", testName), func() {
-			ip := "127.0.0.1"
-			if !local {
-				// Determine our likeliest outgoing IP address
-				conn, err := net.Dial("udp", "8.8.8.8:80")
-				Expect(err).ToNot(HaveOccurred())
-
-				defer conn.Close()
-				ip = conn.LocalAddr().(*net.UDPAddr).IP.String()
-			}
-			port := strconv.Itoa(GetPort())
-
-			networkConfiguration := fmt.Sprintf("slirp4netns:outbound_addr=%s,allow_host_loopback=true", ip)
-
-			listener, err := net.Listen("tcp", ":"+port)
-			Expect(err).ToNot(HaveOccurred())
-			defer listener.Close()
-
-			msg := RandomString(10)
-			wg := &sync.WaitGroup{}
-			wg.Add(1)
-			// now use a new goroutine to start accepting connection in the background and make the checks there
-			go func() {
-				defer GinkgoRecover()
-				defer wg.Done()
-				conn, err := listener.Accept()
-				Expect(err).ToNot(HaveOccurred(), "accept new connection")
-				defer conn.Close()
-				addr := conn.RemoteAddr()
-				// addr will be in the form ip:port, we don't care about the port as it is random
-				Expect(addr.String()).To(HavePrefix(ip+":"), "remote address")
-				gotBytes, err := io.ReadAll(conn)
-				Expect(err).ToNot(HaveOccurred(), "read from connection")
-				Expect(string(gotBytes)).To(Equal(msg), "received correct message from container")
-			}()
-
-			session := podmanTest.Podman([]string{"run", "--network", networkConfiguration, ALPINE, "sh", "-c", "echo -n " + msg + " | nc -w 30 10.0.2.2 " + port})
-			session.WaitWithDefaultTimeout()
-			Expect(session).Should(ExitCleanly())
-
-			// explicitly close the socket here before we wait to unlock Accept() calls in case of hangs
-			listener.Close()
-			// wait for the checks in the goroutine to be done
-			wg.Wait()
-		})
-	}
 
 	It("podman run network expose ports in image metadata", func() {
 		session := podmanTest.Podman([]string{"create", "--name", "test", "-t", "-P", NGINX_IMAGE})
@@ -775,7 +686,7 @@ EXPOSE 2004-2005/tcp`, ALPINE)
 	})
 
 	It("podman run --uidmap /etc/hosts contains --hostname", func() {
-		SkipIfRootless("uidmap population of cninetworks not supported for rootless users")
+		SkipIfRootless("uidmap population of networks not supported for rootless users")
 		session := podmanTest.Podman([]string{"run", "--uidmap", "0:100000:1000", "--rm", "--hostname", "foohostname", ALPINE, "grep", "foohostname", "/etc/hosts"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
@@ -831,7 +742,7 @@ EXPOSE 2004-2005/tcp`, ALPINE)
 		_, ipnet, err := net.ParseCIDR(cidr)
 		Expect(err).ToNot(HaveOccurred())
 		addr := &netlink.Addr{IPNet: ipnet, Label: ""}
-		if err := netlink.AddrAdd(containerInterface, addr); err != nil && err != syscall.EEXIST {
+		if err := netlink.AddrAdd(containerInterface, addr); err != nil && !errors.Is(err, syscall.EEXIST) {
 			return err
 		}
 		return nil
@@ -869,7 +780,7 @@ EXPOSE 2004-2005/tcp`, ALPINE)
 	}
 
 	setupNetworkNs := func(networkNSName string) {
-		_ = ns.WithNetNSPath("/run/netns/"+networkNSName, func(_ ns.NetNS) error {
+		_ = netns.WithNetNSPath("/run/netns/"+networkNSName, func(_ netns.NetNS) error {
 			loopbackup()
 			linkup("eth0", "46:7f:45:6e:4f:c8", []string{"10.25.40.0/24", "fd04:3e42:4a4e:3381::/64"})
 			linkup("eth1", "56:6e:35:5d:3e:a8", []string{"10.88.0.0/16"})
@@ -893,7 +804,6 @@ EXPOSE 2004-2005/tcp`, ALPINE)
 		Expect(inspectOut[0].NetworkSettings.AdditionalMacAddresses).To(HaveLen(1))
 		Expect(inspectOut[0].NetworkSettings.AdditionalMacAddresses[0]).To(Equal("56:6e:35:5d:3e:a8"))
 		Expect(inspectOut[0].NetworkSettings).To(HaveField("Gateway", "10.25.40.0"))
-
 	}
 
 	It("podman run network inspect fails gracefully on non-reachable network ns", func() {
@@ -985,7 +895,7 @@ EXPOSE 2004-2005/tcp`, ALPINE)
 		Expect(session).To(ExitWithError(125, "faccessat /run/netns/xxy: no such file or directory"))
 	})
 
-	It("podman run in custom CNI network with --static-ip", func() {
+	It("podman run in custom network with --static-ip", func() {
 		netName := stringid.GenerateRandomID()
 		ipAddr := "10.25.30.128"
 		create := podmanTest.Podman([]string{"network", "create", "--subnet", "10.25.30.0/24", netName})
@@ -1026,9 +936,9 @@ EXPOSE 2004-2005/tcp`, ALPINE)
 
 	It("podman run with new:pod and static-ip", func() {
 		netName := stringid.GenerateRandomID()
-		ipAddr := "10.25.40.128"
+		ipAddr := "10.25.44.128"
 		podname := "testpod"
-		create := podmanTest.Podman([]string{"network", "create", "--subnet", "10.25.40.0/24", netName})
+		create := podmanTest.Podman([]string{"network", "create", "--subnet", "10.25.44.0/24", netName})
 		create.WaitWithDefaultTimeout()
 		Expect(create).Should(ExitCleanly())
 		defer podmanTest.removeNetwork(netName)
@@ -1099,7 +1009,6 @@ EXPOSE 2004-2005/tcp`, ALPINE)
 	})
 
 	It("podman run check dns", func() {
-		SkipIfCNI(podmanTest)
 		pod := "testpod"
 		session := podmanTest.Podman([]string{"pod", "create", "--name", pod})
 		session.WaitWithDefaultTimeout()
@@ -1117,39 +1026,438 @@ EXPOSE 2004-2005/tcp`, ALPINE)
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 
-		session = podmanTest.Podman([]string{"run", "--name", "con1", "--network", net, CITEST_IMAGE, "nslookup", "con1"})
+		// Note apline nslookup tries to resolve all search domains always and returns an error if one does not resolve.
+		// Because we leak all host search domain into the container we have no control over if it resolves or not.
+		// Thus use "NAME." to indicate the name is full and no search domain should be tried.
+		session = podmanTest.Podman([]string{"run", "--name", "con1", "--network", net, CITEST_IMAGE, "nslookup", "con1."})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 
-		session = podmanTest.Podman([]string{"run", "--name", "con2", "--pod", pod, "--network", net, CITEST_IMAGE, "nslookup", "con2"})
+		session = podmanTest.Podman([]string{"run", "--name", "con2", "--pod", pod, "--network", net, CITEST_IMAGE, "nslookup", "con2."})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 
-		session = podmanTest.Podman([]string{"run", "--name", "con3", "--pod", pod2, CITEST_IMAGE, "nslookup", "con1"})
+		session = podmanTest.Podman([]string{"run", "--name", "con3", "--pod", pod2, CITEST_IMAGE, "nslookup", "con1."})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitWithError(1, ""))
-		Expect(session.OutputToString()).To(ContainSubstring("server can't find con1.dns.podman: NXDOMAIN"))
+		// This flakes on debian with systemd-resolved, also resolved behavior between A and AAAA lookups differ:
+		// https://github.com/systemd/systemd/issues/37969
+		// In short we can get NXDOMAIN or REFUSED as reply. Both seems fine for the purpose of a negative lookup.
+		Expect(session.OutputToString()).To(Or(ContainSubstring("NXDOMAIN"), ContainSubstring("REFUSED")))
 
 		session = podmanTest.Podman([]string{"run", "--name", "con4", "--network", net, CITEST_IMAGE, "nslookup", pod2 + ".dns.podman"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 
-		session = podmanTest.Podman([]string{"run", "--network", net, CITEST_IMAGE, "nslookup", hostname})
+		session = podmanTest.Podman([]string{"run", "--network", net, CITEST_IMAGE, "nslookup", hostname + "."})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 	})
 
-	It("podman network adds dns search domain with dns", func() {
-		net := createNetworkName("dnsname")
-		session := podmanTest.Podman([]string{"network", "create", net})
-		session.WaitWithDefaultTimeout()
-		defer podmanTest.removeNetwork(net)
-		Expect(session).Should(ExitCleanly())
+	// configurePortForwarder sets rootless_port_forwarder via
+	// CONTAINERS_CONF_OVERRIDE for the duration of this test.
+	// For "pasta": requires rootless and pesto binary, skips otherwise.
+	// For "rootlessport": no-op (it's the default).
+	configurePortForwarder := func(forwarder string) {
+		GinkgoHelper()
+		if forwarder == "pasta" {
+			if !isRootless() {
+				Skip("pasta port forwarding requires rootless")
+			}
+			if _, err := exec.LookPath("pesto"); err != nil {
+				Skip("pesto binary not found (requires passt >= passt-0^20260507.g1afd4ed)")
+			}
+		}
+		conffile := filepath.Join(podmanTest.TempDir, forwarder+"-forwarder.conf")
+		err := os.WriteFile(conffile, fmt.Appendf(nil, "[network]\nrootless_port_forwarder=\"%s\"\n", forwarder), 0o755)
+		Expect(err).ToNot(HaveOccurred())
+		GinkgoT().Setenv("CONTAINERS_CONF_OVERRIDE", conffile)
+		if IsRemote() {
+			podmanTest.RestartRemoteService()
+		}
+	}
 
-		session = podmanTest.Podman([]string{"run", "--network", net, ALPINE, "cat", "/etc/resolv.conf"})
-		session.WaitWithDefaultTimeout()
-		Expect(session).Should(ExitCleanly())
-		Expect(session.OutputToString()).To(ContainSubstring("search dns.podman"))
+	for _, forwarder := range []string{"rootlessport", "pasta"} {
+		for i, tc := range []struct {
+			name      string
+			ipv6      bool
+			hostIP    string
+			diffPorts bool
+		}{
+			{name: "IPv4"},
+			{name: "IPv4 explicit HostIP", hostIP: "127.0.0.1"},
+			{name: "IPv4 different ports", diffPorts: true},
+			{name: "IPv6", ipv6: true},
+			{name: "IPv6 explicit HostIP", ipv6: true, hostIP: "[::1]"},
+			{name: "IPv6 different ports", ipv6: true, diffPorts: true},
+		} {
+			It(fmt.Sprintf("podman run bridge source IP %s %s", forwarder, tc.name), func() {
+				if tc.ipv6 {
+					SkipIfNotRootless("netavark does not support IPv6 port forwarding")
+					if forwarder == "rootlessport" {
+						Skip("rootlessport does not support native IPv6 port forwarding")
+					}
+					SkipIfNoIPv6Route("pesto IPv6 forwarding requires routable IPv6 on the host")
+				}
+				configurePortForwarder(forwarder)
+
+				// Each forwarder+test combination needs a unique subnet
+				// to avoid collisions when running in parallel.
+				pastaOffset := 0
+				if forwarder == "pasta" {
+					pastaOffset = 10
+				}
+				var subnet, subnetMatch, connectAddr string
+				if tc.ipv6 {
+					subnet = fmt.Sprintf("fd00:%x::/64", 0x42+i+pastaOffset)
+					subnetMatch = fmt.Sprintf("fd00:%x:", 0x42+i+pastaOffset)
+					connectAddr = "[::1]"
+				} else {
+					subnet = fmt.Sprintf("172.%d.0.0/24", 30+i+pastaOffset)
+					subnetMatch = fmt.Sprintf(`172\.%d\.`, 30+i+pastaOffset)
+					connectAddr = "127.0.0.1"
+				}
+
+				createArgs := []string{"network", "create"}
+				if tc.ipv6 {
+					createArgs = append(createArgs, "--ipv6")
+				}
+				createArgs = append(createArgs, "--subnet", subnet)
+				netName := createNetworkName("srcip")
+				createArgs = append(createArgs, netName)
+				podmanTest.PodmanExitCleanly(createArgs...)
+				defer podmanTest.removeNetwork(netName)
+
+				hostPort := GetPort()
+				ctrPort := hostPort
+				if tc.diffPorts {
+					ctrPort = GetPort()
+				}
+				portFlag := fmt.Sprintf("%d:%d", hostPort, ctrPort)
+				if tc.hostIP != "" {
+					portFlag = fmt.Sprintf("%s:%d:%d", tc.hostIP, hostPort, ctrPort)
+				}
+				ctr := podmanTest.startNCContainer(
+					"srcip-ctr", ctrPort,
+					"--network", netName,
+					"-p", portFlag,
+				)
+
+				msg := RandomString(20)
+				sendMessageToAddr(fmt.Sprintf("%s:%d", connectAddr, hostPort), msg)
+				podmanTest.WaitForContainerLog(ctr, msg)
+
+				logs := podmanTest.PodmanExitCleanly("logs", ctr)
+				output := logs.OutputToString()
+				Expect(output).To(MatchRegexp(`connect to .* from`))
+
+				if forwarder == "rootlessport" {
+					Expect(output).To(MatchRegexp(`connect to .* from .*` + subnetMatch))
+				} else {
+					Expect(output).ToNot(MatchRegexp(`connect to .* from .*` + subnetMatch))
+				}
+
+				podmanTest.PodmanExitCleanly("rm", "-f", ctr)
+				podmanTest.PodmanExitCleanly("rm", "-f", netName)
+			})
+		}
+
+		It(fmt.Sprintf("podman run bridge network port cleanup on container stop with %s", forwarder), func() {
+			configurePortForwarder(forwarder)
+			netName := createNetworkName("cleanup")
+			podmanTest.PodmanExitCleanly("network", "create", netName)
+			defer podmanTest.removeNetwork(netName)
+
+			port := GetPort()
+			podmanTest.PodmanExitCleanly(
+				"run", "-d",
+				"--name", "cleanup-ctr",
+				"--network", netName,
+				"-p", fmt.Sprintf("127.0.0.1:%d:80", port),
+				NGINX_IMAGE,
+			)
+
+			testPortConnection(port)
+			podmanTest.PodmanExitCleanly("rm", "-f", "cleanup-ctr")
+
+			podmanTest.PodmanExitCleanly(
+				"run", "-d",
+				"--name", "cleanup-ctr2",
+				"--network", netName,
+				"-p", fmt.Sprintf("127.0.0.1:%d:80", port),
+				NGINX_IMAGE,
+			)
+			testPortConnection(port)
+
+			podmanTest.PodmanExitCleanly("rm", "-f", "cleanup-ctr2")
+		})
+
+		It(fmt.Sprintf("podman run bridge dual-stack network IPv4 and IPv6 port forwarding with %s", forwarder), Serial, func() {
+			SkipIfNotRootless("netavark does not support IPv6 port forwarding")
+			SkipIfNoIPv6Route("pesto IPv6 forwarding requires routable IPv6 on the host")
+			configurePortForwarder(forwarder)
+
+			netName := createNetworkName("dual-stack")
+			podmanTest.PodmanExitCleanly("network", "create", "--ipv6",
+				"--subnet", "fd00:42::/64", "--subnet", "172.42.0.0/24", netName)
+			defer podmanTest.removeNetwork(netName)
+
+			port6 := GetPort()
+			ctr6 := podmanTest.startNCContainer(
+				"c-ipv6", port6,
+				"--network", netName,
+				"-p", fmt.Sprintf("%d:%d", port6, port6),
+			)
+			msg6 := RandomString(20)
+			sendMessageToAddr(fmt.Sprintf("[::1]:%d", port6), msg6)
+			podmanTest.WaitForContainerLog(ctr6, msg6)
+
+			port4 := GetPort()
+			ctr4 := podmanTest.startNCContainer(
+				"c-ipv4", port4,
+				"--network", netName,
+				"-p", fmt.Sprintf("%d:%d", port4, port4),
+			)
+			msg4 := RandomString(20)
+			sendMessageToAddr(fmt.Sprintf("127.0.0.1:%d", port4), msg4)
+			podmanTest.WaitForContainerLog(ctr4, msg4)
+		})
+	}
+
+	// https://github.com/containers/podman/issues/28771
+	It("podman run bridge dual-stack same port IPv4 and IPv6 route to different containers", func() {
+		SkipIfNoIPv6Route("pesto IPv6 forwarding requires routable IPv6 on the host")
+		configurePortForwarder("pasta")
+		subnet4 := "172.45.0.0/24"
+		subnet6 := "fd00:47::/64"
+		netName := createNetworkName("dualip")
+		podmanTest.PodmanExitCleanly("network", "create", "--ipv6", "--subnet", subnet4, "--subnet", subnet6, netName)
+		defer podmanTest.removeNetwork(netName)
+
+		port := GetPort()
+
+		ctr1 := podmanTest.startNCContainer(
+			"c-dualip-v4", port,
+			"--network", netName,
+			"-p", fmt.Sprintf("127.0.0.1:%d:%d", port, port),
+		)
+
+		ctr2Port := GetPort()
+		ctr2 := podmanTest.startNCContainer(
+			"c-dualip-v6", ctr2Port,
+			"--network", netName,
+			"-p", fmt.Sprintf("[::1]:%d:%d", port, ctr2Port),
+		)
+
+		msg1 := RandomString(20)
+		sendMessageToAddr(fmt.Sprintf("127.0.0.1:%d", port), msg1)
+		podmanTest.WaitForContainerLog(ctr1, msg1)
+
+		msg2 := RandomString(20)
+		sendMessageToAddr(fmt.Sprintf("[::1]:%d", port), msg2)
+		podmanTest.WaitForContainerLog(ctr2, msg2)
+
+		logs1 := podmanTest.PodmanExitCleanly("logs", ctr1)
+		Expect(logs1.OutputToString()).To(ContainSubstring(msg1))
+		Expect(logs1.OutputToString()).ToNot(ContainSubstring(msg2))
+
+		logs2 := podmanTest.PodmanExitCleanly("logs", ctr2)
+		Expect(logs2.OutputToString()).To(ContainSubstring(msg2))
+		Expect(logs2.OutputToString()).ToNot(ContainSubstring(msg1))
+	})
+
+	// https://github.com/containers/podman/issues/14928
+	It("podman run bridge network same port different HostIPs routes to correct container", func() {
+		configurePortForwarder("pasta")
+		subnet := "172.43.0.0/24"
+		netName := createNetworkName("multiip")
+		podmanTest.PodmanExitCleanly("network", "create", "--subnet", subnet, netName)
+		defer podmanTest.removeNetwork(netName)
+
+		port := GetPort()
+
+		ctr1 := podmanTest.startNCContainer(
+			"c-multiip-1", port,
+			"--network", netName,
+			"-p", fmt.Sprintf("127.0.0.1:%d:%d", port, port),
+		)
+
+		ctr2 := podmanTest.startNCContainer(
+			"c-multiip-2", port,
+			"--network", netName,
+			"-p", fmt.Sprintf("127.0.0.2:%d:%d", port, port),
+		)
+
+		msg1 := RandomString(20)
+		sendMessageToAddr(fmt.Sprintf("127.0.0.1:%d", port), msg1)
+		podmanTest.WaitForContainerLog(ctr1, msg1)
+
+		msg2 := RandomString(20)
+		sendMessageToAddr(fmt.Sprintf("127.0.0.2:%d", port), msg2)
+		podmanTest.WaitForContainerLog(ctr2, msg2)
+
+		logs := podmanTest.PodmanExitCleanly("logs", ctr1)
+		Expect(logs.OutputToString()).ToNot(ContainSubstring(msg2))
+		Expect(logs.OutputToString()).To(ContainSubstring(msg1))
+
+		logs = podmanTest.PodmanExitCleanly("logs", ctr2)
+		Expect(logs.OutputToString()).ToNot(ContainSubstring(msg1))
+		Expect(logs.OutputToString()).To(ContainSubstring(msg2))
+	})
+
+	// https://github.com/containers/podman/issues/28771
+	It("podman run bridge multiple containers same network different ports with pesto", func() {
+		configurePortForwarder("pasta")
+		subnet := "172.44.0.0/24"
+		netName := createNetworkName("multipesto")
+		podmanTest.PodmanExitCleanly("network", "create", "--subnet", subnet, netName)
+		defer podmanTest.removeNetwork(netName)
+
+		port1 := GetPort()
+		ctr1 := podmanTest.startNCContainer(
+			"c-multi-1", port1,
+			"--network", netName,
+			"-p", fmt.Sprintf("127.0.0.1:%d:%d", port1, port1),
+		)
+
+		port2 := GetPort()
+		ctr2 := podmanTest.startNCContainer(
+			"c-multi-2", port2,
+			"--network", netName,
+			"-p", fmt.Sprintf("127.0.0.1:%d:%d", port2, port2),
+		)
+
+		port3 := GetPort()
+		ctr3 := podmanTest.startNCContainer(
+			"c-multi-3", port3,
+			"--network", netName,
+			"-p", fmt.Sprintf("127.0.0.1:%d:%d", port3, port3),
+		)
+
+		msg1 := RandomString(20)
+		sendMessageToAddr(fmt.Sprintf("127.0.0.1:%d", port1), msg1)
+		podmanTest.WaitForContainerLog(ctr1, msg1)
+
+		msg2 := RandomString(20)
+		sendMessageToAddr(fmt.Sprintf("127.0.0.1:%d", port2), msg2)
+		podmanTest.WaitForContainerLog(ctr2, msg2)
+
+		msg3 := RandomString(20)
+		sendMessageToAddr(fmt.Sprintf("127.0.0.1:%d", port3), msg3)
+		podmanTest.WaitForContainerLog(ctr3, msg3)
+
+		logs1 := podmanTest.PodmanExitCleanly("logs", ctr1)
+		Expect(logs1.OutputToString()).To(ContainSubstring(msg1))
+		Expect(logs1.OutputToString()).ToNot(ContainSubstring(msg2))
+		Expect(logs1.OutputToString()).ToNot(ContainSubstring(msg3))
+
+		logs2 := podmanTest.PodmanExitCleanly("logs", ctr2)
+		Expect(logs2.OutputToString()).To(ContainSubstring(msg2))
+		Expect(logs2.OutputToString()).ToNot(ContainSubstring(msg1))
+
+		logs3 := podmanTest.PodmanExitCleanly("logs", ctr3)
+		Expect(logs3.OutputToString()).To(ContainSubstring(msg3))
+		Expect(logs3.OutputToString()).ToNot(ContainSubstring(msg1))
+	})
+
+	// https://github.com/containers/podman/issues/28771
+	It("podman run bridge container with multiple port mappings on different addresses", func() {
+		SkipIfNoIPv6Route("pesto IPv6 forwarding requires routable IPv6 on the host")
+		configurePortForwarder("pasta")
+		subnet4 := "172.46.0.0/24"
+		subnet6 := "fd00:48::/64"
+		netName := createNetworkName("multiport")
+		podmanTest.PodmanExitCleanly("network", "create", "--ipv6", "--subnet", subnet4, "--subnet", subnet6, netName)
+		defer podmanTest.removeNetwork(netName)
+
+		port4 := GetPort()
+		port6 := GetPort()
+
+		podmanTest.PodmanExitCleanly(
+			"run", "-d", "--name", "c-multiport",
+			"--network", netName,
+			"-p", fmt.Sprintf("127.0.0.1:%d:8080", port4),
+			"-p", fmt.Sprintf("[::1]:%d:8081", port6),
+			ALPINE, "sh", "-c",
+			"nc -l -n -v -p 8080 2>&1; nc -l -n -v -p 8081 2>&1",
+		)
+		podmanTest.WaitForContainerLog("c-multiport", "listening")
+		time.Sleep(500 * time.Millisecond)
+
+		msg4 := RandomString(20)
+		sendMessageToAddr(fmt.Sprintf("127.0.0.1:%d", port4), msg4)
+		podmanTest.WaitForContainerLog("c-multiport", msg4)
+
+		msg6 := RandomString(20)
+		sendMessageToAddr(fmt.Sprintf("[::1]:%d", port6), msg6)
+		podmanTest.WaitForContainerLog("c-multiport", msg6)
+
+		logs := podmanTest.PodmanExitCleanly("logs", "c-multiport")
+		Expect(logs.OutputToString()).To(ContainSubstring(msg4))
+		Expect(logs.OutputToString()).To(ContainSubstring(msg6))
+	})
+
+	// https://github.com/containers/podman/issues/28771
+	It("podman run bridge different host and container ports on dual-stack network with pesto", func() {
+		SkipIfNoIPv6Route("pesto IPv6 forwarding requires routable IPv6 on the host")
+		configurePortForwarder("pasta")
+		subnet4 := "172.47.0.0/24"
+		subnet6 := "fd00:49::/64"
+		netName := createNetworkName("diffport-ds")
+		podmanTest.PodmanExitCleanly("network", "create", "--ipv6", "--subnet", subnet4, "--subnet", subnet6, netName)
+		defer podmanTest.removeNetwork(netName)
+
+		hostPort4 := GetPort()
+		ctrPort4 := GetPort()
+		hostPort6 := GetPort()
+		ctrPort6 := GetPort()
+
+		podmanTest.PodmanExitCleanly(
+			"run", "-d", "--name", "c-diffport-ds",
+			"--network", netName,
+			"-p", fmt.Sprintf("127.0.0.1:%d:%d", hostPort4, ctrPort4),
+			"-p", fmt.Sprintf("[::1]:%d:%d", hostPort6, ctrPort6),
+			ALPINE, "sh", "-c",
+			fmt.Sprintf("nc -l -n -v -p %d 2>&1; nc -l -n -v -p %d 2>&1", ctrPort4, ctrPort6),
+		)
+		podmanTest.WaitForContainerLog("c-diffport-ds", "listening")
+		time.Sleep(500 * time.Millisecond)
+
+		msg4 := RandomString(20)
+		sendMessageToAddr(fmt.Sprintf("127.0.0.1:%d", hostPort4), msg4)
+		podmanTest.WaitForContainerLog("c-diffport-ds", msg4)
+
+		msg6 := RandomString(20)
+		sendMessageToAddr(fmt.Sprintf("[::1]:%d", hostPort6), msg6)
+		podmanTest.WaitForContainerLog("c-diffport-ds", msg6)
+
+		logs := podmanTest.PodmanExitCleanly("logs", "c-diffport-ds")
+		Expect(logs.OutputToString()).To(ContainSubstring(msg4))
+		Expect(logs.OutputToString()).To(ContainSubstring(msg6))
+	})
+
+	It("podman run pasta network preserves source IP", func() {
+		SkipIfNotRootless("pasta network mode is only supported rootless")
+		port := GetPort()
+		ctrName := podmanTest.startNCContainer(
+			"srcip-pasta-ctr", port,
+			"--net=pasta",
+			"-p", fmt.Sprintf("%d:%d", port, port),
+		)
+
+		msg := RandomString(20)
+		sendMessageToAddr(fmt.Sprintf("127.0.0.1:%d", port), msg)
+		podmanTest.WaitForContainerLog(ctrName, msg)
+
+		logs := podmanTest.PodmanExitCleanly("logs", ctrName)
+		output := logs.OutputToString()
+		// With --net=pasta, pasta handles port forwarding directly without
+		// a bridge or netavark. The source IP is the host address (not a
+		// bridge gateway), confirming pasta's native source preservation.
+		Expect(output).To(MatchRegexp(`connect to .* from`))
+		Expect(output).ToNot(MatchRegexp(`connect to .* from .*127\.0\.0\.`))
+
+		podmanTest.PodmanExitCleanly("rm", "-f", "srcip-pasta-ctr")
 	})
 
 	It("Rootless podman run with --net=bridge works and connects to default network", func() {
@@ -1199,12 +1507,424 @@ EXPOSE 2004-2005/tcp`, ALPINE)
 		Expect(session).Should(ExitCleanly())
 
 		// use options and search to make sure we get the same resolv.conf everywhere
-		run := podmanTest.Podman([]string{"run", "--network", net, "--dns", "127.0.0.128",
-			"--dns-option", "ndots:1", "--dns-search", ".", ALPINE, "cat", "/etc/resolv.conf"})
+		run := podmanTest.Podman([]string{
+			"run", "--network", net, "--dns", "127.0.0.128",
+			"--dns-option", "ndots:1", "--dns-search", ".", ALPINE, "cat", "/etc/resolv.conf",
+		})
 		run.WaitWithDefaultTimeout()
 		Expect(run).Should(ExitCleanly())
 		Expect(string(run.Out.Contents())).To(Equal(`nameserver 127.0.0.128
 options ndots:1
 `))
 	})
+
+	It("podman network create with same subnets", func() {
+		netName := "multi-subnet-" + stringid.GenerateRandomID()
+		subnet := "10.64.0.0/16"
+
+		nc := podmanTest.Podman([]string{"network", "create", "--subnet", subnet, "--subnet", subnet, netName})
+		nc.WaitWithDefaultTimeout()
+		Expect(nc).ShouldNot(ExitCleanly())
+		Expect(nc.ErrorToString()).To(ContainSubstring("duplicate subnet"))
+	})
+
+	It("podman network create with same IPv6 subnets", func() {
+		netName := "multi-subnet-" + stringid.GenerateRandomID()
+		subnet := "fd10:64::/48"
+
+		nc := podmanTest.Podman([]string{"network", "create", "--subnet", subnet, "--subnet", subnet, netName})
+		nc.WaitWithDefaultTimeout()
+		Expect(nc).ShouldNot(ExitCleanly())
+		Expect(nc.ErrorToString()).To(ContainSubstring("duplicate subnet"))
+	})
+
+	It("podman network create with overlapping subnets", func() {
+		// Config file defines overlapping subnets:
+		// - 10.1.2.0/23 covers 10.1.2.0-10.1.3.255
+		// - 10.1.3.248/30 covers 10.1.3.248-10.1.3.251 (subset of the /23)
+
+		netName := "multi-subnet-" + stringid.GenerateRandomID()
+		subnetA := "10.1.2.0/23"
+		subnetB := "10.1.3.248/30"
+
+		nc := podmanTest.Podman([]string{"network", "create", "--subnet", subnetA, "--subnet", subnetB, netName})
+		nc.WaitWithDefaultTimeout()
+		Expect(nc).ShouldNot(ExitCleanly())
+		Expect(nc.ErrorToString()).To(ContainSubstring("overlapping subnets"))
+	})
+
+	It("podman network create with overlapping IPv6 subnets", func() {
+		// Config file defines overlapping IPv6 subnets:
+		// - fd20:1::/48 covers fd20:1:: through fd20:1:0:ffff:...
+		// - fd20:1:0:f8::/62 is a subset of fd20:1::/48
+
+		netName := "multi-subnet-" + stringid.GenerateRandomID()
+		subnetA := "fd20:1::/48"
+		subnetB := "fd20:1:0:f8::/62"
+
+		nc := podmanTest.Podman([]string{"network", "create", "--subnet", subnetA, "--subnet", subnetB, netName})
+		nc.WaitWithDefaultTimeout()
+		Expect(nc).ShouldNot(ExitCleanly())
+		Expect(nc.ErrorToString()).To(ContainSubstring("overlapping subnets"))
+	})
+
+	// sortBySubnet reorders IPs to match the subnet order used in network creation.
+	// For multi-subnet networks, IPs are grouped by subnet in the order the subnets
+	// were defined with --subnet flags, regardless of the order IPs were specified.
+	// Returns a new slice with IPs sorted by their corresponding subnet.
+	sortBySubnet := func(ips []string, subnets []string) []string {
+		sortedExpectedIPs := make([]string, 0, len(ips))
+		for _, subnet := range subnets {
+			_, subnetNet, err := net.ParseCIDR(subnet)
+			Expect(err).ToNot(HaveOccurred())
+			for _, ip := range ips {
+				parsedIP := net.ParseIP(ip)
+				if subnetNet.Contains(parsedIP) {
+					sortedExpectedIPs = append(sortedExpectedIPs, ip)
+				}
+			}
+		}
+		return sortedExpectedIPs
+	}
+
+	type multiIPTestCase struct {
+		name               string
+		subnets            []string
+		staticIPs          []string
+		subnetGateways     map[string]string
+		hasDynamicIP       bool
+		numberOfDynamicIPs int
+		isIPv6             bool
+	}
+
+	multiIPTests := []multiIPTestCase{
+		{
+			name:      "multiple static IPs in single subnet",
+			subnets:   []string{"10.86.0.0/16"},
+			staticIPs: []string{"10.86.0.10", "10.86.0.11", "10.86.0.12"},
+			subnetGateways: map[string]string{
+				"10.86.": "10.86.0.1",
+			},
+		},
+		{
+			name:      "multiple static IPs across multiple subnets",
+			subnets:   []string{"10.92.0.0/24", "10.91.0.0/24"},
+			staticIPs: []string{"10.92.0.21", "10.92.0.20", "10.91.0.10", "10.91.0.11"},
+			subnetGateways: map[string]string{
+				"10.91.": "10.91.0.1",
+				"10.92.": "10.92.0.1",
+			},
+		},
+		{
+			name:      "static IP on one subnet and dynamic IP on another",
+			subnets:   []string{"10.93.0.0/24", "10.94.0.0/24"},
+			staticIPs: []string{"10.93.0.50"},
+			subnetGateways: map[string]string{
+				"10.93.": "10.93.0.1",
+				"10.94.": "10.94.0.1",
+			},
+			hasDynamicIP:       true,
+			numberOfDynamicIPs: 1,
+		},
+		{
+			name:      "multiple static IPs across three subnets",
+			subnets:   []string{"10.95.0.0/24", "10.96.0.0/24", "10.97.0.0/24"},
+			staticIPs: []string{"10.95.0.10", "10.96.0.20", "10.97.0.30", "10.95.0.11", "10.96.0.21"},
+			subnetGateways: map[string]string{
+				"10.95.": "10.95.0.1",
+				"10.96.": "10.96.0.1",
+				"10.97.": "10.97.0.1",
+			},
+		},
+		{
+			name:      "single static IP in single subnet",
+			subnets:   []string{"10.98.0.0/24"},
+			staticIPs: []string{"10.98.0.100"},
+			subnetGateways: map[string]string{
+				"10.98.": "10.98.0.1",
+			},
+		},
+		{
+			name:      "two static IPs one per subnet",
+			subnets:   []string{"10.99.0.0/24", "10.100.0.0/24"},
+			staticIPs: []string{"10.99.0.50", "10.100.0.50"},
+			subnetGateways: map[string]string{
+				"10.99.":  "10.99.0.1",
+				"10.100.": "10.100.0.1",
+			},
+		},
+		{
+			name:      "many static IPs in single subnet",
+			subnets:   []string{"10.101.0.0/24"},
+			staticIPs: []string{"10.101.0.10", "10.101.0.11", "10.101.0.12", "10.101.0.13", "10.101.0.14", "10.101.0.15"},
+			subnetGateways: map[string]string{
+				"10.101.": "10.101.0.1",
+			},
+		},
+		{
+			name:      "single static IP with multiple dynamic IPs across three subnets",
+			subnets:   []string{"10.102.0.0/24", "10.103.0.0/24", "10.104.0.0/24"},
+			staticIPs: []string{"10.102.0.50"},
+			subnetGateways: map[string]string{
+				"10.102.": "10.102.0.1",
+				"10.103.": "10.103.0.1",
+				"10.104.": "10.104.0.1",
+			},
+			hasDynamicIP:       true,
+			numberOfDynamicIPs: 2,
+		},
+		// IPv6 variants
+		{
+			name:      "multiple static IPv6 IPs in single subnet",
+			subnets:   []string{"fd86:1::/64"},
+			staticIPs: []string{"fd86:1::10", "fd86:1::11", "fd86:1::12"},
+			subnetGateways: map[string]string{
+				"fd86:1::": "fd86:1::1",
+			},
+			isIPv6: true,
+		},
+		{
+			name:      "multiple static IPv6 IPs across multiple subnets",
+			subnets:   []string{"fd92:1::/64", "fd91:1::/64"},
+			staticIPs: []string{"fd92:1::21", "fd92:1::20", "fd91:1::10", "fd91:1::11"},
+			subnetGateways: map[string]string{
+				"fd91:1::": "fd91:1::1",
+				"fd92:1::": "fd92:1::1",
+			},
+			isIPv6: true,
+		},
+		{
+			name:      "static IPv6 IP on one subnet and dynamic IPv6 IP on another",
+			subnets:   []string{"fd93:1::/64", "fd94:1::/64"},
+			staticIPs: []string{"fd93:1::50"},
+			subnetGateways: map[string]string{
+				"fd93:1::": "fd93:1::1",
+				"fd94:1::": "fd94:1::1",
+			},
+			hasDynamicIP:       true,
+			numberOfDynamicIPs: 1,
+			isIPv6:             true,
+		},
+		{
+			name:      "multiple static IPv6 IPs across three subnets",
+			subnets:   []string{"fd95:1::/64", "fd96:1::/64", "fd97:1::/64"},
+			staticIPs: []string{"fd95:1::10", "fd96:1::20", "fd97:1::30", "fd95:1::11", "fd96:1::21"},
+			subnetGateways: map[string]string{
+				"fd95:1::": "fd95:1::1",
+				"fd96:1::": "fd96:1::1",
+				"fd97:1::": "fd97:1::1",
+			},
+			isIPv6: true,
+		},
+		{
+			name:      "single static IPv6 IP in single subnet",
+			subnets:   []string{"fd98:1::/64"},
+			staticIPs: []string{"fd98:1::64"},
+			subnetGateways: map[string]string{
+				"fd98:1::": "fd98:1::1",
+			},
+			isIPv6: true,
+		},
+		{
+			name:      "two static IPv6 IPs one per subnet",
+			subnets:   []string{"fd99:1::/64", "fd9a:1::/64"},
+			staticIPs: []string{"fd99:1::50", "fd9a:1::50"},
+			subnetGateways: map[string]string{
+				"fd99:1::": "fd99:1::1",
+				"fd9a:1::": "fd9a:1::1",
+			},
+			isIPv6: true,
+		},
+		{
+			name:      "many static IPv6 IPs in single subnet",
+			subnets:   []string{"fda1:1::/64"},
+			staticIPs: []string{"fda1:1::10", "fda1:1::11", "fda1:1::12", "fda1:1::13", "fda1:1::14", "fda1:1::15"},
+			subnetGateways: map[string]string{
+				"fda1:1::": "fda1:1::1",
+			},
+			isIPv6: true,
+		},
+		{
+			name:      "single static IPv6 IP with multiple dynamic IPv6 IPs across three subnets",
+			subnets:   []string{"fda2:1::/64", "fda3:1::/64", "fda4:1::/64"},
+			staticIPs: []string{"fda2:1::50"},
+			subnetGateways: map[string]string{
+				"fda2:1::": "fda2:1::1",
+				"fda3:1::": "fda3:1::1",
+				"fda4:1::": "fda4:1::1",
+			},
+			hasDynamicIP:       true,
+			numberOfDynamicIPs: 2,
+			isIPv6:             true,
+		},
+	}
+
+	for _, tc := range multiIPTests {
+		It(fmt.Sprintf("podman run container with %s", tc.name), func() {
+			netName := "test-net-" + stringid.GenerateRandomID()
+			netCreateArgs := []string{"network", "create"}
+			for _, subnet := range tc.subnets {
+				netCreateArgs = append(netCreateArgs, "--subnet", subnet)
+			}
+			netCreateArgs = append(netCreateArgs, netName)
+			podmanTest.PodmanExitCleanly(netCreateArgs...)
+			defer podmanTest.removeNetwork(netName)
+
+			ipsToUse := make([]string, len(tc.staticIPs))
+			copy(ipsToUse, tc.staticIPs)
+			rand.Shuffle(len(ipsToUse), func(i, j int) {
+				ipsToUse[i], ipsToUse[j] = ipsToUse[j], ipsToUse[i]
+			})
+			networkArg := fmt.Sprintf("%s:ip=%s", netName, strings.Join(ipsToUse, ",ip="))
+			cName := "test-ctr-" + stringid.GenerateRandomID()
+			podmanTest.PodmanExitCleanly("run", "-d", "--name", cName, "--network", networkArg, ALPINE, "top")
+			defer podmanTest.PodmanExitCleanly("rm", "-f", cName)
+
+			data := podmanTest.InspectContainer(cName)
+			Expect(data).To(HaveLen(1))
+			containerInspect := data[0]
+			containerID := data[0].ID
+
+			interfaceName := "eth0"
+			var ipAddrCmd string
+			if tc.isIPv6 {
+				ipAddrCmd = fmt.Sprintf("ip addr show %s | awk '/inet6/ && !/fe80:/{print $2}'", interfaceName)
+			} else {
+				ipAddrCmd = fmt.Sprintf("ip addr show %s | awk ' /inet / {print $2}'", interfaceName)
+			}
+			showIPs := podmanTest.PodmanExitCleanly("exec", cName, "sh", "-c", ipAddrCmd)
+			outputIPs := showIPs.OutputToStringArray()
+
+			actualIPs := make([]string, len(outputIPs))
+			for i, ipCIDR := range outputIPs {
+				containerIP, _, err := net.ParseCIDR(ipCIDR)
+				Expect(err).ToNot(HaveOccurred())
+				actualIPs[i] = containerIP.String()
+			}
+
+			expectedIPs := sortBySubnet(ipsToUse, tc.subnets)
+			if tc.hasDynamicIP {
+				Expect(actualIPs).To(HaveLen(len(tc.staticIPs) + tc.numberOfDynamicIPs))
+				Expect(actualIPs).To(ContainElement(tc.staticIPs[0]))
+
+				for _, dynamicIP := range actualIPs {
+					if dynamicIP == tc.staticIPs[0] {
+						continue
+					}
+					parsedDynamicIP := net.ParseIP(dynamicIP)
+					foundInDynamicSubnet := false
+					for j := len(tc.staticIPs); j < len(tc.subnets); j++ {
+						_, subnetNet, err := net.ParseCIDR(tc.subnets[j])
+						Expect(err).ToNot(HaveOccurred())
+						if subnetNet.Contains(parsedDynamicIP) {
+							foundInDynamicSubnet = true
+							break
+						}
+					}
+					Expect(foundInDynamicSubnet).To(BeTrue(), fmt.Sprintf("dynamic IP %s not in any expected dynamic subnet", dynamicIP))
+
+					expectedIPs = append(expectedIPs, dynamicIP)
+				}
+				expectedIPs = sortBySubnet(expectedIPs, tc.subnets)
+			}
+			Expect(actualIPs).To(ConsistOf(expectedIPs))
+
+			Expect(containerInspect.NetworkSettings.Networks).To(HaveKey(netName))
+			network := containerInspect.NetworkSettings.Networks[netName]
+
+			primaryIP := expectedIPs[0]
+			expectedSecondaryIPs := expectedIPs[1:]
+			if tc.isIPv6 {
+				Expect(network.GlobalIPv6Address).To(Equal(primaryIP))
+				Expect(network.SecondaryIPv6Addresses).To(HaveLen(len(expectedSecondaryIPs)))
+				for i, ip := range network.SecondaryIPv6Addresses {
+					Expect(ip.Addr).To(Equal(expectedSecondaryIPs[i]))
+				}
+			} else {
+				Expect(network.IPAddress).To(Equal(primaryIP))
+				Expect(network.SecondaryIPAddresses).To(HaveLen(len(expectedSecondaryIPs)))
+				for i, ip := range network.SecondaryIPAddresses {
+					Expect(ip.Addr).To(Equal(expectedSecondaryIPs[i]))
+				}
+			}
+
+			networkReports := podmanTest.InspectNetwork(netName)
+			Expect(networkReports).To(HaveLen(1))
+			netReport := networkReports[0]
+			Expect(netReport.Containers).To(HaveKey(containerID))
+
+			containerInfo := netReport.Containers[containerID]
+			Expect(containerInfo.Interfaces).To(HaveKey(interfaceName))
+
+			netInterface := containerInfo.Interfaces[interfaceName]
+			Expect(netInterface.Subnets).To(HaveLen(len(expectedIPs)))
+			for i, subnetInfo := range netInterface.Subnets {
+				ip := subnetInfo.IPNet.IP.String()
+				Expect(ip).To(Equal(expectedIPs[i]))
+				var expectedGateway string
+				for subnetPrefix, gateway := range tc.subnetGateways {
+					if strings.HasPrefix(ip, subnetPrefix) {
+						expectedGateway = gateway
+						break
+					}
+				}
+				Expect(expectedGateway).ToNot(BeEmpty())
+				Expect(subnetInfo.Gateway.String()).To(Equal(expectedGateway))
+			}
+		})
+	}
 })
+
+// sendMessageToAddr sends a message to the given tcp address (host:port).
+// For IPv6 addresses, it retries several times with a delay to allow
+// NDP neighbor discovery inside the rootless netns to complete before
+// pasta can relay traffic to the container.
+func sendMessageToAddr(addr string, message string) {
+	GinkgoHelper()
+	isIPv6 := strings.Contains(addr, "[")
+	maxAttempts := 1
+	if isIPv6 {
+		maxAttempts = 5
+	}
+
+	var lastErr error
+	for attempt := range maxAttempts {
+		if attempt > 0 {
+			time.Sleep(time.Second)
+		}
+		lastErr = trySendMessage(addr, message)
+		if lastErr == nil {
+			return
+		}
+	}
+	Expect(lastErr).ToNot(HaveOccurred(), "failed to send message to %s after %d attempts", addr, maxAttempts)
+}
+
+func trySendMessage(addr string, message string) error {
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		return err
+	}
+
+	tcpConn := conn.(*net.TCPConn)
+	defer tcpConn.Close()
+
+	// For IPv6, pasta may accept the host-side connection immediately
+	// but the inner TAP-side connection to the container needs NDP
+	// resolution (1-2s). Delay before writing so the relay path is ready.
+	if strings.Contains(addr, "[") {
+		time.Sleep(2 * time.Second)
+	}
+
+	if _, err = tcpConn.Write([]byte(message)); err != nil {
+		return err
+	}
+
+	if err = tcpConn.CloseWrite(); err != nil {
+		return err
+	}
+
+	tcpConn.SetReadDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
+	_, _ = io.Copy(io.Discard, tcpConn)
+	return nil
+}

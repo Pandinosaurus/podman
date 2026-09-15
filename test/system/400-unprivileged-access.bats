@@ -7,7 +7,6 @@
 load helpers
 
 @test "podman container storage is not accessible by unprivileged users" {
-    skip_if_cgroupsv1 "run --uidmap fails on cgroups v1 (issue 15025, wontfix)"
     skip_if_rootless "test meaningless without suid"
     skip_if_remote
 
@@ -135,6 +134,9 @@ EOF
             subset+=($mp)
         fi
     done
+
+    # If the image does not exists, the pull output will make the test below fail
+    _prefetch $IMAGE
 
     # Run 'stat' on all the files, plus /dev/null. Get path, file type,
     # number of links, major, and minor (see below for why). Do it all

@@ -5,14 +5,15 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/common/pkg/report"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/validate"
-	"github.com/containers/podman/v5/libpod/events"
-	"github.com/containers/podman/v5/pkg/domain/entities"
+	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/common/pkg/report"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/validate"
+	"go.podman.io/podman/v6/libpod/events"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 var (
@@ -27,9 +28,9 @@ var (
 		RunE:              eventsCmd,
 		ValidArgsFunction: completion.AutocompleteNone,
 		Example: `podman events
-  podman events --filter event=create
-  podman events --format {{.Image}}
-  podman events --since 1h30s`,
+podman events --filter event=create
+podman events --format {{.Image}}
+podman events --since 1h30s`,
 	}
 
 	systemEventsCommand = &cobra.Command{
@@ -53,6 +54,8 @@ type Event struct {
 	// containerExitCode is for storing the exit code of a container which can
 	// be used for "internal" event notification
 	ContainerExitCode *int `json:",omitempty"`
+	// OOMKilled indicates whether the container was killed by an OOM condition
+	OOMKilled *bool `json:",omitempty"`
 	// ID can be for the container, image, volume, etc
 	ID string `json:",omitempty"`
 	// Image used where applicable
@@ -80,6 +83,7 @@ type Event struct {
 func newEventFromLibpodEvent(e *events.Event) Event {
 	return Event{
 		ContainerExitCode: e.ContainerExitCode,
+		OOMKilled:         e.OOMKilled,
 		ID:                e.ID,
 		Image:             e.Image,
 		Name:              e.Name,
@@ -139,9 +143,8 @@ func eventsCmd(cmd *cobra.Command, _ []string) error {
 	if len(eventOptions.Since) > 0 || len(eventOptions.Until) > 0 {
 		eventOptions.FromStart = true
 	}
-	eventChannel := make(chan *events.Event, 1)
+	eventChannel := make(chan events.ReadResult, 1)
 	eventOptions.EventChan = eventChannel
-	errChannel := make(chan error)
 
 	var (
 		rpt    *report.Formatter
@@ -161,40 +164,31 @@ func eventsCmd(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	go func() {
-		errChannel <- registry.ContainerEngine().Events(context.Background(), eventOptions)
-		close(errChannel)
-	}()
+	err := registry.ContainerEngine().Events(context.Background(), eventOptions)
+	if err != nil {
+		return err
+	}
 
-	for {
-		select {
-		case event, ok := <-eventChannel:
-			if !ok {
-				// channel was closed we can exit
-				// read the error channel blocking to make sure we are not missing any errors (#23165)
-				return <-errChannel
-			}
-			switch {
-			case doJSON:
-				e := newEventFromLibpodEvent(event)
-				jsonStr, err := e.ToJSONString()
-				if err != nil {
-					return err
-				}
-				fmt.Println(jsonStr)
-			case cmd.Flags().Changed("format"):
-				if err := rpt.Execute(newEventFromLibpodEvent(event)); err != nil {
-					return err
-				}
-			default:
-				fmt.Println(event.ToHumanReadable(!noTrunc))
-			}
-		case err := <-errChannel:
-			// only exit in case of an error,
-			// otherwise keep reading events until the event channel is closed
+	for evt := range eventChannel {
+		if evt.Error != nil {
+			logrus.Errorf("Failed to read event: %v", evt.Error)
+			continue
+		}
+		switch {
+		case doJSON:
+			e := newEventFromLibpodEvent(evt.Event)
+			jsonStr, err := e.ToJSONString()
 			if err != nil {
 				return err
 			}
+			fmt.Println(jsonStr)
+		case cmd.Flags().Changed("format"):
+			if err := rpt.Execute(newEventFromLibpodEvent(evt.Event)); err != nil {
+				return err
+			}
+		default:
+			fmt.Println(evt.Event.ToHumanReadable(!noTrunc))
 		}
 	}
+	return nil
 }

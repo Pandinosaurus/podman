@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package compat
 
@@ -7,12 +7,12 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/containers/podman/v5/libpod"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/api/handlers/utils"
-	api "github.com/containers/podman/v5/pkg/api/types"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/domain/infra/abi"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/api/handlers/utils"
+	api "go.podman.io/podman/v6/pkg/api/types"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/domain/infra/abi"
 )
 
 func RestartContainer(w http.ResponseWriter, r *http.Request) {
@@ -38,11 +38,15 @@ func RestartContainer(w http.ResponseWriter, r *http.Request) {
 	name := utils.GetName(r)
 
 	options := entities.RestartOptions{
-		All:     query.All,
-		Timeout: &query.DockerTimeout,
+		All: query.All,
+	}
+	if _, found := r.URL.Query()["t"]; found {
+		options.Timeout = &query.DockerTimeout
 	}
 	if utils.IsLibpodRequest(r) {
-		options.Timeout = &query.LibpodTimeout
+		if _, found := r.URL.Query()["timeout"]; found {
+			options.Timeout = &query.LibpodTimeout
+		}
 	}
 	report, err := containerEngine.ContainerRestart(r.Context(), []string{name}, options)
 	if err != nil {

@@ -2,10 +2,10 @@ package trust
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
-
-	"golang.org/x/exp/maps"
 )
 
 // Policy describes a basic trust policy configuration
@@ -53,7 +53,7 @@ func getPolicyShowOutput(policyContentStruct policyContent, systemRegistriesDirP
 		}
 		output = append(output, descriptionsOfPolicyRequirements(policyContentStruct.Default, template, registryConfigs, "", idReader)...)
 	}
-	transports := maps.Keys(policyContentStruct.Transports)
+	transports := slices.Collect(maps.Keys(policyContentStruct.Transports))
 	sort.Strings(transports)
 	for _, transport := range transports {
 		transval := policyContentStruct.Transports[transport]
@@ -61,7 +61,7 @@ func getPolicyShowOutput(policyContentStruct policyContent, systemRegistriesDirP
 			transport = "repository"
 		}
 
-		scopes := maps.Keys(transval)
+		scopes := slices.Collect(maps.Keys(transval))
 		sort.Strings(scopes)
 		for _, repo := range scopes {
 			repoval := transval[repo]
@@ -78,7 +78,7 @@ func getPolicyShowOutput(policyContentStruct policyContent, systemRegistriesDirP
 
 // descriptionsOfPolicyRequirements turns reqs into user-readable policy entries, with Transport/Name/Reponame coming from template, potentially looking up scope (which may be "") in registryConfigs.
 func descriptionsOfPolicyRequirements(reqs []repoContent, template Policy, registryConfigs *registryConfiguration, scope string, idReader gpgIDReader) []*Policy {
-	res := []*Policy{}
+	res := make([]*Policy, 0, len(reqs))
 
 	var lookasidePath string
 	registryNamespace := registriesDConfigurationForScope(registryConfigs, scope)

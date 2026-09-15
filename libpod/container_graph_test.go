@@ -1,12 +1,12 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package libpod
 
 import (
 	"testing"
 
-	"github.com/containers/podman/v5/libpod/lock"
 	"github.com/stretchr/testify/assert"
+	"go.podman.io/podman/v6/libpod/lock"
 )
 
 func TestBuildContainerGraphNoCtrsIsEmpty(t *testing.T) {

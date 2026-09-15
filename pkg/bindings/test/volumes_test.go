@@ -7,14 +7,14 @@ import (
 	"slices"
 	"time"
 
-	"github.com/containers/podman/v5/pkg/bindings"
-	"github.com/containers/podman/v5/pkg/bindings/containers"
-	"github.com/containers/podman/v5/pkg/bindings/volumes"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/domain/entities/reports"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/gexec"
+	"go.podman.io/podman/v6/pkg/bindings"
+	"go.podman.io/podman/v6/pkg/bindings/containers"
+	"go.podman.io/podman/v6/pkg/bindings/volumes"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/domain/entities/reports"
 )
 
 var _ = Describe("Podman volumes", func() {
@@ -68,6 +68,46 @@ var _ = Describe("Podman volumes", func() {
 		Expect(data.Name).To(Equal(vol.Name))
 	})
 
+	It("rename volume", func() {
+		oldName := "rename-old"
+		newName := "rename-new"
+		existingName := "rename-existing"
+
+		vol, err := volumes.Create(connText, entities.VolumeCreateOptions{Name: oldName}, nil)
+		Expect(err).ToNot(HaveOccurred())
+
+		err = volumes.Rename(connText, vol.Name, new(volumes.RenameOptions).WithNewName(newName))
+		Expect(err).ToNot(HaveOccurred())
+
+		_, err = volumes.Inspect(connText, oldName, nil)
+		Expect(err).To(HaveOccurred())
+		code, err := bindings.CheckResponseCode(err)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(code).To(BeNumerically("==", http.StatusNotFound))
+
+		data, err := volumes.Inspect(connText, newName, nil)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(data.Name).To(Equal(newName))
+
+		_, err = volumes.Create(connText, entities.VolumeCreateOptions{Name: existingName}, nil)
+		Expect(err).ToNot(HaveOccurred())
+		err = volumes.Rename(connText, newName, new(volumes.RenameOptions).WithNewName(existingName))
+		Expect(err).To(HaveOccurred())
+		code, err = bindings.CheckResponseCode(err)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(code).To(BeNumerically("==", http.StatusConflict))
+
+		session := bt.runPodman([]string{"create", "-v", fmt.Sprintf("%s:/data", newName), alpine.name, "true"})
+		session.Wait(45)
+		Expect(session.ExitCode()).To(BeZero())
+
+		err = volumes.Rename(connText, newName, new(volumes.RenameOptions).WithNewName("rename-blocked"))
+		Expect(err).To(HaveOccurred())
+		code, err = bindings.CheckResponseCode(err)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(code).To(BeNumerically("==", http.StatusConflict))
+	})
+
 	It("remove volume", func() {
 		// removing a bogus volume should result in 404
 		err := volumes.Remove(connText, "foobar", nil)
@@ -110,7 +150,7 @@ var _ = Describe("Podman volumes", func() {
 
 		// create a bunch of named volumes and make verify with list
 		volNames := []string{"homer", "bart", "lisa", "maggie", "marge"}
-		for i := 0; i < 5; i++ {
+		for i := range 5 {
 			_, err = volumes.Create(connText, entities.VolumeCreateOptions{Name: volNames[i]}, nil)
 			Expect(err).ToNot(HaveOccurred())
 		}
@@ -140,6 +180,9 @@ var _ = Describe("Podman volumes", func() {
 	})
 
 	It("prune unused volume", func() {
+		allVolumesOptions := volumes.PruneOptions{
+			Filters: map[string][]string{"all": {"true"}},
+		}
 		// Pruning when no volumes present should be ok
 		_, err := volumes.Prune(connText, nil)
 		Expect(err).ToNot(HaveOccurred())
@@ -147,7 +190,7 @@ var _ = Describe("Podman volumes", func() {
 		// Removing an unused volume should work
 		_, err = volumes.Create(connText, entities.VolumeCreateOptions{}, nil)
 		Expect(err).ToNot(HaveOccurred())
-		vols, err := volumes.Prune(connText, nil)
+		vols, err := volumes.Prune(connText, &allVolumesOptions)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(vols).To(HaveLen(1))
 
@@ -157,7 +200,7 @@ var _ = Describe("Podman volumes", func() {
 		Expect(err).ToNot(HaveOccurred())
 		session := bt.runPodman([]string{"run", "-dt", "-v", fmt.Sprintf("%s:/homer", "homer"), "--name", "vtest", alpine.name, "top"})
 		session.Wait(45)
-		vols, err = volumes.Prune(connText, nil)
+		vols, err = volumes.Prune(connText, &allVolumesOptions)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(reports.PruneReportsIds(vols)).To(HaveLen(1))
 		_, err = volumes.Inspect(connText, "homer", nil)
@@ -199,6 +242,44 @@ var _ = Describe("Podman volumes", func() {
 		vols, err = volumes.Prune(connText, options)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(vols).To(HaveLen(2))
+
+		// Pruning volumes without filters should remove all anonymous unused volumes
+		namedVolume := "named-keep"
+		ctrName := "anon-prune-test-ctr"
+
+		session = bt.runPodman([]string{"create", "--name", ctrName, "-v", "/anon", alpine.name, "top"})
+		session.Wait(45)
+		Expect(session.ExitCode()).To(BeZero())
+
+		session = bt.runPodman([]string{"rm", ctrName})
+		session.Wait(45)
+		Expect(session.ExitCode()).To(BeZero())
+
+		session = bt.runPodman([]string{"create", "-v", "/anon2", alpine.name, "top"})
+		session.Wait(45)
+		Expect(session.ExitCode()).To(BeZero())
+
+		_, err = volumes.Create(connText, entities.VolumeCreateOptions{Name: namedVolume}, nil)
+		Expect(err).ToNot(HaveOccurred())
+
+		pruned, err := volumes.Prune(connText, nil)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(pruned).To(HaveLen(1))
 	})
 
+	It("prune volume with dry-run", func() {
+		vol, err := volumes.Create(connText, entities.VolumeCreateOptions{Name: "vol"}, nil)
+		Expect(err).ToNot(HaveOccurred())
+
+		options := new(volumes.PruneOptions).
+			WithFilters(map[string][]string{"all": {"true"}}).
+			WithDryRun(true)
+
+		vols, err := volumes.Prune(connText, options)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(reports.PruneReportsIds(vols)).To(ContainElement(vol.Name))
+
+		_, err = volumes.Inspect(connText, vol.Name, nil)
+		Expect(err).ToNot(HaveOccurred())
+	})
 })

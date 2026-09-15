@@ -99,6 +99,10 @@ This option is added to be aligned with other containers CLIs.
 Podman doesn't communicate with a daemon or a remote server.
 Thus, compressing the data before sending it is irrelevant to Podman. (This option is not available with the remote Podman client, including Mac and Windows (excluding WSL2) machines)
 
+@@option compression-format
+
+@@option compression-level
+
 @@option cpp-flag
 
 @@option cpu-period
@@ -110,6 +114,8 @@ Thus, compressing the data before sending it is irrelevant to Podman. (This opti
 @@option cpuset-cpus
 
 @@option cpuset-mems
+
+@@option created-annotation
 
 @@option creds
 
@@ -172,7 +178,6 @@ from the base image's image ID.
 This option is not supported on the remote client, including Mac and Windows
 (excluding WSL2) machines.
 
-
 @@option decryption-key
 
 @@option device
@@ -201,6 +206,8 @@ It does not affect _/etc/resolv.conf_ in the final image.
 
 @@option file
 
+@@option force-compression
+
 @@option force-rm
 
 @@option format
@@ -220,6 +227,12 @@ It does not affect _/etc/resolv.conf_ in the final image.
 @@option ignorefile
 
 @@option iidfile
+
+@@option iidfile-raw
+
+@@option inherit-annotations
+
+@@option inherit-labels
 
 @@option ipc.image
 
@@ -248,6 +261,22 @@ This option is not supported on the remote client, including Mac and Windows
 @@option memory
 
 @@option memory-swap
+
+@@option metadata-file
+
+#### **--mount**=*mount-specification*
+
+Adds this mount to each `RUN` command in a Containerfile before executing.  For example:
+
+`podman build --mount=type=secret,id=mysecret …`
+
+and a Containerfile entry of:
+
+`RUN cat /run/secrets/mysecret`
+
+Has the same effect as:
+
+`RUN --mount=type=secret,id=mysecret cat /run/secrets/mysecret`
 
 @@option network.image
 
@@ -322,11 +351,15 @@ the help of emulation provided by packages like `qemu-user-static`.
 
 @@option retry-delay
 
+@@option rewrite-timestamp
+
 @@option rm
 
 @@option runtime
 
 @@option runtime-flag
+
+@@option save-stages
 
 #### **--sbom**=*preset*
 
@@ -431,11 +464,17 @@ Sign the image using a GPG key with the specified FINGERPRINT. (This option is n
 
 @@option skip-unused-stages
 
+@@option source-date-epoch
+
+@@option source-policy-file
+
 @@option squash
 
 @@option squash-all
 
 @@option ssh
+
+@@option stage-labels
 
 #### **--stdin**
 
@@ -453,6 +492,8 @@ Use --stdin to be able to interact from the terminal during the build.
 
 @@option ulimit.image
 
+@@option unsetannotation
+
 @@option unsetenv.image
 
 @@option unsetlabel
@@ -469,11 +510,7 @@ Use --stdin to be able to interact from the terminal during the build.
 
 @@option uts
 
-#### **--variant**=*variant*
-
-Set the architecture variant of the image to be built, and that of the base
-image to be pulled, if the build uses one, to the provided value instead of
-using the architecture variant of the build host.
+@@option variant.build
 
 @@option volume.image
 
@@ -564,6 +601,23 @@ $ podman build --no-cache --rm=false -t imageName .
 Build image using the specified network when running containers during the build:
 ```
 $ podman build --network mynet .
+```
+
+Build an image using a secret stored in an environment variable or file named `mysecret` to be used with the instruction `RUN --mount=type=secret,id=mysecret cat /run/secrets/mysecret`:
+```
+$ podman build --secret=id=mysecret .
+```
+
+Build an image using a secret stored in an environment variable named `MYSECRET` to be used with the instruction `RUN --mount=type=secret,id=mysecret cat /run/secrets/mysecret`:
+```
+$ podman build --secret=id=mysecret,env=MYSECRET .
+$ podman build --secret=id=mysecret,src=MYSECRET,type=env .
+```
+
+Build an image using a secret stored in a file named `.mysecret` to be used with the instruction `RUN --mount=type=secret,id=mysecret cat /run/secrets/mysecret`:
+```
+$ podman build --secret=id=mysecret,src=.mysecret .
+$ podman build --secret=id=mysecret,src=.mysecret,type=file .
 ```
 
 ### Building a multi-architecture image using the --manifest option (requires emulation software)
@@ -682,15 +736,15 @@ mechanism:
 Exclude all doc files except Help.doc from the image.
 
 This functionality is compatible with the handling of .containerignore files
-described here:
+described here: **[containerignore(5)](https://github.com/containers/container-libs/blob/main/common/docs/containerignore.5.md)**
 
-https://github.com/containers/common/blob/main/docs/containerignore.5.md
-
-**registries.conf** (`/etc/containers/registries.conf`)
+### registries.conf (`/etc/containers/registries.conf`)
 
 registries.conf is the configuration file which specifies which container
 registries is consulted when completing image names which do not include
 a registry or domain portion.
+See **[containers-registries.conf(5)](https://github.com/containers/image/blob/main/docs/containers-registries.conf.5.md)**
+
 
 ## Troubleshooting
 
@@ -706,7 +760,7 @@ When using the `useradd` command within the build script, pass the
 useradd to stop creating the lastlog file.
 
 ## SEE ALSO
-**[podman(1)](podman.1.md)**, **[buildah(1)](https://github.com/containers/buildah/blob/main/docs/buildah.1.md)**, **[containers-certs.d(5)](https://github.com/containers/image/blob/main/docs/containers-certs.d.5.md)**, **[containers-registries.conf(5)](https://github.com/containers/image/blob/main/docs/containers-registries.conf.5.md)**, **[crun(1)](https://github.com/containers/crun/blob/main/crun.1.md)**, **[runc(8)](https://github.com/opencontainers/runc/blob/main/man/runc.8.md)**, **[useradd(8)](https://www.unix.com/man-page/redhat/8/useradd)**, **[podman-ps(1)](podman-ps.1.md)**, **[podman-rm(1)](podman-rm.1.md)**, **[Containerfile(5)](https://github.com/containers/common/blob/main/docs/Containerfile.5.md)**, **[containerignore(5)](https://github.com/containers/common/blob/main/docs/containerignore.5.md)**
+**[podman(1)](podman.1.md)**, **[buildah(1)](https://github.com/containers/buildah/blob/main/docs/buildah.1.md)**, **[containers-certs.d(5)](https://github.com/containers/image/blob/main/docs/containers-certs.d.5.md)**, **[containers-registries.conf(5)](https://github.com/containers/image/blob/main/docs/containers-registries.conf.5.md)**, **[crun(1)](https://github.com/containers/crun/blob/main/crun.1.md)**, **[runc(8)](https://github.com/opencontainers/runc/blob/main/man/runc.8.md)**, **[useradd(8)](https://www.unix.com/man-page/redhat/8/useradd)**, **[podman-ps(1)](podman-ps.1.md)**, **[podman-rm(1)](podman-rm.1.md)**, **[Containerfile(5)](https://github.com/containers/container-libs/blob/main/common/docs/Containerfile.5.md)**, **[containerignore(5)](https://github.com/containers/container-libs/blob/main/common/docs/containerignore.5.md)**
 
 ### Troubleshooting
 

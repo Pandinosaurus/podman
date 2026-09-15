@@ -5,8 +5,13 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/containers/podman/v5/pkg/domain/entities/types"
+	"go.podman.io/podman/v6/pkg/domain/entities/types"
 )
+
+// ExternalContainerFilter is a function to determine whether a container list is included
+// in command output. Container lists to be outputted are tested using the function.
+// A true return will include the container list, a false return will exclude it.
+type ExternalContainerFilter func(*ListContainer) bool
 
 // ListContainer describes a container suitable for listing
 type ListContainer = types.ListContainer

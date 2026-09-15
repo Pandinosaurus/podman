@@ -9,21 +9,21 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/containers/buildah/pkg/cli"
-	"github.com/containers/common/pkg/auth"
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/image/v5/transports/alltransports"
-	"github.com/containers/image/v5/types"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/utils"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/specgen"
-	"github.com/containers/podman/v5/pkg/specgenutil"
-	"github.com/containers/podman/v5/pkg/util"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"go.podman.io/buildah/pkg/cli"
+	"go.podman.io/common/pkg/auth"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/image/v5/transports/alltransports"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/utils"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/specgen"
+	"go.podman.io/podman/v6/pkg/specgenutil"
+	"go.podman.io/podman/v6/pkg/util"
 	"golang.org/x/term"
 )
 
@@ -39,8 +39,8 @@ var (
 		Args:              cobra.MinimumNArgs(1),
 		ValidArgsFunction: common.AutocompleteCreateRun,
 		Example: `podman create alpine ls
-  podman create --annotation HELLO=WORLD alpine ls
-  podman create -t -i --name myctr alpine ls`,
+podman create --annotation HELLO=WORLD alpine ls
+podman create -t -i --name myctr alpine ls`,
 	}
 
 	containerCreateCommand = &cobra.Command{
@@ -51,8 +51,8 @@ var (
 		RunE:              createCommand.RunE,
 		ValidArgsFunction: createCommand.ValidArgsFunction,
 		Example: `podman container create alpine ls
-  podman container create --annotation HELLO=WORLD alpine ls
-  podman container create -t -i --name myctr alpine ls`,
+podman container create --annotation HELLO=WORLD alpine ls
+podman container create -t -i --name myctr alpine ls`,
 	}
 )
 
@@ -161,6 +161,11 @@ func create(cmd *cobra.Command, args []string) error {
 	}
 	s.RawImageName = rawImageName
 
+	s.Passwd = &cliVals.Passwd
+
+	// Include the command used to create the container.
+	s.ContainerCreateCommand = os.Args
+
 	if err := createPodIfNecessary(cmd, s, cliVals.Net); err != nil {
 		return err
 	}
@@ -171,7 +176,14 @@ func create(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	report, err := registry.ContainerEngine().ContainerCreate(registry.GetContext(), s)
+	if s.HealthConfig == nil {
+		s.HealthConfig, err = common.GetHealthCheckOverrideConfig(cmd, &cliVals)
+		if err != nil {
+			return err
+		}
+	}
+
+	report, err := registry.ContainerEngine().ContainerCreate(registry.Context(), s)
 	if err != nil {
 		// if pod was created as part of run
 		// remove it in case ctr creation fails
@@ -209,10 +221,6 @@ func replaceContainer(name string) error {
 func createOrUpdateFlags(cmd *cobra.Command, vals *entities.ContainerCreateOptions) error {
 	if cmd.Flags().Changed("pids-limit") {
 		val := cmd.Flag("pids-limit").Value.String()
-		// Convert -1 to 0, so that -1 maps to unlimited pids limit
-		if val == "-1" {
-			val = "0"
-		}
 		pidsLimit, err := strconv.ParseInt(val, 10, 32)
 		if err != nil {
 			return err
@@ -235,6 +243,10 @@ func CreateInit(c *cobra.Command, vals entities.ContainerCreateOptions, isInfra 
 	}
 	if c.Flag("kernel-memory") != nil && c.Flag("kernel-memory").Changed {
 		logrus.Warnf("The --kernel-memory flag is no longer supported. This flag is a noop.")
+	}
+
+	if c.Flag("image-volume") != nil && c.Flag("image-volume").Changed && c.Flag("image-volume").Value.String() == "bind" {
+		logrus.Warnf("The --image-volume=bind value is deprecated, use --image-volume=anonymous instead")
 	}
 
 	if cliVals.LogDriver == define.PassthroughLogging {
@@ -302,10 +314,6 @@ func CreateInit(c *cobra.Command, vals entities.ContainerCreateOptions, isInfra 
 		if c.Flag("cgroups").Changed && vals.CgroupsMode == "split" && registry.IsRemote() {
 			return vals, fmt.Errorf("the option --cgroups=%q is not supported in remote mode", vals.CgroupsMode)
 		}
-
-		if c.Flag("pod").Changed && !strings.HasPrefix(c.Flag("pod").Value.String(), "new:") && c.Flag("userns").Changed {
-			return vals, errors.New("--userns and --pod cannot be set together")
-		}
 	}
 	if c.Flag("shm-size").Changed {
 		vals.ShmSize = c.Flag("shm-size").Value.String()
@@ -322,6 +330,9 @@ func CreateInit(c *cobra.Command, vals entities.ContainerCreateOptions, isInfra 
 	}
 	if noHosts && c.Flag("add-host").Changed {
 		return vals, errors.New("--no-hosts and --add-host cannot be set together")
+	}
+	if noHosts && c.Flag("hosts-file").Changed {
+		return vals, errors.New("--no-hosts and --hosts-file cannot be set together")
 	}
 
 	if !isInfra && c.Flag("entrypoint").Changed {
@@ -375,6 +386,7 @@ func pullImage(cmd *cobra.Command, imageName string, cliVals *entities.Container
 		PullPolicy:       pullPolicy,
 		SkipTLSVerify:    skipTLSVerify,
 		OciDecryptConfig: decConfig,
+		CertDir:          cliVals.CertDir,
 	}
 
 	if cmd.Flags().Changed("retry") {
@@ -395,7 +407,16 @@ func pullImage(cmd *cobra.Command, imageName string, cliVals *entities.Container
 		pullOptions.RetryDelay = val
 	}
 
-	pullReport, pullErr := registry.ImageEngine().Pull(registry.GetContext(), imageName, pullOptions)
+	if cliVals.Creds != "" {
+		creds, err := util.ParseRegistryCreds(cliVals.Creds)
+		if err != nil {
+			return "", err
+		}
+		pullOptions.Username = creds.Username
+		pullOptions.Password = creds.Password
+	}
+
+	pullReport, pullErr := registry.ImageEngine().Pull(registry.Context(), imageName, pullOptions)
 	if pullErr != nil {
 		return "", pullErr
 	}

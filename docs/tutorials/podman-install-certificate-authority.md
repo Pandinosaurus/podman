@@ -5,6 +5,22 @@ Install Certificate Authority
 
 Organizations may create their own local certificate authority (CA) or acquire one from a third party.  This may mean more than one certificate, such as one or more intermediate certificates and a root certificate, for example.  In any case, it is necessary to add the certificate authority (CA) certificate(s) so that it can be employed for various use cases.
 
+### Automatic import of host certificates
+
+The simplest way to trust the same CAs inside a Podman machine as on the host is to use the `--import-native-ca` flag.  This works on macOS, Windows, and Linux.
+
+When creating a new machine:
+```
+podman machine init --import-native-ca
+```
+
+To enable it on an existing machine:
+```
+podman machine set --import-native-ca
+```
+
+When enabled, the host's trusted CA certificates are automatically imported into the machine on every startup.  If the automated approach does not cover your use case (for example, you need to install a certificate that is not in the host trust store), the manual methods below can be used instead.
+
 ### Method one
 
 Certificates may be either individual or concatenated (bundles). The following steps are one method to add such certificates to Podman.  It is assumed that Podman is running and the certificate(s) to be installed are available on an accessible server via curl.  If such access is not possible, an alternative method follows.
@@ -50,6 +66,13 @@ If the "sudo su -" command was used to switch to a root shell as described above
 
 ```
 [core@localhost ~]$ exit
+```
+
+If the certificates are still not accepted, it might be necessary to restart the Podman machine. To do this, issue the following commands on the host (and not inside the Podman machine):
+
+```
+podman machine stop
+podman machine start
 ```
 
 ### Alternative Method

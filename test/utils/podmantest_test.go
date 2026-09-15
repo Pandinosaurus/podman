@@ -1,9 +1,9 @@
 package utils_test
 
 import (
-	. "github.com/containers/podman/v5/test/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	. "go.podman.io/podman/v6/test/utils"
 )
 
 var _ = Describe("PodmanTest test", func() {
@@ -32,17 +32,6 @@ var _ = Describe("PodmanTest test", func() {
 		Expect(podmanTest.NumberOfPods()).To(Equal(2))
 	})
 
-	It("Test WaitForContainer", func() {
-		FakeOutputs["ps -q"] = []string{"one", "two"}
-		Expect(WaitForContainer(podmanTest)).To(BeTrue())
-
-		FakeOutputs["ps -q"] = []string{"one"}
-		Expect(WaitForContainer(podmanTest)).To(BeTrue())
-
-		FakeOutputs["ps -q"] = []string{""}
-		Expect(WaitForContainer(podmanTest)).To(Not(BeTrue()))
-	})
-
 	It("Test GetContainerStatus", func() {
 		FakeOutputs["ps --all --format={{.Status}}"] = []string{"Need func update"}
 		Expect(podmanTest.GetContainerStatus()).To(Equal("Need func update"))
@@ -58,5 +47,4 @@ var _ = Describe("PodmanTest test", func() {
 		FakeOutputs["logs testimage"] = []string{"I am ready"}
 		Expect(WaitContainerReady(podmanTest, "testimage", "", 2, 1)).To(BeTrue())
 	})
-
 })

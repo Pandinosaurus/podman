@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package libpod
 
@@ -6,19 +6,18 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	goruntime "runtime"
 	"strings"
 	"time"
 
-	"github.com/containers/common/libnetwork/types"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/storage"
 	"github.com/sirupsen/logrus"
-
-	// SQLite backend for database/sql
-	_ "github.com/mattn/go-sqlite3"
+	"go.podman.io/common/libnetwork/types"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/storage"
 )
 
 const schemaVersion = 1
@@ -31,6 +30,8 @@ type SQLiteState struct {
 }
 
 const (
+	// Name of the actual database file
+	sqliteDbFilename = "db.sql"
 	// Deal with timezone automatically.
 	sqliteOptionLocation = "_loc=auto"
 	// Force an fsync after each transaction (https://www.sqlite.org/pragma.html#pragma_synchronous).
@@ -39,13 +40,16 @@ const (
 	sqliteOptionForeignKeys = "&_foreign_keys=1"
 	// Make sure that transactions happen exclusively.
 	sqliteOptionTXLock = "&_txlock=exclusive"
+	// Enforce case sensitivity for LIKE
+	sqliteOptionCaseSensitiveLike = "&_cslike=TRUE"
 
 	// Assembled sqlite options used when opening the database.
-	sqliteOptions = "db.sql?" +
+	sqliteOptions = "?" +
 		sqliteOptionLocation +
 		sqliteOptionSynchronous +
 		sqliteOptionForeignKeys +
-		sqliteOptionTXLock
+		sqliteOptionTXLock +
+		sqliteOptionCaseSensitiveLike
 )
 
 // NewSqliteState creates a new SQLite-backed state database.
@@ -53,17 +57,12 @@ func NewSqliteState(runtime *Runtime) (_ State, defErr error) {
 	logrus.Info("Using sqlite as database backend")
 	state := new(SQLiteState)
 
-	basePath := runtime.storageConfig.GraphRoot
-	if runtime.storageConfig.TransientStore {
-		basePath = runtime.storageConfig.RunRoot
-	} else if !runtime.storageSet.StaticDirSet {
-		basePath = runtime.config.Engine.StaticDir
-	}
+	dbPath := sqliteStatePath(runtime)
 
 	// c/storage is set up *after* the DB - so even though we use the c/s
 	// root (or, for transient, runroot) dir, we need to make the dir
 	// ourselves.
-	if err := os.MkdirAll(basePath, 0700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
 		return nil, fmt.Errorf("creating root directory: %w", err)
 	}
 
@@ -78,7 +77,7 @@ func NewSqliteState(runtime *Runtime) (_ State, defErr error) {
 	}
 	sqliteOptionBusyTimeout := "&_busy_timeout=" + busyTimeout
 
-	conn, err := sql.Open("sqlite3", filepath.Join(basePath, sqliteOptions+sqliteOptionBusyTimeout))
+	conn, err := sql.Open("sqlite3", dbPath+sqliteOptions+sqliteOptionBusyTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("initializing sqlite database: %w", err)
 	}
@@ -99,6 +98,11 @@ func NewSqliteState(runtime *Runtime) (_ State, defErr error) {
 	state.runtime = runtime
 
 	return state, nil
+}
+
+// Name gets the name of the current DB backend.
+func (s *SQLiteState) Name() string {
+	return config.DBBackendSQLite.String()
 }
 
 // Close closes the state and prevents further use
@@ -131,9 +135,7 @@ func (s *SQLiteState) Refresh() (defErr error) {
 	defer ctrRows.Close()
 
 	for ctrRows.Next() {
-		var (
-			id, stateJSON string
-		)
+		var id, stateJSON string
 		if err := ctrRows.Scan(&id, &stateJSON); err != nil {
 			return fmt.Errorf("scanning container state row: %w", err)
 		}
@@ -165,9 +167,7 @@ func (s *SQLiteState) Refresh() (defErr error) {
 	defer podRows.Close()
 
 	for podRows.Next() {
-		var (
-			id, stateJSON string
-		)
+		var id, stateJSON string
 		if err := podRows.Scan(&id, &stateJSON); err != nil {
 			return fmt.Errorf("scanning pod state row: %w", err)
 		}
@@ -199,9 +199,7 @@ func (s *SQLiteState) Refresh() (defErr error) {
 	defer volRows.Close()
 
 	for volRows.Next() {
-		var (
-			name, stateJSON string
-		)
+		var name, stateJSON string
 
 		if err := volRows.Scan(&name, &stateJSON); err != nil {
 			return fmt.Errorf("scanning volume state row: %w", err)
@@ -303,7 +301,7 @@ func (s *SQLiteState) GetDBConfig() (*DBConfig, error) {
 }
 
 // ValidateDBConfig validates paths in the given runtime against the database
-func (s *SQLiteState) ValidateDBConfig(runtime *Runtime) (defErr error) {
+func (s *SQLiteState) ValidateDBConfig(_ *Runtime) (defErr error) {
 	if !s.valid {
 		return define.ErrDBClosed
 	}
@@ -313,8 +311,10 @@ func (s *SQLiteState) ValidateDBConfig(runtime *Runtime) (defErr error) {
 		return err
 	}
 
+	// Ignoring prevents a race condition where multiple Podman processes
+	// might try to initialize the database at the same time.
 	const createRow = `
-        INSERT INTO DBconfig VALUES (
+        INSERT OR IGNORE INTO DBconfig VALUES (
                 ?, ?, ?,
                 ?, ?, ?,
                 ?, ?, ?
@@ -381,6 +381,30 @@ func (s *SQLiteState) ValidateDBConfig(runtime *Runtime) (defErr error) {
 		}
 
 		return fmt.Errorf("retrieving DB config: %w", err)
+	}
+
+	// Sometimes, for as-yet unclear reasons, the database value ends up set
+	// to the empty string. If it does, this evaluation is always going to
+	// fail, and libpod will be unusable.
+	// At this point, the check is effectively meaningless - we don't
+	// actually know the settings we should be checking against. The best
+	// thing we can do (and what BoltDB did in this case) is to compare
+	// against the default, on the assumption that is what was in use.
+	// TODO: We can't remove this code without breaking existing SQLite DBs
+	// that already have incorrect values in the database, but we should
+	// investigate why this is happening and try and prevent the creation of
+	// new databases with these garbage checks.
+	if graphRoot == "" {
+		logrus.Debugf("Database uses empty-string graph root, substituting default %q", storeOpts.GraphRoot)
+		graphRoot = storeOpts.GraphRoot
+	}
+	if runRoot == "" {
+		logrus.Debugf("Database uses empty-string run root, substituting default %q", storeOpts.RunRoot)
+		runRoot = storeOpts.RunRoot
+	}
+	if graphDriver == "" {
+		logrus.Debugf("Database uses empty-string graph driver, substituting default %q", storeOpts.GraphDriverName)
+		graphDriver = storeOpts.GraphDriverName
 	}
 
 	checkField := func(fieldName, dbVal, ourVal string, isPath bool) error {
@@ -634,17 +658,7 @@ func (s *SQLiteState) HasContainer(id string) (bool, error) {
 
 	row := s.conn.QueryRow("SELECT 1 FROM ContainerConfig WHERE ID=?;", id)
 
-	var check int
-	if err := row.Scan(&check); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return false, nil
-		}
-		return false, fmt.Errorf("looking up container %s in database: %w", id, err)
-	} else if check != 1 {
-		return false, fmt.Errorf("check digit for container %s lookup incorrect: %w", id, define.ErrInternal)
-	}
-
-	return true, nil
+	return hasContainerBody(id, row)
 }
 
 // AddContainer adds a container to the state
@@ -658,10 +672,6 @@ func (s *SQLiteState) AddContainer(ctr *Container) error {
 		return define.ErrCtrRemoved
 	}
 
-	if ctr.config.Pod != "" {
-		return fmt.Errorf("cannot add a container that belongs to a pod with AddContainer - use AddContainerToPod: %w", define.ErrInvalidArg)
-	}
-
 	return s.addContainer(ctr)
 }
 
@@ -671,10 +681,6 @@ func (s *SQLiteState) AddContainer(ctr *Container) error {
 func (s *SQLiteState) RemoveContainer(ctr *Container) error {
 	if !s.valid {
 		return define.ErrDBClosed
-	}
-
-	if ctr.config.Pod != "" {
-		return fmt.Errorf("container %s is part of a pod, use RemoveContainerFromPod instead: %w", ctr.ID(), define.ErrPodExists)
 	}
 
 	return s.removeContainer(ctr)
@@ -761,7 +767,7 @@ func (s *SQLiteState) SaveContainer(ctr *Container) (defErr error) {
 // ContainerInUse checks if other containers depend on the given container
 // It returns a slice of the IDs of the containers depending on the given
 // container. If the slice is empty, no containers depend on the given container
-func (s *SQLiteState) ContainerInUse(ctr *Container) ([]string, error) {
+func (s *SQLiteState) ContainerInUse(ctr *Container) (_ []string, defErr error) {
 	if !s.valid {
 		return nil, define.ErrDBClosed
 	}
@@ -770,7 +776,30 @@ func (s *SQLiteState) ContainerInUse(ctr *Container) ([]string, error) {
 		return nil, define.ErrCtrRemoved
 	}
 
-	rows, err := s.conn.Query("SELECT ID FROM ContainerDependency WHERE DependencyID=?;", ctr.ID())
+	tx, err := s.conn.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("beginning transaction to retrieve container dependents: %w", err)
+	}
+	defer func() {
+		if defErr != nil {
+			if err := tx.Rollback(); err != nil {
+				logrus.Errorf("Rolling back transaction retrieve container dependents: %v", err)
+			}
+		}
+	}()
+
+	row := tx.QueryRow("SELECT 1 FROM ContainerConfig WHERE ID=?;", ctr.ID())
+
+	exists, err := hasContainerBody(ctr.ID(), row)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		ctr.valid = false
+		return nil, define.ErrNoSuchCtr
+	}
+
+	rows, err := tx.Query("SELECT ID FROM ContainerDependency WHERE DependencyID=?;", ctr.ID())
 	if err != nil {
 		return nil, fmt.Errorf("retrieving containers that depend on container %s: %w", ctr.ID(), err)
 	}
@@ -786,6 +815,10 @@ func (s *SQLiteState) ContainerInUse(ctr *Container) ([]string, error) {
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("committing transaction to retrieve container %s dependents: %w", ctr.ID(), err)
 	}
 
 	return deps, nil
@@ -869,7 +902,7 @@ func (s *SQLiteState) AllContainers(loadState bool) ([]*Container, error) {
 }
 
 // GetNetworks returns the networks this container is a part of.
-func (s *SQLiteState) GetNetworks(ctr *Container) (map[string]types.PerNetworkOptions, error) {
+func (s *SQLiteState) GetNetworks(ctr *Container) ([]types.NamedPerNetworkOptions, error) {
 	if !s.valid {
 		return nil, define.ErrDBClosed
 	}
@@ -891,24 +924,28 @@ func (s *SQLiteState) GetNetworks(ctr *Container) (map[string]types.PerNetworkOp
 		return nil, err
 	}
 
+	if cfg.Networks == nil && cfg.LegacyNetworks != nil {
+		return convertLegacyNetworks(cfg.LegacyNetworks), nil
+	}
+
 	return cfg.Networks, nil
 }
 
 // NetworkConnect adds the given container to the given network. If aliases are
 // specified, those will be added to the given network.
-func (s *SQLiteState) NetworkConnect(ctr *Container, network string, opts types.PerNetworkOptions) error {
-	return s.networkModify(ctr, network, opts, true, false)
+func (s *SQLiteState) NetworkConnect(ctr *Container, network types.NamedPerNetworkOptions) error {
+	return s.networkModify(ctr, network, true, false)
 }
 
 // NetworkModify will allow you to set new options on an existing connected network
-func (s *SQLiteState) NetworkModify(ctr *Container, network string, opts types.PerNetworkOptions) error {
-	return s.networkModify(ctr, network, opts, false, false)
+func (s *SQLiteState) NetworkModify(ctr *Container, network types.NamedPerNetworkOptions) error {
+	return s.networkModify(ctr, network, false, false)
 }
 
 // NetworkDisconnect disconnects the container from the given network, also
 // removing any aliases in the network.
 func (s *SQLiteState) NetworkDisconnect(ctr *Container, network string) error {
-	return s.networkModify(ctr, network, types.PerNetworkOptions{}, false, true)
+	return s.networkModify(ctr, types.NamedPerNetworkOptions{Name: network}, false, true)
 }
 
 // GetContainerConfig returns a container config from the database by full ID
@@ -1203,7 +1240,6 @@ func (s *SQLiteState) RemoveContainerExecSessions(ctr *Container) (defErr error)
 // container ID.
 // WARNING: This function is DANGEROUS. Do not use without reading the full
 // comment on this function in state.go.
-// TODO: Once BoltDB is removed, this can be combined with SafeRewriteContainerConfig.
 func (s *SQLiteState) RewriteContainerConfig(ctr *Container, newCfg *ContainerConfig) error {
 	if !s.valid {
 		return define.ErrDBClosed
@@ -1211,31 +1247,6 @@ func (s *SQLiteState) RewriteContainerConfig(ctr *Container, newCfg *ContainerCo
 
 	if !ctr.valid {
 		return define.ErrCtrRemoved
-	}
-
-	return s.rewriteContainerConfig(ctr, newCfg)
-}
-
-// SafeRewriteContainerConfig rewrites a container's configuration in a more
-// limited fashion than RewriteContainerConfig. It is marked as safe to use
-// under most circumstances, unlike RewriteContainerConfig.
-// DO NOT USE TO: Change container dependencies, change pod membership, change
-// locks, change container ID.
-// TODO: Once BoltDB is removed, this can be combined with RewriteContainerConfig.
-func (s *SQLiteState) SafeRewriteContainerConfig(ctr *Container, oldName, newName string, newCfg *ContainerConfig) error {
-	if !s.valid {
-		return define.ErrDBClosed
-	}
-
-	if !ctr.valid {
-		return define.ErrCtrRemoved
-	}
-
-	if newName != "" && newCfg.Name != newName {
-		return fmt.Errorf("new name %s for container %s must match name in given container config: %w", newName, ctr.ID(), define.ErrInvalidArg)
-	}
-	if newName != "" && oldName == "" {
-		return fmt.Errorf("must provide old name for container if a new name is given: %w", define.ErrInvalidArg)
 	}
 
 	return s.rewriteContainerConfig(ctr, newCfg)
@@ -1339,6 +1350,96 @@ func (s *SQLiteState) RewriteVolumeConfig(volume *Volume, newCfg *VolumeConfig) 
 	return nil
 }
 
+// RenameVolume renames the given volume in the database and rewrites its
+// configuration. RewriteVolumeConfig cannot be used here because volume names
+// are stored in both VolumeConfig and VolumeState. Both tables must be updated
+// in one transaction to satisfy the deferred foreign-key relationship between
+// them.
+func (s *SQLiteState) RenameVolume(volume *Volume, newCfg *VolumeConfig) (defErr error) {
+	if !s.valid {
+		return define.ErrDBClosed
+	}
+
+	if !volume.valid {
+		return define.ErrVolumeRemoved
+	}
+
+	newName := newCfg.Name
+	oldName := volume.Name()
+	oldPath := s.runtime.volumePath(oldName)
+	newPath := s.runtime.volumePath(newName)
+
+	json, err := json.Marshal(newCfg)
+	if err != nil {
+		return fmt.Errorf("error marshalling volume %s new config JSON: %w", volume.Name(), err)
+	}
+
+	tx, err := s.conn.Begin()
+	if err != nil {
+		return fmt.Errorf("beginning transaction to rename volume %s: %w", volume.Name(), err)
+	}
+	defer func() {
+		if defErr != nil {
+			if err := tx.Rollback(); err != nil {
+				logrus.Errorf("Rolling back transaction to rename volume %s: %v", volume.Name(), err)
+			}
+		}
+	}()
+
+	// Update VolumeState first.
+	// VolumeState may not exist for all volumes, so we intentionally
+	// do not check RowsAffected here.
+	// The Name column is unique, so renaming to an existing name surfaces as a
+	// SQLite constraint violation on the UPDATE rather than needing a separate
+	// existence query; we map that to ErrVolumeExists.
+	if _, err := tx.Exec("UPDATE VolumeState SET Name=? WHERE Name=?;", newName, oldName); err != nil {
+		if isSQLiteConstraint(err) {
+			return fmt.Errorf("volume with name %q already exists: %w", newName, define.ErrVolumeExists)
+		}
+		return fmt.Errorf("updating volume state name for volume %s: %w", volume.Name(), err)
+	}
+
+	// Update VolumeConfig (Name column + JSON blob)
+	results, err := tx.Exec("UPDATE VolumeConfig SET Name=?, JSON=? WHERE Name=?;", newName, json, oldName)
+	if err != nil {
+		if isSQLiteConstraint(err) {
+			return fmt.Errorf("volume with name %q already exists: %w", newName, define.ErrVolumeExists)
+		}
+		return fmt.Errorf("updating volume config for volume %s: %w", volume.Name(), err)
+	}
+	rows, err := results.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("retrieving volume %s config rename rows affected: %w", volume.Name(), err)
+	}
+	if rows == 0 {
+		volume.valid = false
+		return fmt.Errorf("no volume with name %q found in DB: %w", volume.Name(), define.ErrNoSuchVolume)
+	}
+	if rows > 1 {
+		return fmt.Errorf("renaming volume %s affected %d rows: %w", volume.Name(), rows, define.ErrInternal)
+	}
+
+	renamedStorage := false
+	if err := os.Rename(oldPath, newPath); err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("renaming volume directory %q to %q: %w", oldPath, newPath, err)
+		}
+	} else {
+		renamedStorage = true
+	}
+
+	if err := tx.Commit(); err != nil {
+		if renamedStorage {
+			if rerr := os.Rename(newPath, oldPath); rerr != nil {
+				logrus.Errorf("Failed to rollback volume %s directory rename to %q after database commit failed: %v", newName, oldName, rerr)
+			}
+		}
+		return fmt.Errorf("committing transaction to rename volume %s: %w", volume.Name(), err)
+	}
+
+	return nil
+}
+
 // Pod retrieves a pod given its full ID
 func (s *SQLiteState) Pod(id string) (*Pod, error) {
 	if id == "" {
@@ -1423,17 +1524,7 @@ func (s *SQLiteState) HasPod(id string) (bool, error) {
 
 	row := s.conn.QueryRow("SELECT 1 FROM PodConfig WHERE ID=?;", id)
 
-	var check int
-	if err := row.Scan(&check); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return false, nil
-		}
-		return false, fmt.Errorf("looking up pod %s in database: %w", id, err)
-	} else if check != 1 {
-		return false, fmt.Errorf("check digit for pod %s lookup incorrect: %w", id, define.ErrInternal)
-	}
-
-	return true, nil
+	return hasPodBody(id, row)
 }
 
 // PodHasContainer checks if the given pod has a container with the given ID
@@ -1474,6 +1565,15 @@ func (s *SQLiteState) PodContainersByID(pod *Pod) ([]string, error) {
 		return nil, define.ErrPodRemoved
 	}
 
+	hasPod, err := s.HasPod(pod.ID())
+	if err != nil {
+		return nil, err
+	}
+	if !hasPod {
+		pod.valid = false
+		return nil, define.ErrNoSuchPod
+	}
+
 	rows, err := s.conn.Query("SELECT ID FROM ContainerConfig WHERE PodID=?;", pod.ID())
 	if err != nil {
 		return nil, fmt.Errorf("retrieving container IDs of pod %s from database: %w", pod.ID(), err)
@@ -1504,6 +1604,15 @@ func (s *SQLiteState) PodContainers(pod *Pod) ([]*Container, error) {
 
 	if !pod.valid {
 		return nil, define.ErrPodRemoved
+	}
+
+	hasPod, err := s.HasPod(pod.ID())
+	if err != nil {
+		return nil, err
+	}
+	if !hasPod {
+		pod.valid = false
+		return nil, define.ErrNoSuchPod
 	}
 
 	rows, err := s.conn.Query("SELECT JSON FROM ContainerConfig WHERE PodID=?;", pod.ID())
@@ -1710,24 +1819,62 @@ func (s *SQLiteState) RemovePodContainers(pod *Pod) (defErr error) {
 		}
 	}()
 
+	hasPod, err := hasPodTx(pod.ID(), tx)
+	if err != nil {
+		return err
+	}
+	if !hasPod {
+		pod.valid = false
+		return define.ErrNoSuchPod
+	}
+
 	rows, err := tx.Query("SELECT ID FROM ContainerConfig WHERE PodID=?;", pod.ID())
 	if err != nil {
 		return fmt.Errorf("retrieving container IDs of pod %s from database: %w", pod.ID(), err)
 	}
 	defer rows.Close()
 
+	var ids []string
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			return fmt.Errorf("scanning container from database: %w", err)
 		}
-
-		if err := s.removeContainerWithTx(id, tx); err != nil {
-			return err
-		}
+		ids = append(ids, id)
 	}
 	if err := rows.Err(); err != nil {
 		return err
+	}
+	if len(ids) == 0 {
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("committing pod containers %s removal transaction: %w", pod.ID(), err)
+		}
+
+		return nil
+	}
+
+	// This is absolutely cursed, but still seems to be the best way to pass an array as a SQLite argument
+	jsonIDs, err := json.Marshal(ids)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec("DELETE FROM ContainerState WHERE ID in (SELECT value from json_each(?));", jsonIDs); err != nil {
+		return fmt.Errorf("removing pod %s container states: %w", pod.ID(), err)
+	}
+	if _, err := tx.Exec("DELETE FROM ContainerDependency WHERE ID in (SELECT value from json_each(?));", jsonIDs); err != nil {
+		return fmt.Errorf("removing pod %s container dependencies: %w", pod.ID(), err)
+	}
+	if _, err := tx.Exec("DELETE FROM ContainerVolume WHERE ContainerID in (SELECT value from json_each(?));", jsonIDs); err != nil {
+		return fmt.Errorf("removing pod %s container volumes: %w", pod.ID(), err)
+	}
+	if _, err := tx.Exec("DELETE FROM ContainerExecSession WHERE ContainerID in (SELECT value from json_each(?));", jsonIDs); err != nil {
+		return fmt.Errorf("removing pod %s container exec sessions: %w", pod.ID(), err)
+	}
+	if _, err := tx.Exec("DELETE FROM ContainerConfig WHERE ID in (SELECT value from json_each(?));", jsonIDs); err != nil {
+		return fmt.Errorf("removing pod %s container configs: %w", pod.ID(), err)
+	}
+	if _, err := tx.Exec("DELETE FROM IDNamespace WHERE ID in (SELECT value from json_each(?));", jsonIDs); err != nil {
+		return fmt.Errorf("removing pod %s container IDs: %w", pod.ID(), err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -1735,50 +1882,6 @@ func (s *SQLiteState) RemovePodContainers(pod *Pod) (defErr error) {
 	}
 
 	return nil
-}
-
-// AddContainerToPod adds the given container to an existing pod
-// The container will be added to the state and the pod
-func (s *SQLiteState) AddContainerToPod(pod *Pod, ctr *Container) error {
-	if !s.valid {
-		return define.ErrDBClosed
-	}
-
-	if !pod.valid {
-		return define.ErrPodRemoved
-	}
-
-	if !ctr.valid {
-		return define.ErrCtrRemoved
-	}
-
-	if ctr.config.Pod != pod.ID() {
-		return fmt.Errorf("container %s is not part of pod %s: %w", ctr.ID(), pod.ID(), define.ErrNoSuchCtr)
-	}
-
-	return s.addContainer(ctr)
-}
-
-// RemoveContainerFromPod removes a container from an existing pod
-// The container will also be removed from the state
-func (s *SQLiteState) RemoveContainerFromPod(pod *Pod, ctr *Container) error {
-	if !s.valid {
-		return define.ErrDBClosed
-	}
-
-	if !pod.valid {
-		return define.ErrPodRemoved
-	}
-
-	if ctr.config.Pod == "" {
-		return fmt.Errorf("container %s is not part of a pod, use RemoveContainer instead: %w", ctr.ID(), define.ErrNoSuchPod)
-	}
-
-	if ctr.config.Pod != pod.ID() {
-		return fmt.Errorf("container %s is not part of pod %s: %w", ctr.ID(), pod.ID(), define.ErrInvalidArg)
-	}
-
-	return s.removeContainer(ctr)
 }
 
 // UpdatePod updates a pod's state from the database.
@@ -1974,7 +2077,7 @@ func (s *SQLiteState) RemoveVolume(volume *Volume) (defErr error) {
 	}
 	defer func() {
 		if defErr != nil {
-			if err := tx.Rollback(); err != nil {
+			if err = tx.Rollback(); err != nil {
 				logrus.Errorf("Rolling back transaction to remove volume %s: %v", volume.Name(), err)
 			}
 		}
@@ -1989,24 +2092,30 @@ func (s *SQLiteState) RemoveVolume(volume *Volume) (defErr error) {
 	var ctrs []string
 	for rows.Next() {
 		var ctr string
-		if err := rows.Scan(&ctr); err != nil {
+		if err = rows.Scan(&ctr); err != nil {
 			return fmt.Errorf("error scanning row for containers using volume %s: %w", volume.Name(), err)
 		}
 		ctrs = append(ctrs, ctr)
 	}
-	if err := rows.Err(); err != nil {
+	if err = rows.Err(); err != nil {
 		return err
 	}
 	if len(ctrs) > 0 {
 		return fmt.Errorf("volume %s is in use by containers %s: %w", volume.Name(), strings.Join(ctrs, ","), define.ErrVolumeBeingUsed)
 	}
 
-	// TODO TODO TODO:
-	// Need to verify that at least 1 row was deleted from VolumeConfig.
-	// Otherwise return ErrNoSuchVolume
-
-	if _, err := tx.Exec("DELETE FROM VolumeConfig WHERE Name=?;", volume.Name()); err != nil {
+	result, err := tx.Exec("DELETE FROM VolumeConfig WHERE Name=?;", volume.Name())
+	if err != nil {
 		return fmt.Errorf("removing volume %s config from DB: %w", volume.Name(), err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("getting rows affected for volume %q remove: %w", volume.Name(), err)
+	}
+
+	if rowsAffected == 0 {
+		return fmt.Errorf("no volume with name %q found in DB: %w", volume.Name(), define.ErrNoSuchVolume)
 	}
 
 	if _, err := tx.Exec("DELETE FROM VolumeState WHERE Name=?;", volume.Name()); err != nil {
@@ -2186,7 +2295,9 @@ func (s *SQLiteState) LookupVolume(name string) (*Volume, error) {
 		return nil, define.ErrDBClosed
 	}
 
-	rows, err := s.conn.Query("SELECT Name, JSON FROM VolumeConfig WHERE Name LIKE ? ORDER BY LENGTH(Name) ASC;", name+"%")
+	escaper := strings.NewReplacer("\\", "\\\\", "_", "\\_", "%", "\\%")
+	queryString := escaper.Replace(name) + "%"
+	rows, err := s.conn.Query("SELECT Name, JSON FROM VolumeConfig WHERE Name LIKE ? ESCAPE '\\' ORDER BY LENGTH(Name) ASC;", queryString)
 	if err != nil {
 		return nil, fmt.Errorf("querying database for volume %s: %w", name, err)
 	}

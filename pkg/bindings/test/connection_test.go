@@ -4,11 +4,11 @@ import (
 	"context"
 	"time"
 
-	"github.com/containers/podman/v5/pkg/bindings/containers"
-	"github.com/containers/podman/v5/pkg/bindings/system"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/gexec"
+	"go.podman.io/podman/v6/pkg/bindings/containers"
+	"go.podman.io/podman/v6/pkg/bindings/system"
 )
 
 var _ = Describe("Podman connection", func() {
@@ -39,7 +39,7 @@ var _ = Describe("Podman connection", func() {
 	})
 
 	It("cancel request in flight reports cancelled context", func() {
-		var name = "top"
+		name := "top"
 		_, err := bt.RunTopContainer(&name, nil)
 		Expect(err).ToNot(HaveOccurred())
 

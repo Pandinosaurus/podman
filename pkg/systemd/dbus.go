@@ -7,10 +7,10 @@ import (
 	"path/filepath"
 	"strconv"
 
-	"github.com/containers/podman/v5/pkg/rootless"
 	"github.com/coreos/go-systemd/v22/dbus"
 	godbus "github.com/godbus/dbus/v5"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/podman/v6/pkg/rootless"
 )
 
 // IsSystemdSessionValid checks if sessions is valid for provided rootless uid.
@@ -43,7 +43,7 @@ func IsSystemdSessionValid(uid int) bool {
 			logrus.Debugf("systemd-logind: %s", err)
 			return false
 		}
-		activeSessionMap, ok := activeSession.Value().([]interface{})
+		activeSessionMap, ok := activeSession.Value().([]any)
 		if !ok || len(activeSessionMap) < 2 {
 			// unable to get active session map.
 			logrus.Debugf("systemd-logind: %s", err)
@@ -62,7 +62,7 @@ func IsSystemdSessionValid(uid int) bool {
 			logrus.Debugf("systemd-logind: %s", err)
 			return false
 		}
-		dbusUser, ok := sessionUser.Value().([]interface{})
+		dbusUser, ok := sessionUser.Value().([]any)
 		if !ok {
 			// not a valid user.
 			return false
@@ -84,7 +84,7 @@ func IsSystemdSessionValid(uid int) bool {
 	return true
 }
 
-// GetDbusConnection returns a user connection to D-BUS
+// GetLogindConnection returns a system D-Bus connection authenticated as the given UID.
 func GetLogindConnection(uid int) (*godbus.Conn, error) {
 	return dbusAuthConnectionLogind(uid)
 }
@@ -128,7 +128,7 @@ func dbusAuthRootlessConnection(createBus func(opts ...godbus.ConnOption) (*godb
 
 func newRootlessConnection() (*dbus.Conn, error) {
 	return dbus.NewConnection(func() (*godbus.Conn, error) {
-		return dbusAuthRootlessConnection(func(opts ...godbus.ConnOption) (*godbus.Conn, error) {
+		return dbusAuthRootlessConnection(func(_ ...godbus.ConnOption) (*godbus.Conn, error) {
 			path := filepath.Join(os.Getenv("XDG_RUNTIME_DIR"), "systemd", "private")
 			path, err := filepath.EvalSymlinks(path)
 			if err != nil {

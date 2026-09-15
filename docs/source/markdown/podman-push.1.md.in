@@ -76,9 +76,14 @@ The [protocol:keyfile] specifies the encryption protocol, which can be JWE (RFC7
 
 Manifest Type (oci, v2s2, or v2s1) to use when pushing an image.
 
-#### **--quiet**, **-q**
+#### **--platform**=*OS[/ARCH[/VARIANT]]*
 
-When writing the output image, suppress progress output
+Specify the platform for selecting a specific image from a manifest list to push.
+When this option is specified and the source is a manifest list, only the image matching the
+specified platform will be pushed as a single-platform image rather than the entire manifest list.
+Architecture defaults to the runtime architecture if not specified.
+
+@@option quiet
 
 #### **--remove-signatures**
 
@@ -98,11 +103,13 @@ Add a “simple signing” signature at the destination using the specified key.
 
 Add a sigstore signature at the destination using a private key at the specified path. (This option is not available with the remote Podman client, including Mac and Windows (excluding WSL2) machines)
 
+@@option sign-by-sq-fingerprint
+
 @@option sign-passphrase-file
 
 @@option tls-verify
 
-## EXAMPLE
+## EXAMPLES
 
 Push the specified image to a local directory:
 ```

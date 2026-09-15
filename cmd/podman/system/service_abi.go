@@ -10,13 +10,13 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	api "github.com/containers/podman/v5/pkg/api/server"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/domain/infra"
 	"github.com/coreos/go-systemd/v22/activation"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/pflag"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	api "go.podman.io/podman/v6/pkg/api/server"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/domain/infra"
 	"golang.org/x/sys/unix"
 )
 
@@ -48,7 +48,7 @@ func restService(flags *pflag.FlagSet, cfg *entities.PodmanConfig, opts entities
 		if listener == nil {
 			return errors.New("unexpected fd received from systemd: cannot listen on it")
 		}
-		libpodRuntime.SetRemoteURI(listeners[0].Addr().String())
+		libpodRuntime.SetRemoteURI(listeners[0].Addr().Network() + "://" + listeners[0].Addr().String())
 	} else {
 		uri, err := url.Parse(opts.URI)
 		if err != nil {
@@ -76,11 +76,13 @@ func restService(flags *pflag.FlagSet, cfg *entities.PodmanConfig, opts entities
 				}
 			}
 		case "tcp":
-			// We want to check if the user is requesting a TCP address.
+			// We want to check if the user is requesting a TCP address if TLS is not active.
 			// If so, warn that this is insecure.
 			// Ignore errors here, the actual backend code will handle them
 			// better than we can here.
-			logrus.Warnf("Using the Podman API service with TCP sockets is not recommended, please see `podman system service` manpage for details")
+			if opts.TLSKeyFile == "" || opts.TLSCertFile == "" {
+				logrus.Warnf("Using the Podman API service with TCP sockets without TLS is not recommended, please see `podman system service` manpage for details")
+			}
 
 			host := uri.Host
 			if host == "" {
@@ -105,7 +107,7 @@ func restService(flags *pflag.FlagSet, cfg *entities.PodmanConfig, opts entities
 	// https://access.redhat.com/solutions/6512011.
 	for _, val := range []string{"LISTEN_FDS", "LISTEN_PID", "LISTEN_FDNAMES"} {
 		if err := os.Unsetenv(val); err != nil {
-			return fmt.Errorf("unsetting %s: %v", val, err)
+			return fmt.Errorf("unsetting %s: %w", val, err)
 		}
 	}
 
@@ -124,7 +126,6 @@ func restService(flags *pflag.FlagSet, cfg *entities.PodmanConfig, opts entities
 	maybeMoveToSubCgroup()
 
 	maybeStartServiceReaper()
-	infra.StartWatcher(libpodRuntime)
 	server, err := api.NewServerWithSettings(libpodRuntime, listener, opts)
 	if err != nil {
 		return err

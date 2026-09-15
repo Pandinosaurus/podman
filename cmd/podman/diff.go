@@ -1,13 +1,13 @@
 package main
 
 import (
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/diff"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/validate"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/diff"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/validate"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 // Inspect is one of the outlier commands in that it operates on images/containers/...
@@ -23,8 +23,8 @@ var (
 		RunE:              diffRun,
 		ValidArgsFunction: common.AutocompleteContainersAndImages,
 		Example: `podman diff imageID
-  podman diff ctrID
-  podman diff --format json redis:alpine`,
+podman diff ctrID
+podman diff --format json redis:alpine`,
 	}
 
 	diffOpts = entities.DiffOptions{}

@@ -5,15 +5,14 @@ package os
 import (
 	"bufio"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 
-	machineconfig "github.com/containers/common/pkg/machine"
-	"github.com/containers/podman/v5/pkg/machine/define"
-	"github.com/containers/podman/v5/pkg/machine/env"
-	pkgOS "github.com/containers/podman/v5/pkg/machine/os"
-	"github.com/containers/podman/v5/pkg/machine/provider"
-	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
+	machineconfig "go.podman.io/common/pkg/machine"
+	"go.podman.io/podman/v6/pkg/machine/define"
+	pkgOS "go.podman.io/podman/v6/pkg/machine/os"
+	"go.podman.io/podman/v6/pkg/machine/shim"
 )
 
 type ManagerOpts struct {
@@ -23,51 +22,47 @@ type ManagerOpts struct {
 }
 
 // NewOSManager creates a new OSManager depending on the mode of the call
-func NewOSManager(opts ManagerOpts, p vmconfigs.VMProvider) (pkgOS.Manager, error) {
+func NewOSManager(opts ManagerOpts) (pkgOS.Manager, error) {
 	// If a VM name is specified, then we know that we are not inside a
 	// Podman VM, but rather outside of it.
 	if machineconfig.IsPodmanMachine() && opts.VMName == "" {
 		return guestOSManager()
 	}
-	return machineOSManager(opts, p)
+
+	// Set to the default name if no VM was provided
+	if opts.VMName == "" {
+		opts.VMName = define.DefaultMachineName
+	}
+
+	mc, vmProvider, err := shim.VMExists(opts.VMName)
+	if err != nil {
+		return nil, err
+	}
+
+	if vmProvider.VMType() == define.WSLVirt {
+		return nil, errors.New("this command is not supported for WSL")
+	}
+	return &pkgOS.MachineOS{
+		VM:       mc,
+		Provider: vmProvider,
+		Args:     opts.CLIArgs,
+		VMName:   opts.VMName,
+		Restart:  opts.Restart,
+	}, nil
 }
 
 // guestOSManager returns an OSmanager for inside-VM operations
 func guestOSManager() (pkgOS.Manager, error) {
-	dist := GetDistribution()
+	dist, err := GetDistribution()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read os-release file: %w", err)
+	}
 	switch {
-	case dist.Name == "fedora" && dist.Variant == "coreos":
+	case dist.Name == "fedora" && dist.Variant == "podman-machine-os":
 		return &pkgOS.OSTree{}, nil
 	default:
-		return nil, errors.New("unsupported OS")
+		return nil, fmt.Errorf("unsupported OS/Variant: %s/%s", dist.Name, dist.Variant)
 	}
-}
-
-// machineOSManager returns an os manager that manages outside the VM.
-func machineOSManager(opts ManagerOpts, _ vmconfigs.VMProvider) (pkgOS.Manager, error) {
-	vmName := opts.VMName
-	if opts.VMName == "" {
-		vmName = define.DefaultMachineName
-	}
-	p, err := provider.Get()
-	if err != nil {
-		return nil, err
-	}
-	dirs, err := env.GetMachineDirs(p.VMType())
-	if err != nil {
-		return nil, err
-	}
-	mc, err := vmconfigs.LoadMachineByName(vmName, dirs)
-	if err != nil {
-		return nil, err
-	}
-	return &pkgOS.MachineOS{
-		VM:       mc,
-		Provider: p,
-		Args:     opts.CLIArgs,
-		VMName:   vmName,
-		Restart:  opts.Restart,
-	}, nil
 }
 
 type Distribution struct {
@@ -76,25 +71,25 @@ type Distribution struct {
 }
 
 // GetDistribution checks the OS distribution
-func GetDistribution() Distribution {
-	dist := Distribution{
-		Name:    "unknown",
-		Variant: "unknown",
-	}
+func GetDistribution() (Distribution, error) {
+	dist := Distribution{}
 	f, err := os.Open("/etc/os-release")
 	if err != nil {
-		return dist
+		return dist, err
 	}
 	defer f.Close()
 
 	l := bufio.NewScanner(f)
 	for l.Scan() {
-		if strings.HasPrefix(l.Text(), "ID=") {
-			dist.Name = strings.TrimPrefix(l.Text(), "ID=")
+		if after, ok := strings.CutPrefix(l.Text(), "ID="); ok {
+			dist.Name = after
 		}
-		if strings.HasPrefix(l.Text(), "VARIANT_ID=") {
-			dist.Variant = strings.Trim(strings.TrimPrefix(l.Text(), "VARIANT_ID="), "\"")
+		if after, ok := strings.CutPrefix(l.Text(), "VARIANT_ID="); ok {
+			dist.Variant = strings.Trim(after, "\"")
 		}
 	}
-	return dist
+	if err := l.Err(); err != nil {
+		return dist, err
+	}
+	return dist, nil
 }

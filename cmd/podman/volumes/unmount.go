@@ -3,10 +3,10 @@ package volumes
 import (
 	"fmt"
 
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/utils"
 	"github.com/spf13/cobra"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/utils"
 )
 
 var (
@@ -30,9 +30,9 @@ func init() {
 	})
 }
 
-func volumeUnmount(cmd *cobra.Command, args []string) error {
+func volumeUnmount(_ *cobra.Command, args []string) error {
 	var errs utils.OutputErrors
-	reports, err := registry.ContainerEngine().VolumeUnmount(registry.GetContext(), args)
+	reports, err := registry.ContainerEngine().VolumeUnmount(registry.Context(), args)
 	if err != nil {
 		return err
 	}

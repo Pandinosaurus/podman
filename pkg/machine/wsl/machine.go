@@ -13,55 +13,34 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/common/pkg/strongunits"
-	"github.com/containers/podman/v5/pkg/machine"
-	"github.com/containers/podman/v5/pkg/machine/define"
-	"github.com/containers/podman/v5/pkg/machine/env"
-	"github.com/containers/podman/v5/pkg/machine/ignition"
-	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
-	"github.com/containers/podman/v5/pkg/machine/wsl/wutil"
-	"github.com/containers/podman/v5/utils"
-	"github.com/containers/storage/pkg/homedir"
 	"github.com/sirupsen/logrus"
-	"golang.org/x/text/encoding/unicode"
-	"golang.org/x/text/transform"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/podman/v6/pkg/machine/define"
+	"go.podman.io/podman/v6/pkg/machine/env"
+	"go.podman.io/podman/v6/pkg/machine/ignition"
+	"go.podman.io/podman/v6/pkg/machine/vmconfigs"
+	winutil "go.podman.io/podman/v6/pkg/machine/windows"
+	"go.podman.io/podman/v6/pkg/machine/wsl/wutil"
+	"go.podman.io/podman/v6/pkg/specgen"
+	"go.podman.io/podman/v6/utils"
+	"go.podman.io/storage/pkg/configfile"
 )
 
 var (
 	// vmtype refers to qemu (vs libvirt, krun, etc)
-	vmtype = define.WSLVirt
+	vmtype             = define.WSLVirt
+	ErrWslNotSupported = errors.New("wsl features not supported or configured correctly")
 )
-
-type ExitCodeError struct {
-	code uint
-}
-
-func (e *ExitCodeError) Error() string {
-	return fmt.Sprintf("Process failed with exit code: %d", e.code)
-}
-
-//nolint:unused
-func getConfigPath(name string) (string, error) {
-	return getConfigPathExt(name, "json")
-}
-
-//nolint:unused
-func getConfigPathExt(name string, extension string) (string, error) {
-	vmConfigDir, err := env.GetConfDir(vmtype)
-	if err != nil {
-		return "", err
-	}
-
-	return filepath.Join(vmConfigDir, fmt.Sprintf("%s.%s", name, extension)), nil
-}
 
 // TODO like provisionWSL, i think this needs to be pushed to use common
 // paths and types where possible
 func unprovisionWSL(mc *vmconfigs.MachineConfig) error {
-	dist := env.WithPodmanPrefix(mc.Name)
+	return unprovisionWSLByName(mc.Name)
+}
+
+func unprovisionWSLByName(name string) error {
+	dist := env.WithPodmanPrefix(name)
 	if err := terminateDist(dist); err != nil {
 		logrus.Error(err)
 	}
@@ -74,7 +53,7 @@ func unprovisionWSL(mc *vmconfigs.MachineConfig) error {
 		return err
 	}
 	distDir := filepath.Join(vmDataDir, "wsldist")
-	distTarget := filepath.Join(distDir, mc.Name)
+	distTarget := filepath.Join(distDir, name)
 	return utils.GuardedRemoveAll(distTarget)
 }
 
@@ -89,15 +68,39 @@ func provisionWSLDist(name string, imagePath string, prompt string) (string, err
 
 	distDir := filepath.Join(vmDataDir, "wsldist")
 	distTarget := filepath.Join(distDir, name)
-	if err := os.MkdirAll(distDir, 0755); err != nil {
+	if err := os.MkdirAll(distDir, 0o755); err != nil {
 		return "", fmt.Errorf("could not create wsldist directory: %w", err)
 	}
 
 	dist := env.WithPodmanPrefix(name)
 	fmt.Println(prompt)
-	if err = runCmdPassThrough(wutil.FindWSL(), "--import", dist, distTarget, imagePath, "--version", "2"); err != nil {
+
+	// Run WSL import and analyze output for specific errors.
+	// If the 'Virtual Machine Platform' feature is disabled, we expect a failure
+	// with HCS service-related errors such as:
+	// 1. Wsl/Service/RegisterDistro/CreateVm/HCS/ERROR_NOT_SUPPORTED
+	// 2. Wsl/Service/RegisterDistro/CreateVm/HCS/HCS_E_SERVICE_NOT_AVAILABLE
+	cmdOutput := &bytes.Buffer{}
+	cmd := wutil.NewWSLCommand("--import", dist, distTarget, imagePath, "--version", "2")
+	err = runCmdPassThroughTee(cmdOutput, cmd)
+	decodedStr := strings.ToLower(cmdOutput.String())
+	for _, substr := range []string{"hcs/error_not_supported", "hcs/hcs_e_service_not_available"} {
+		if strings.Contains(decodedStr, substr) {
+			return "", ErrWslNotSupported
+		}
+	}
+	if err != nil {
 		return "", fmt.Errorf("the WSL import of guest OS failed: %w", err)
 	}
+
+	// From now on, unregister the WSL distribution in case of error.
+	defer func() {
+		if err != nil {
+			if e := unprovisionWSLByName(name); e != nil {
+				logrus.Error(e)
+			}
+		}
+	}()
 
 	// Fixes newuidmap
 	if err = wslInvoke(dist, "rpm", "--restore", "shadow-utils"); err != nil {
@@ -148,7 +151,7 @@ func createKeys(mc *vmconfigs.MachineConfig, dist string) error {
 	return nil
 }
 
-func configureSystem(mc *vmconfigs.MachineConfig, dist string) error {
+func configureSystem(mc *vmconfigs.MachineConfig, dist string, ansibleConfig *vmconfigs.AnsibleConfig) error {
 	user := mc.SSH.RemoteUsername
 	if err := wslInvoke(dist, "sh", "-c", fmt.Sprintf(appendPort, mc.SSH.Port, mc.SSH.Port)); err != nil {
 		return fmt.Errorf("could not configure SSH port for guest OS: %w", err)
@@ -167,24 +170,13 @@ func configureSystem(mc *vmconfigs.MachineConfig, dist string) error {
 		return fmt.Errorf("could not generate systemd-sysusers override for guest OS: %w", err)
 	}
 
-	lingerCmd := withUser("cat > /home/[USER]/.config/systemd/[USER]/linger-example.service", user)
-	if err := wslPipe(lingerService, dist, "sh", "-c", lingerCmd); err != nil {
-		return fmt.Errorf("could not generate linger service for guest OS: %w", err)
+	if ansibleConfig != nil {
+		if err := wslPipe(ansibleConfig.Contents, dist, "sh", "-c", fmt.Sprintf("cat > %s", ansibleConfig.PlaybookPath)); err != nil {
+			return fmt.Errorf("could not generate playbook file for guest os: %w", err)
+		}
 	}
 
 	if err := enableUserLinger(mc, dist); err != nil {
-		return err
-	}
-
-	if err := wslPipe(withUser(lingerSetup, user), dist, "sh"); err != nil {
-		return fmt.Errorf("could not configure systemd settings for guest OS: %w", err)
-	}
-
-	if err := wslPipe(containersConf, dist, "sh", "-c", "cat > /etc/containers/containers.conf"); err != nil {
-		return fmt.Errorf("could not create containers.conf for guest OS: %w", err)
-	}
-
-	if err := configureRegistries(dist); err != nil {
 		return err
 	}
 
@@ -192,7 +184,7 @@ func configureSystem(mc *vmconfigs.MachineConfig, dist string) error {
 		return err
 	}
 
-	if err := wslInvoke(dist, "sh", "-c", "echo wsl > /etc/containers/podman-machine"); err != nil {
+	if err := wslInvoke(dist, "sh", "-c", "echo wsl > /etc/podman-machine"); err != nil {
 		return fmt.Errorf("could not create podman-machine file for guest OS: %w", err)
 	}
 
@@ -204,8 +196,25 @@ func configureSystem(mc *vmconfigs.MachineConfig, dist string) error {
 }
 
 func configureBindMounts(dist string, user string) error {
+	winPath, err := configfile.UserConfigPath()
+	if err != nil {
+		return err
+	}
+	wslPath, err := specgen.ConvertWinMountPath(winPath)
+	if err != nil {
+		return err
+	}
+
+	if err := wslPipe(fmt.Sprintf(bindMountConfigDirSystemService, wslPath), dist, "sh", "-c", "cat > "+configBindSysUnitPath); err != nil {
+		return fmt.Errorf("could not create podman config mount service file for guest OS: %w", err)
+	}
+
 	if err := wslPipe(fmt.Sprintf(bindMountSystemService, dist), dist, "sh", "-c", "cat > /etc/systemd/system/podman-mnt-bindings.service"); err != nil {
 		return fmt.Errorf("could not create podman binding service file for guest OS: %w", err)
+	}
+
+	if err := wslPipe(getConfigBindServicesScript(user), dist, "sh"); err != nil {
+		return fmt.Errorf("could not configure podman binding services for guest OS: %w", err)
 	}
 
 	catUserService := "cat > " + getUserUnitPath(user)
@@ -215,10 +224,6 @@ func configureBindMounts(dist string, user string) error {
 
 	if err := wslPipe(getBindMountFsTab(dist), dist, "sh", "-c", "cat >> /etc/fstab"); err != nil {
 		return fmt.Errorf("could not create podman binding fstab entry for guest OS: %w", err)
-	}
-
-	if err := wslPipe(getConfigBindServicesScript(user), dist, "sh"); err != nil {
-		return fmt.Errorf("could not configure podman binding services for guest OS: %w", err)
 	}
 
 	catGroupDropin := fmt.Sprintf("cat > %s/%s", podmanSocketDropinPath, "10-group.conf")
@@ -264,15 +269,6 @@ func enableUserLinger(mc *vmconfigs.MachineConfig, dist string) error {
 	return nil
 }
 
-func configureRegistries(dist string) error {
-	cmd := "cat > /etc/containers/registries.conf.d/999-podman-machine.conf"
-	if err := wslPipe(registriesConf, dist, "sh", "-c", cmd); err != nil {
-		return fmt.Errorf("could not configure registries on guest OS: %w", err)
-	}
-
-	return nil
-}
-
 func installScripts(dist string) error {
 	if err := wslPipe(enterns, dist, "sh", "-c",
 		"cat > /usr/local/bin/enterns; chmod 755 /usr/local/bin/enterns"); err != nil {
@@ -304,41 +300,6 @@ func writeWslConf(dist string, user string) error {
 	return nil
 }
 
-func checkAndInstallWSL(reExec bool) (bool, error) {
-	if wutil.IsWSLInstalled() {
-		return true, nil
-	}
-
-	admin := HasAdminRights()
-
-	if !IsWSLFeatureEnabled() {
-		return false, attemptFeatureInstall(reExec, admin)
-	}
-
-	skip := false
-	if reExec && !admin {
-		fmt.Println("Launching WSL Kernel Install...")
-		if err := launchElevate(wslInstallKernel); err != nil {
-			return false, err
-		}
-
-		skip = true
-	}
-
-	if !skip {
-		if err := installWslKernel(); err != nil {
-			fmt.Fprintf(os.Stderr, wslKernelError, wslInstallKernel)
-			return false, err
-		}
-
-		if reExec {
-			return false, nil
-		}
-	}
-
-	return true, nil
-}
-
 func attemptFeatureInstall(reExec, admin bool) error {
 	if !winVersionAtLeast(10, 0, 18362) {
 		return errors.New("your version of Windows does not support WSL. Update to Windows 10 Build 19041 or later")
@@ -350,159 +311,62 @@ func attemptFeatureInstall(reExec, admin bool) error {
 	message := "WSL is not installed on this system, installing it.\n\n"
 
 	if !admin {
-		message += "Since you are not running as admin, a new window will open and " +
-			"require you to approve administrator privileges.\n\n"
+		message += winutil.UACConfirmationPrompt
 	}
 
 	message += "NOTE: A system reboot will be required as part of this process. " +
 		"If you prefer, you may abort now, and perform a manual installation using the \"wsl --install\" command."
 
-	if reExec && MessageBox(message, "Podman Machine", false) != 1 {
-		return errors.New("the WSL installation aborted")
+	if !reExec && winutil.MessageBox(message, "Podman Machine", false) != 1 {
+		return fmt.Errorf("the WSL installation aborted: %w", define.ErrRelaunchSucceeded)
 	}
 
-	if reExec && !admin {
+	if !reExec && !admin {
 		return launchElevate("install the Windows WSL Features")
 	}
-
 	return installWsl()
 }
 
 func launchElevate(operation string) error {
-	if err := truncateElevatedOutputFile(); err != nil {
+	if err := winutil.CreateOrTruncateElevatedOutputFile(); err != nil {
 		return err
 	}
-	err := relaunchElevatedWait()
+	err := winutil.RelaunchElevatedWait()
 	if err != nil {
-		if eerr, ok := err.(*ExitCodeError); ok {
-			if eerr.code == ErrorSuccessRebootRequired {
+		if eerr, ok := errors.AsType[*winutil.ExitCodeError](err); ok {
+			if eerr.Code == ErrorSuccessRebootRequired {
 				fmt.Println("Reboot is required to continue installation, please reboot at your convenience")
-				return nil
+				return define.ErrRelaunchSucceeded
 			}
 		}
 
 		fmt.Fprintf(os.Stderr, "Elevated process failed with error: %v\n\n", err)
-		dumpOutputFile()
+		winutil.DumpOutputFile()
 		fmt.Fprintf(os.Stderr, wslInstallError, operation)
+		return fmt.Errorf("elevated process failed to %s: %w", operation, err)
 	}
-	return err
+	return define.ErrRelaunchSucceeded
 }
 
 func installWsl() error {
-	log, err := getElevatedOutputFileWrite()
+	log, err := winutil.GetElevatedOutputFileWrite()
 	if err != nil {
 		return err
 	}
 	defer log.Close()
-	if err := runCmdPassThroughTee(log, "dism", "/online", "/enable-feature",
-		"/featurename:Microsoft-Windows-Subsystem-Linux", "/all", "/norestart"); isMsiError(err) {
+	cmd := exec.Command("dism", "/online", "/enable-feature",
+		"/featurename:Microsoft-Windows-Subsystem-Linux", "/all", "/norestart")
+	if err := runCmdPassThroughTee(log, cmd); isMsiError(err) {
 		return fmt.Errorf("could not enable WSL Feature: %w", err)
 	}
 
-	if err = runCmdPassThroughTee(log, "dism", "/online", "/enable-feature",
-		"/featurename:VirtualMachinePlatform", "/all", "/norestart"); isMsiError(err) {
+	cmd = exec.Command("dism", "/online", "/enable-feature",
+		"/featurename:VirtualMachinePlatform", "/all", "/norestart")
+	if err = runCmdPassThroughTee(log, cmd); isMsiError(err) {
 		return fmt.Errorf("could not enable Virtual Machine Feature: %w", err)
 	}
-	log.Close()
 
 	return reboot()
-}
-
-func installWslKernel() error {
-	log, err := getElevatedOutputFileWrite()
-	if err != nil {
-		return err
-	}
-	defer log.Close()
-
-	message := "Installing WSL Kernel Update"
-	fmt.Println(message)
-	fmt.Fprintln(log, message)
-
-	backoff := 500 * time.Millisecond
-	for i := 0; i < 5; i++ {
-		err = runCmdPassThroughTee(log, wutil.FindWSL(), "--update")
-		if err == nil {
-			break
-		}
-		// In case of unusual circumstances (e.g. race with installer actions)
-		// retry a few times
-		message = "An error occurred attempting the WSL Kernel update, retrying..."
-		fmt.Println(message)
-		fmt.Fprintln(log, message)
-		time.Sleep(backoff)
-		backoff *= 2
-	}
-
-	if err != nil {
-		return fmt.Errorf("could not install WSL Kernel: %w", err)
-	}
-
-	return nil
-}
-
-func getElevatedOutputFileName() (string, error) {
-	dir, err := homedir.GetDataHome()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, "podman-elevated-output.log"), nil
-}
-
-func dumpOutputFile() {
-	file, err := getElevatedOutputFileRead()
-	if err != nil {
-		logrus.Debug("could not find elevated child output file")
-		return
-	}
-	defer file.Close()
-	_, _ = io.Copy(os.Stdout, file)
-}
-
-func getElevatedOutputFileRead() (*os.File, error) {
-	return getElevatedOutputFile(os.O_RDONLY)
-}
-
-func getElevatedOutputFileWrite() (*os.File, error) {
-	return getElevatedOutputFile(os.O_WRONLY | os.O_CREATE | os.O_APPEND)
-}
-
-func appendOutputIfError(write bool, err error) {
-	if write && err == nil {
-		return
-	}
-
-	if file, check := getElevatedOutputFileWrite(); check == nil {
-		defer file.Close()
-		fmt.Fprintf(file, "Error: %v\n", err)
-	}
-}
-
-func truncateElevatedOutputFile() error {
-	name, err := getElevatedOutputFileName()
-	if err != nil {
-		return err
-	}
-
-	return os.Truncate(name, 0)
-}
-
-func getElevatedOutputFile(mode int) (*os.File, error) {
-	name, err := getElevatedOutputFileName()
-	if err != nil {
-		return nil, err
-	}
-
-	dir, err := homedir.GetDataHome()
-	if err != nil {
-		return nil, err
-	}
-
-	if err = os.MkdirAll(dir, 0755); err != nil {
-		return nil, err
-	}
-
-	return os.OpenFile(name, mode, 0644)
 }
 
 func isMsiError(err error) bool {
@@ -510,7 +374,7 @@ func isMsiError(err error) bool {
 		return false
 	}
 
-	if eerr, ok := err.(*exec.ExitError); ok {
+	if eerr, ok := errors.AsType[*exec.ExitError](err); ok {
 		switch eerr.ExitCode() {
 		case 0:
 			fallthrough
@@ -528,58 +392,57 @@ func withUser(s string, user string) string {
 	return strings.ReplaceAll(s, "[USER]", user)
 }
 
-func wslInvoke(dist string, arg ...string) error {
-	newArgs := []string{"-u", "root", "-d", dist}
+func wslCmd(dist string, arg ...string) *exec.Cmd {
+	preArgs := []string{"-u", "root", "-d", dist}
+	newArgs := make([]string, 0, len(preArgs)+len(arg))
+	newArgs = append(newArgs, preArgs...)
 	newArgs = append(newArgs, arg...)
-	return runCmdPassThrough(wutil.FindWSL(), newArgs...)
+
+	return wutil.NewWSLCommand(newArgs...)
+}
+
+func wslInvoke(dist string, arg ...string) error {
+	cmd := wslCmd(dist, arg...)
+	return runCmdPassThrough(cmd)
 }
 
 func wslPipe(input string, dist string, arg ...string) error {
-	newArgs := []string{"-u", "root", "-d", dist}
-	newArgs = append(newArgs, arg...)
-	return pipeCmdPassThrough(wutil.FindWSL(), input, newArgs...)
+	cmd := wslCmd(dist, arg...)
+	return pipeCmdPassThrough(cmd, input)
 }
 
-//nolint:unused
-func wslCreateKeys(identityPath string, dist string) (string, error) {
-	return machine.CreateSSHKeysPrefix(identityPath, true, true, wutil.FindWSL(), "-u", "root", "-d", dist)
-}
-
-func runCmdPassThrough(name string, arg ...string) error {
-	logrus.Debugf("Running command: %s %v", name, arg)
-	cmd := exec.Command(name, arg...)
+func runCmdPassThrough(cmd *exec.Cmd) error {
+	logrus.Debugf("Running command: %s %v", cmd.Path, cmd.Args)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("command %s %v failed: %w", name, arg, err)
+		return fmt.Errorf("command %s %v failed: %w", cmd.Path, cmd.Args, err)
 	}
 	return nil
 }
 
-func runCmdPassThroughTee(out io.Writer, name string, arg ...string) error {
-	logrus.Debugf("Running command: %s %v", name, arg)
+func runCmdPassThroughTee(out io.Writer, cmd *exec.Cmd) error {
+	logrus.Debugf("Running command: %s %v", cmd.Path, cmd.Args)
 
 	// TODO - Perhaps improve this with a conpty pseudo console so that
 	//        dism installer text bars mirror console behavior (redraw)
-	cmd := exec.Command(name, arg...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = io.MultiWriter(os.Stdout, out)
 	cmd.Stderr = io.MultiWriter(os.Stderr, out)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("command %s %v failed: %w", name, arg, err)
+	if err := cmd.Run(); isMsiError(err) {
+		return fmt.Errorf("command %s %v failed: %w", cmd.Path, cmd.Args, err)
 	}
 	return nil
 }
 
-func pipeCmdPassThrough(name string, input string, arg ...string) error {
-	logrus.Debugf("Running command: %s %v", name, arg)
-	cmd := exec.Command(name, arg...)
+func pipeCmdPassThrough(cmd *exec.Cmd, input string) error {
+	logrus.Debugf("Running command: %s %v", cmd.Path, cmd.Args)
 	cmd.Stdin = strings.NewReader(input)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("command %s %v failed: %w", name, arg, err)
+		return fmt.Errorf("command %s %v failed: %w", cmd.Path, cmd.Args, err)
 	}
 	return nil
 }
@@ -601,23 +464,7 @@ func setupWslProxyEnv() (hasProxy bool) {
 	if hasProxy {
 		os.Setenv("WSLENV", current)
 	}
-	return
-}
-
-//nolint:unused
-func obtainGlobalConfigLock() (*fileLock, error) {
-	lockDir, err := env.GetGlobalDataDir()
-	if err != nil {
-		return nil, err
-	}
-
-	// Lock file needs to be above all backends
-	// TODO: This should be changed to a common.Config lock mechanism when available
-	return lockFile(filepath.Join(lockDir, "podman-config.lck"))
-}
-
-func IsWSLFeatureEnabled() bool {
-	return wutil.SilentExec(wutil.FindWSL(), "--set-default-version", "2") == nil
+	return hasProxy
 }
 
 func isWSLRunning(dist string) (bool, error) {
@@ -643,7 +490,7 @@ func getAllWSLDistros(running bool) (map[string]struct{}, error) {
 	if running {
 		args = append(args, "--running")
 	}
-	cmd := exec.Command(wutil.FindWSL(), args...)
+	cmd := wutil.NewWSLCommand(args...)
 	out, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, err
@@ -655,7 +502,7 @@ func getAllWSLDistros(running bool) (map[string]struct{}, error) {
 	}
 
 	all := make(map[string]struct{})
-	scanner := bufio.NewScanner(transform.NewReader(out, unicode.UTF16(unicode.LittleEndian, unicode.UseBOM).NewDecoder()))
+	scanner := bufio.NewScanner(out)
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
 		if len(fields) > 0 {
@@ -672,7 +519,7 @@ func getAllWSLDistros(running bool) (map[string]struct{}, error) {
 }
 
 func isSystemdRunning(dist string) (bool, error) {
-	cmd := exec.Command(wutil.FindWSL(), "-u", "root", "-d", dist, "sh")
+	cmd := wutil.NewWSLCommand("-u", "root", "-d", dist, "sh")
 	cmd.Stdin = strings.NewReader(sysdpid + "\necho $SYSDPID\n")
 	out, err := cmd.StdoutPipe()
 	if err != nil {
@@ -695,26 +542,26 @@ func isSystemdRunning(dist string) (bool, error) {
 
 	err = cmd.Wait()
 	if err != nil {
-		return false, fmt.Errorf("command %s %v failed: %w (%s)", cmd.Path, cmd.Args, err, strings.TrimSpace(stderr.String()))
+		return false, fmt.Errorf("command %s %v failed: %w (%s)", cmd.Path, cmd.Args[1:], err, strings.TrimSpace(stderr.String()))
 	}
 
 	return result, nil
 }
 
 func terminateDist(dist string) error {
-	cmd := exec.Command(wutil.FindWSL(), "--terminate", dist)
+	cmd := wutil.NewWSLCommand("--terminate", dist)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("command %s %v failed: %w (%s)", cmd.Path, cmd.Args, err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("command %s %v failed: %w (%s)", cmd.Path, cmd.Args[1:], err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
 
 func unregisterDist(dist string) error {
-	cmd := exec.Command(wutil.FindWSL(), "--unregister", dist)
+	cmd := wutil.NewWSLCommand("--unregister", dist)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("command %s %v failed: %w (%s)", cmd.Path, cmd.Args, err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("command %s %v failed: %w (%s)", cmd.Path, cmd.Args[1:], err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
@@ -729,107 +576,10 @@ func isRunning(name string) (bool, error) {
 	sysd := false
 	if wsl {
 		sysd, err = isSystemdRunning(dist)
-
 		if err != nil {
 			return false, err
 		}
 	}
 
 	return sysd, err
-}
-
-//nolint:unused
-func getDiskSize(name string) strongunits.GiB {
-	vmDataDir, err := env.GetDataDir(vmtype)
-	if err != nil {
-		return 0
-	}
-	distDir := filepath.Join(vmDataDir, "wsldist")
-	disk := filepath.Join(distDir, name, "ext4.vhdx")
-	info, err := os.Stat(disk)
-	if err != nil {
-		return 0
-	}
-	return strongunits.ToGiB(strongunits.B(info.Size()))
-}
-
-//nolint:unused
-func getCPUs(name string) (uint64, error) {
-	dist := env.WithPodmanPrefix(name)
-	if run, _ := isWSLRunning(dist); !run {
-		return 0, nil
-	}
-	cmd := exec.Command(wutil.FindWSL(), "-u", "root", "-d", dist, "nproc")
-	out, err := cmd.StdoutPipe()
-	if err != nil {
-		return 0, err
-	}
-	stderr := &bytes.Buffer{}
-	cmd.Stderr = stderr
-	if err = cmd.Start(); err != nil {
-		return 0, err
-	}
-	scanner := bufio.NewScanner(out)
-	var result string
-	for scanner.Scan() {
-		result = scanner.Text()
-	}
-	err = cmd.Wait()
-	if err != nil {
-		return 0, fmt.Errorf("command %s %v failed: %w (%s)", cmd.Path, cmd.Args, err, strings.TrimSpace(strings.TrimSpace(stderr.String())))
-	}
-
-	ret, err := strconv.Atoi(result)
-	return uint64(ret), err
-}
-
-//nolint:unused
-func getMem(name string) (strongunits.MiB, error) {
-	dist := env.WithPodmanPrefix(name)
-	if run, _ := isWSLRunning(dist); !run {
-		return 0, nil
-	}
-	cmd := exec.Command(wutil.FindWSL(), "-u", "root", "-d", dist, "cat", "/proc/meminfo")
-	out, err := cmd.StdoutPipe()
-	if err != nil {
-		return 0, err
-	}
-	stderr := &bytes.Buffer{}
-	cmd.Stderr = stderr
-	if err = cmd.Start(); err != nil {
-		return 0, err
-	}
-	scanner := bufio.NewScanner(out)
-	var (
-		total, available uint64
-		t, a             int
-	)
-	for scanner.Scan() {
-		// fields are in kB so div to mb
-		fields := strings.Fields(scanner.Text())
-		if strings.HasPrefix(fields[0], "MemTotal") && len(fields) >= 2 {
-			t, err = strconv.Atoi(fields[1])
-			total = uint64(t) / 1024
-		} else if strings.HasPrefix(fields[0], "MemAvailable") && len(fields) >= 2 {
-			a, err = strconv.Atoi(fields[1])
-			available = uint64(a) / 1024
-		}
-		if err != nil {
-			break
-		}
-	}
-	err = cmd.Wait()
-	if err != nil {
-		return 0, fmt.Errorf("command %s %v failed: %w (%s)", cmd.Path, cmd.Args, err, strings.TrimSpace(stderr.String()))
-	}
-
-	return strongunits.MiB(total - available), err
-}
-
-//nolint:unused
-func getResources(mc *vmconfigs.MachineConfig) (resources vmconfigs.ResourceConfig) {
-	resources.CPUs, _ = getCPUs(mc.Name)
-	resources.Memory, _ = getMem(mc.Name)
-	resources.DiskSize = getDiskSize(mc.Name)
-	return
 }

@@ -2,21 +2,23 @@ package tunnel
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
-	"github.com/containers/podman/v5/pkg/bindings/secrets"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/errorhandling"
+	"go.podman.io/podman/v6/pkg/bindings/secrets"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/errorhandling"
 )
 
-func (ic *ContainerEngine) SecretCreate(ctx context.Context, name string, reader io.Reader, options entities.SecretCreateOptions) (*entities.SecretCreateReport, error) {
+func (ic *ContainerEngine) SecretCreate(_ context.Context, name string, reader io.Reader, options entities.SecretCreateOptions) (*entities.SecretCreateReport, error) {
 	opts := new(secrets.CreateOptions).
 		WithDriver(options.Driver).
 		WithDriverOpts(options.DriverOpts).
 		WithName(name).
 		WithLabels(options.Labels).
-		WithReplace(options.Replace)
+		WithReplace(options.Replace).
+		WithIgnore(options.Ignore)
 	created, err := secrets.Create(ic.ClientCtx, reader, opts)
 	if err != nil {
 		return nil, err
@@ -24,7 +26,7 @@ func (ic *ContainerEngine) SecretCreate(ctx context.Context, name string, reader
 	return created, nil
 }
 
-func (ic *ContainerEngine) SecretInspect(ctx context.Context, nameOrIDs []string, options entities.SecretInspectOptions) ([]*entities.SecretInfoReport, []error, error) {
+func (ic *ContainerEngine) SecretInspect(_ context.Context, nameOrIDs []string, options entities.SecretInspectOptions) ([]*entities.SecretInfoReport, []error, error) {
 	allInspect := make([]*entities.SecretInfoReport, 0, len(nameOrIDs))
 	errs := make([]error, 0, len(nameOrIDs))
 	opts := new(secrets.InspectOptions).
@@ -33,8 +35,8 @@ func (ic *ContainerEngine) SecretInspect(ctx context.Context, nameOrIDs []string
 	for _, name := range nameOrIDs {
 		inspected, err := secrets.Inspect(ic.ClientCtx, name, opts)
 		if err != nil {
-			errModel, ok := err.(*errorhandling.ErrorModel)
-			if !ok {
+			var errModel *errorhandling.ErrorModel
+			if !errors.As(err, &errModel) {
 				return nil, nil, err
 			}
 			if errModel.ResponseCode == 404 {
@@ -48,13 +50,13 @@ func (ic *ContainerEngine) SecretInspect(ctx context.Context, nameOrIDs []string
 	return allInspect, errs, nil
 }
 
-func (ic *ContainerEngine) SecretList(ctx context.Context, opts entities.SecretListRequest) ([]*entities.SecretInfoReport, error) {
+func (ic *ContainerEngine) SecretList(_ context.Context, opts entities.SecretListRequest) ([]*entities.SecretInfoReport, error) {
 	options := new(secrets.ListOptions).WithFilters(opts.Filters)
 	secrs, _ := secrets.List(ic.ClientCtx, options)
 	return secrs, nil
 }
 
-func (ic *ContainerEngine) SecretRm(ctx context.Context, nameOrIDs []string, options entities.SecretRmOptions) ([]*entities.SecretRmReport, error) {
+func (ic *ContainerEngine) SecretRm(_ context.Context, nameOrIDs []string, options entities.SecretRmOptions) ([]*entities.SecretRmReport, error) {
 	allRm := make([]*entities.SecretRmReport, 0, len(nameOrIDs))
 	if options.All {
 		allSecrets, err := secrets.List(ic.ClientCtx, nil)
@@ -72,8 +74,8 @@ func (ic *ContainerEngine) SecretRm(ctx context.Context, nameOrIDs []string, opt
 	for _, name := range nameOrIDs {
 		secret, err := secrets.Inspect(ic.ClientCtx, name, nil)
 		if err != nil {
-			errModel, ok := err.(*errorhandling.ErrorModel)
-			if !ok {
+			var errModel *errorhandling.ErrorModel
+			if !errors.As(err, &errModel) {
 				return nil, err
 			}
 			if errModel.ResponseCode == 404 {
@@ -94,7 +96,7 @@ func (ic *ContainerEngine) SecretRm(ctx context.Context, nameOrIDs []string, opt
 	return allRm, nil
 }
 
-func (ic *ContainerEngine) SecretExists(ctx context.Context, nameOrID string) (*entities.BoolReport, error) {
+func (ic *ContainerEngine) SecretExists(_ context.Context, nameOrID string) (*entities.BoolReport, error) {
 	exists, err := secrets.Exists(ic.ClientCtx, nameOrID)
 	if err != nil {
 		return nil, err

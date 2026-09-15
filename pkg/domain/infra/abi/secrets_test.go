@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package abi
 
@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/containers/common/pkg/secrets"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/stretchr/testify/assert"
+	"go.podman.io/common/pkg/secrets"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 func Test_secretToReport(t *testing.T) {

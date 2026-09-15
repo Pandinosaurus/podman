@@ -1,8 +1,5 @@
 # -*- bash -*-
 
-_cached_has_pasta=
-_cached_has_slirp4netns=
-
 ### Feature Checks #############################################################
 
 # has_ipv4() - Check if one default route is available for IPv4
@@ -32,92 +29,6 @@ function skip_if_no_ipv6() {
         skip "${msg:-not applicable with no routable IPv6}"
     fi
 }
-
-# has_slirp4netns - Check if the slirp4netns(1) command is available
-function has_slirp4netns() {
-    if [[ -z "$_cached_has_slirp4netns" ]]; then
-        _cached_has_slirp4netns=n
-        run_podman info --format '{{.Host.Slirp4NetNS.Executable}}'
-        if [[ -n "$output" ]]; then
-            _cached_has_slirp4netns=y
-        fi
-    fi
-    test "$_cached_has_slirp4netns" = "y"
-}
-
-# has_pasta() - Check if the pasta(1) command is available
-function has_pasta() {
-    if [[ -z "$_cached_has_pasta" ]]; then
-        _cached_has_pasta=n
-        run_podman info --format '{{.Host.Pasta.Executable}}'
-        if [[ -n "$output" ]]; then
-            _cached_has_pasta=y
-        fi
-    fi
-    test "$_cached_has_pasta" = "y"
-}
-
-# skip_if_no_pasta() - Skip current test if pasta(1) is not available
-# $1:	Optional message to display
-function skip_if_no_pasta() {
-    if ! has_pasta; then
-        local msg=$(_add_label_if_missing "$1" "pasta")
-        skip "${msg:-not applicable with no pasta binary}"
-    fi
-}
-
-
-### procfs access ##############################################################
-
-# ipv6_to_procfs() - RFC 5952 IPv6 address text representation to procfs format
-# $1:	Address in any notation described by RFC 5952
-function ipv6_to_procfs() {
-    local addr="${1}"
-
-    # Add leading zero if missing
-    case ${addr} in
-        "::"*) addr=0"${addr}" ;;
-    esac
-
-    # Double colon can mean any number of all-zero fields. Expand to fill
-    # as many colons as are missing. (This will not be a valid IPv6 form,
-    # but we don't need it for long). E.g., 0::1 -> 0:::::::1
-    case ${addr} in
-        *"::"*)
-            # All the colons in the address
-            local colons
-            colons=$(tr -dc : <<<$addr)
-            # subtract those from a string of eight colons; this gives us
-            # a string of two to six colons...
-            local pad
-            pad=$(sed -e "s/$colons//" <<<":::::::")
-            # ...which we then inject in place of the double colon.
-            addr=$(sed -e "s/::/::$pad/" <<<$addr)
-            ;;
-    esac
-
-    # Print as a contiguous string of zero-filled 16-bit words
-    # (The additional ":" below is needed because 'read -d x' actually
-    # means "x is a TERMINATOR, not a delimiter")
-    local group
-    while read -d : group; do
-        printf "%04X" "0x${group:-0}"
-    done <<<"${addr}:"
-}
-
-# __ipv4_to_procfs() - Print bytes in hexadecimal notation reversing arguments
-# $@:	IPv4 address as separate bytes
-function __ipv4_to_procfs() {
-    printf "%02X%02X%02X%02X" ${4} ${3} ${2} ${1}
-}
-
-# ipv4_to_procfs() - IPv4 address representation to big-endian procfs format
-# $1:	Text representation of IPv4 address
-function ipv4_to_procfs() {
-    IFS='.' read -r o1 o2 o3 o4 <<< $1
-    __ipv4_to_procfs $o1 $o2 $o3 $o4
-}
-
 
 ### Addresses, Routes, Links ###################################################
 
@@ -149,7 +60,7 @@ function random_rfc1918_subnet() {
     while [ "$retries" -gt 0 ];do
         # 172.16.0.0 -> 172.31.255.255
         local n1=172
-        local n2=$(( 16 + $RANDOM & 15 ))
+        local n2=$(( 16 + ($RANDOM & 15) ))
         local n3=$(( $RANDOM & 255 ))
 
         if ! subnet_in_use $n1 $n2 $n3; then
@@ -296,7 +207,7 @@ function unreserve_port() {
     local port=$1
 
     local lockfile=$PORT_LOCK_DIR/$port
-    -e $lockfile || die "Cannot unreserve non-reserved port $port"
+    test -e $lockfile || die "Cannot unreserve non-reserved port $port"
     assert "$(< $lockfile)" = "$BATS_SUITE_TEST_NUMBER" \
            "Port $port is not reserved by this test"
     rm -f $lockfile
@@ -385,32 +296,12 @@ function port_is_bound() {
         local proto="tcp"
     fi
 
-    # /proc/net/tcp is insufficient: it does not show some rootless ports.
-    # ss does, so check it first.
-    run ss -${proto:0:1}nlH sport = $port
-    if [[ -n "$output" ]]; then
-        return
-    fi
-
-    port=$(printf %04X ${port})
-    case "${address}" in
-    *":"*)
-        grep -e "^[^:]*: $(ipv6_to_procfs "${address}"):${port} .*" \
-             -e "^[^:]*: $(ipv6_to_procfs "::0"):${port} .*"        \
-             -q "/proc/net/${proto}6"
-        ;;
-    *"."*)
-        grep -e "^[^:]*: $(ipv4_to_procfs "${address}"):${port}"    \
-             -e "^[^:]*: $(ipv4_to_procfs "0.0.0.0"):${port}"       \
-             -e "^[^:]*: $(ipv4_to_procfs "127.0.0.1"):${port}"     \
-             -q "/proc/net/${proto}"
-        ;;
-    *)
-        # No address: check both IPv4 and IPv6, for any bound address
-        grep "^[^:]*: [^:]*:${port} .*" -q "/proc/net/${proto}6" || \
-        grep "^[^:]*: [^:]*:${port} .*" -q "/proc/net/${proto}"
-        ;;
-    esac
+    # Use ss to check the local ports
+    run -0 ss -${proto:0:1}nlH state all sport = $port
+    # grep for exact address:port match or for the bind all address "*", "0.0.0.0" or "[::]"
+    # which means the port is bound to all addresses and hence bound for any address. We could
+    # try to split v4 and v6 but that just makes it more complicated than it needs to be.
+    grep -q "$address:$port" <<<"$output" || grep -q -E "(\*|0\.0\.0\.0|\[::\]):$port" <<<"$output"
 }
 
 # port_is_free() - Check if TCP or UDP port is free to bind for a given address
@@ -446,7 +337,7 @@ function wait_for_port() {
 function tcp_port_probe() {
     local address="${2:-0.0.0.0}"
 
-    : | nc "${address}" "${1}"
+    (exec echo -n >/dev/tcp/"$address/$1") >/dev/null 2>&1
 }
 
 ### Pasta Helpers ##############################################################

@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package server
 
@@ -10,8 +10,8 @@ import (
 	"net/http"
 	"runtime"
 
-	"github.com/containers/podman/v5/version"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/podman/v6/version"
 )
 
 type BufferedResponseWriter struct {
@@ -99,6 +99,7 @@ func (w *BufferedResponseWriter) Flush() {
 		wrapped.Flush()
 	}
 }
+
 func newBufferedResponseWriter(rw http.ResponseWriter) *BufferedResponseWriter {
 	return &BufferedResponseWriter{
 		bufio.NewWriterSize(rw, 8192),

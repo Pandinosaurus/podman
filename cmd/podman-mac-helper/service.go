@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -31,7 +32,7 @@ func init() {
 	rootCmd.AddCommand(serviceCmd)
 }
 
-func serviceRun(cmd *cobra.Command, args []string) {
+func serviceRun(_ *cobra.Command, _ []string) {
 	info, err := os.Stdin.Stat()
 	if err != nil || info.Mode()&fs.ModeSocket == 0 {
 		fmt.Fprintln(os.Stderr, "This is an internal command that is not intended for standard terminal usage")
@@ -70,7 +71,7 @@ func service() int {
 	}
 
 	err := os.Remove(dockerSock)
-	if err == nil || os.IsNotExist(err) {
+	if err == nil || errors.Is(err, os.ErrNotExist) {
 		err = os.Symlink(target, dockerSock)
 	}
 

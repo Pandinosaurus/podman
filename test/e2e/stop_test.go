@@ -7,14 +7,13 @@ import (
 	"path/filepath"
 	"strings"
 
-	. "github.com/containers/podman/v5/test/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	. "github.com/onsi/gomega/gexec"
+	. "go.podman.io/podman/v6/test/utils"
 )
 
 var _ = Describe("Podman stop", func() {
-
 	It("podman stop bogus container", func() {
 		session := podmanTest.Podman([]string{"stop", "foobar"})
 		session.WaitWithDefaultTimeout()
@@ -407,5 +406,28 @@ var _ = Describe("Podman stop", func() {
 		session1.WaitWithDefaultTimeout()
 		Expect(session1).Should(ExitCleanly())
 		Expect(session1.OutputToString()).To(BeEquivalentTo(cid2))
+	})
+
+	It("podman stop --service sets StoppedByUser to false", func() {
+		SkipIfRemote("--service flag is not supported on remote")
+		containerName := "test-not-stopped-by-user"
+		podmanTest.PodmanExitCleanly("run", "-d", "--name", containerName, ALPINE, "top")
+
+		podmanTest.PodmanExitCleanly("stop", "--service", containerName)
+
+		data := podmanTest.InspectContainer(containerName)
+		Expect(data).To(HaveLen(1))
+		Expect(data[0].State.StoppedByUser).To(BeFalse())
+	})
+
+	It("podman stop without --service flag sets StoppedByUser to true", func() {
+		containerName := "test-default-stop"
+		podmanTest.PodmanExitCleanly("run", "-d", "--name", containerName, ALPINE, "top")
+
+		podmanTest.PodmanExitCleanly("stop", containerName)
+
+		data := podmanTest.InspectContainer(containerName)
+		Expect(data).To(HaveLen(1))
+		Expect(data[0].State.StoppedByUser).To(BeTrue())
 	})
 })

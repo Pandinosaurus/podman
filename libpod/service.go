@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package libpod
 
@@ -7,8 +7,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/containers/podman/v5/libpod/define"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/podman/v6/libpod/define"
 	"golang.org/x/sys/unix"
 )
 

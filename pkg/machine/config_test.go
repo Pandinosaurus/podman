@@ -6,15 +6,15 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/containers/podman/v5/pkg/machine/env"
 	"github.com/stretchr/testify/assert"
+	"go.podman.io/podman/v6/pkg/machine/env"
 )
 
 func TestGetSSHIdentityPath(t *testing.T) {
 	name := "p-test"
 	datadir, err := env.GetGlobalDataDir()
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 	identityPath, err := env.GetSSHIdentityPath(name)
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 	assert.Equal(t, identityPath, filepath.Join(datadir, name))
 }

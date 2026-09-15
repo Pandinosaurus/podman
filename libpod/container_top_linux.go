@@ -17,12 +17,12 @@ import (
 	"syscall"
 	"unsafe"
 
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/rootless"
 	"github.com/containers/psgo"
-	"github.com/containers/storage/pkg/reexec"
 	"github.com/google/shlex"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/rootless"
+	"go.podman.io/storage/pkg/reexec"
 	"golang.org/x/sys/unix"
 )
 
@@ -39,7 +39,7 @@ const (
 	// podmanTopCommand is the reexec key to safely setup the environment for ps to be executed
 	podmanTopCommand = "podman-top"
 
-	// podmanTopExitCode is a special exec code to signal that podman failed to to something in
+	// podmanTopExitCode is a special exec code to signal that podman failed to do something in
 	// reexec command not ps. This is used to give a better error.
 	podmanTopExitCode = 255
 )
@@ -91,7 +91,7 @@ func podmanTopInner() error {
 	if err := unix.MountSetattr(0, "/", unix.AT_RECURSIVE, &unix.MountAttr{
 		Attr_set: unix.MOUNT_ATTR_RDONLY,
 	}); err != nil {
-		if err != unix.ENOSYS {
+		if !errors.Is(err, unix.ENOSYS) {
 			return fmt.Errorf("mount_setattr / readonly: %w", err)
 		}
 		// old kernel without mount_setattr, i.e. on RHEL 8.8
@@ -128,8 +128,7 @@ func podmanTopInner() error {
 		C.set_userns()
 	}
 
-	args := []string{psPath}
-	args = append(args, os.Args[4:]...)
+	args := append([]string{psPath}, os.Args[4:]...)
 
 	C.create_argv(C.int(len(args)))
 	for i, arg := range args {
@@ -201,7 +200,7 @@ func (c *Container) Top(descriptors []string) ([]string, error) {
 	// Also support comma-separated input.
 	psgoDescriptors := []string{}
 	for _, d := range descriptors {
-		for _, s := range strings.Split(d, ",") {
+		for s := range strings.SplitSeq(d, ",") {
 			if s != "" {
 				psgoDescriptors = append(psgoDescriptors, s)
 			}
@@ -400,7 +399,7 @@ func (c *Container) execPSinContainer(args []string) ([]string, error) {
 	cmd := append([]string{"ps"}, args...)
 	config := new(ExecConfig)
 	config.Command = cmd
-	ec, err := c.Exec(config, streams, nil)
+	ec, err := c.Exec(config, streams, nil, nil)
 	wPipe.Close()
 	if err != nil {
 		return nil, err

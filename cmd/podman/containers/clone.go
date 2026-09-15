@@ -3,11 +3,11 @@ package containers
 import (
 	"fmt"
 
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 var (
@@ -24,9 +24,7 @@ var (
 	}
 )
 
-var (
-	ctrClone entities.ContainerCloneOptions
-)
+var ctrClone entities.ContainerCloneOptions
 
 func cloneFlags(cmd *cobra.Command) {
 	flags := cmd.Flags()
@@ -43,6 +41,7 @@ func cloneFlags(cmd *cobra.Command) {
 	common.DefineCreateDefaults(&ctrClone.CreateOpts)
 	common.DefineCreateFlags(cmd, &ctrClone.CreateOpts, entities.CloneMode)
 }
+
 func init() {
 	registry.Commands = append(registry.Commands, registry.CliCommand{
 		Command: containerCloneCommand,
@@ -77,7 +76,7 @@ func clone(cmd *cobra.Command, args []string) error {
 
 	ctrClone.ID = args[0]
 	ctrClone.CreateOpts.IsClone = true
-	rep, err := registry.ContainerEngine().ContainerClone(registry.GetContext(), ctrClone)
+	rep, err := registry.ContainerEngine().ContainerClone(registry.Context(), ctrClone)
 	if err != nil {
 		return err
 	}

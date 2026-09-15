@@ -5,14 +5,13 @@ package integration
 import (
 	"path/filepath"
 
-	. "github.com/containers/podman/v5/test/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	. "github.com/onsi/gomega/gexec"
+	. "go.podman.io/podman/v6/test/utils"
 )
 
 var _ = Describe("Podman import", func() {
-
 	It("podman import with source and reference", func() {
 		outfile := filepath.Join(podmanTest.TempDir, "container.tar")
 		_, ec, cid := podmanTest.RunLsContainer("")
@@ -175,7 +174,7 @@ var _ = Describe("Podman import", func() {
 		importImage.WaitWithDefaultTimeout()
 		Expect(importImage).To(ExitWithError(125, "open /no/such/file: no such file or directory"))
 
-		result := podmanTest.Podman([]string{"import", "-q", "--signature-policy", "/etc/containers/policy.json", outfile})
+		result := podmanTest.Podman([]string{"import", "-q", "--signature-policy", createPolicyJSONFile(), outfile})
 		result.WaitWithDefaultTimeout()
 		Expect(result).Should(ExitCleanly())
 	})

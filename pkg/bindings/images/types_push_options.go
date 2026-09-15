@@ -5,7 +5,7 @@ import (
 	"io"
 	"net/url"
 
-	"github.com/containers/podman/v5/pkg/bindings/internal/util"
+	"go.podman.io/podman/v6/pkg/bindings/internal/util"
 )
 
 // Changed returns true if named field has been set
@@ -256,6 +256,51 @@ func (o *PushOptions) GetQuiet() bool {
 		return z
 	}
 	return *o.Quiet
+}
+
+// WithOS set field OS to given value
+func (o *PushOptions) WithOS(value string) *PushOptions {
+	o.OS = &value
+	return o
+}
+
+// GetOS returns value of field OS
+func (o *PushOptions) GetOS() string {
+	if o.OS == nil {
+		var z string
+		return z
+	}
+	return *o.OS
+}
+
+// WithArch set field Arch to given value
+func (o *PushOptions) WithArch(value string) *PushOptions {
+	o.Arch = &value
+	return o
+}
+
+// GetArch returns value of field Arch
+func (o *PushOptions) GetArch() string {
+	if o.Arch == nil {
+		var z string
+		return z
+	}
+	return *o.Arch
+}
+
+// WithVariant set field Variant to given value
+func (o *PushOptions) WithVariant(value string) *PushOptions {
+	o.Variant = &value
+	return o
+}
+
+// GetVariant returns value of field Variant
+func (o *PushOptions) GetVariant() string {
+	if o.Variant == nil {
+		var z string
+		return z
+	}
+	return *o.Variant
 }
 
 // WithManifestDigest set field ManifestDigest to given value

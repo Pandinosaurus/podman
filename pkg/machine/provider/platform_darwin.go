@@ -5,16 +5,15 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"runtime"
 	"strings"
 
 	"github.com/blang/semver/v4"
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/podman/v5/pkg/machine/applehv"
-	"github.com/containers/podman/v5/pkg/machine/define"
-	"github.com/containers/podman/v5/pkg/machine/libkrun"
-	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/podman/v6/pkg/machine/applehv"
+	"go.podman.io/podman/v6/pkg/machine/define"
+	"go.podman.io/podman/v6/pkg/machine/libkrun"
+	"go.podman.io/podman/v6/pkg/machine/vmconfigs"
 )
 
 func Get() (vmconfigs.VMProvider, error) {
@@ -26,36 +25,30 @@ func Get() (vmconfigs.VMProvider, error) {
 	if providerOverride, found := os.LookupEnv("CONTAINERS_MACHINE_PROVIDER"); found {
 		provider = providerOverride
 	}
-	resolvedVMType, err := define.ParseVMType(provider, define.AppleHvVirt)
+	resolvedVMType, err := define.ParseVMType(provider, define.LibKrun)
 	if err != nil {
 		return nil, err
 	}
 
 	logrus.Debugf("Using Podman machine with `%s` virtualization provider", resolvedVMType.String())
+	return GetByVMType(resolvedVMType)
+}
+
+// GetByVMType takes a VMType (presumably from ParseVMType) and returns the correlating
+// VMProvider
+func GetByVMType(resolvedVMType define.VMType) (vmconfigs.VMProvider, error) {
 	switch resolvedVMType {
 	case define.AppleHvVirt:
 		return new(applehv.AppleHVStubber), nil
 	case define.LibKrun:
 		return new(libkrun.LibKrunStubber), nil
 	default:
-		return nil, fmt.Errorf("unsupported virtualization provider: `%s`", resolvedVMType.String())
 	}
+	return nil, fmt.Errorf("unsupported virtualization provider: `%s`", resolvedVMType.String())
 }
 
 func GetAll() []vmconfigs.VMProvider {
-	return []vmconfigs.VMProvider{
-		new(applehv.AppleHVStubber),
-		new(libkrun.LibKrunStubber),
-	}
-}
-
-// SupportedProviders returns the providers that are supported on the host operating system
-func SupportedProviders() []define.VMType {
-	supported := []define.VMType{define.AppleHvVirt}
-	if runtime.GOARCH == "arm64" {
-		return append(supported, define.LibKrun)
-	}
-	return supported
+	return []vmconfigs.VMProvider{new(libkrun.LibKrunStubber), new(applehv.AppleHVStubber)}
 }
 
 func IsInstalled(provider define.VMType) (bool, error) {
@@ -89,7 +82,7 @@ func appleHvInstalled() (bool, error) {
 	cmd := exec.Command("sw_vers", "--productVersion")
 	cmd.Stdout = &outBuf
 	if err := cmd.Run(); err != nil {
-		return false, fmt.Errorf("unable to check current macOS version using `sw_vers --productVersion`: %s", err)
+		return false, fmt.Errorf("unable to check current macOS version using `sw_vers --productVersion`: %w", err)
 	}
 
 	// the output will be in the format of MAJOR.MINOR.PATCH
@@ -103,10 +96,6 @@ func appleHvInstalled() (bool, error) {
 }
 
 func libKrunInstalled() (bool, error) {
-	if runtime.GOARCH != "arm64" {
-		return false, nil
-	}
-
 	// need to verify that krunkit, virglrenderer, and libkrun-efi are installed
 	cfg, err := config.Default()
 	if err != nil {

@@ -12,15 +12,13 @@ function teardown() {
     run_podman '?' secret rm "s-$(safename)"
     run_podman '?' pod rm -f "p-$(safename)"
     run_podman '?' rm -f -t0 "c-$(safename)"
+    run_podman '?' artifact rm "a-$(safename)"
 
     basic_teardown
 }
 
 # podman machine is finicky. Assume we can't run it, but see below for more.
 can_run_podman_machine=
-
-# podman stats, too
-can_run_stats=
 
 # Main test loop. Recursively runs 'podman [subcommand] help', looks for:
 #    > '[command]', which indicates, recurse; or
@@ -37,9 +35,6 @@ function check_subcommand() {
         # Human-readable podman command string, with multiple spaces collapsed
         # Special case: 'podman machine' can only be run under ideal conditions
         if [[ "$cmd" = "machine" ]] && [[ -z "$can_run_podman_machine" ]]; then
-            continue
-        fi
-        if [[ "$cmd" = "stats" ]] && [[ -z "$can_run_stats" ]]; then
             continue
         fi
 
@@ -125,10 +120,13 @@ function check_subcommand() {
     ctrname="c-$(safename)"
     podname="p-$(safename)"
     secretname="s-$(safename)"
+    # Artifact strict typing requires fully qualified name
+    artifactname="foo.io/myrepo/$(safename)"
     # Setup: some commands need a container, pod, secret, ...
     run_podman run -d --name $ctrname $IMAGE top
     run_podman pod create $podname
     run_podman secret create $secretname /etc/hosts
+    run_podman artifact add $artifactname /etc/hosts
 
     # For 'search' and 'image search': if local cache registry is available,
     # use it. This bypasses quay, and thus prevents flakes.
@@ -147,7 +145,7 @@ image inspect     | $IMAGE
 container inspect | $ctrname
 inspect           | $ctrname
 
-
+artifact inspect  | $artifactname
 volume inspect    | -a
 secret inspect    | $secretname
 network inspect   | podman
@@ -160,6 +158,10 @@ pod inspect       | $podname
 
 events            | --stream=false --events-backend=file
 system events     | --stream=false --events-backend=file
+
+container stats   | --no-stream
+pod stats         | --no-stream
+stats             | --no-stream
 "
 
 
@@ -173,16 +175,6 @@ system events     | --stream=false --events-backend=file
         can_run_podman_machine=true
         extra_args_table+="
 machine inspect   | $machinename
-"
-    fi
-
-    # Similarly, 'stats' cannot run rootless under cgroups v1
-    if ! is_rootless || is_cgroupsv2; then
-        can_run_stats=true
-        extra_args_table+="
-container stats   | --no-stream
-pod stats         | --no-stream
-stats             | --no-stream
 "
     fi
 
@@ -200,6 +192,7 @@ stats             | --no-stream
     run_podman rm -f -t0 $ctrname
     run_podman secret rm $secretname
     run_podman '?' machine rm -f $machinename
+    run_podman artifact rm $artifactname
 
     # Make sure there are no leftover commands in our table - this would
     # indicate a typo in the table, or a flaw in our logic such that

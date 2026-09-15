@@ -4,7 +4,7 @@
 /build/
 /conmon/
 contrib/spec/podman.spec
-contrib/systemd/*/*.service
+contrib/systemd/system/*.service
 *.coverprofile
 coverprofile
 /.coverage
@@ -12,6 +12,7 @@ coverprofile
 /docs/*.[158].gz
 /docs/build/
 /docs/remote
+/hack/ci/logs/
 **.DS_Store
 .gopathok
 .idea*

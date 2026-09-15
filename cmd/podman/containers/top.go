@@ -7,14 +7,14 @@ import (
 	"os"
 	"strings"
 
-	"github.com/containers/common/pkg/report"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/validate"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/util"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"go.podman.io/common/pkg/report"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/validate"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/util"
 )
 
 var (
@@ -61,8 +61,8 @@ func init() {
 	topFlags(topCommand.Flags())
 	validate.AddLatestFlag(topCommand, &topOptions.Latest)
 
-	descriptors, err := util.GetContainerPidInformationDescriptors()
-	if err == nil {
+	descriptors, err := util.GetContainerPidInformationDescriptors() //nolint:staticcheck,nolintlint // false-positives on windows because this always errors there
+	if err == nil {                                                  //nolint:staticcheck,nolintlint
 		topDescription = fmt.Sprintf("%s\n\n  Format Descriptors:\n    %s", topDescription, strings.Join(descriptors, ","))
 		topCommand.Long = topDescription
 	}
@@ -77,8 +77,8 @@ func init() {
 
 func top(cmd *cobra.Command, args []string) error {
 	if topOptions.ListDescriptors {
-		descriptors, err := util.GetContainerPidInformationDescriptors()
-		if err != nil {
+		descriptors, err := util.GetContainerPidInformationDescriptors() //nolint:staticcheck,nolintlint // false-positives on windows because this always errors there
+		if err != nil {                                                  //nolint:staticcheck,nolintlint
 			return err
 		}
 		fmt.Println(strings.Join(descriptors, "\n"))

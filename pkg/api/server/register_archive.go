@@ -1,12 +1,12 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package server
 
 import (
 	"net/http"
 
-	"github.com/containers/podman/v5/pkg/api/handlers/compat"
 	"github.com/gorilla/mux"
+	"go.podman.io/podman/v6/pkg/api/handlers/compat"
 )
 
 func (s *APIServer) registerArchiveHandlers(r *mux.Router) error {

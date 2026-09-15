@@ -1,6 +1,7 @@
 package util
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -10,28 +11,25 @@ import (
 	"os/user"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
-	"github.com/BurntSushi/toml"
-	"github.com/containers/image/v5/types"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/errorhandling"
-	"github.com/containers/podman/v5/pkg/namespaces"
-	"github.com/containers/podman/v5/pkg/rootless"
-	"github.com/containers/podman/v5/pkg/signal"
-	"github.com/containers/storage/pkg/directory"
-	"github.com/containers/storage/pkg/fileutils"
-	"github.com/containers/storage/pkg/idtools"
-	"github.com/containers/storage/pkg/unshare"
-	stypes "github.com/containers/storage/types"
 	securejoin "github.com/cyphar/filepath-securejoin"
 	ruser "github.com/moby/sys/user"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/namespaces"
+	"go.podman.io/podman/v6/pkg/rootless"
+	"go.podman.io/podman/v6/pkg/signal"
+	"go.podman.io/storage/pkg/fileutils"
+	"go.podman.io/storage/pkg/idtools"
+	"go.podman.io/storage/pkg/unshare"
+	stypes "go.podman.io/storage/types"
 	"golang.org/x/term"
 )
 
@@ -105,7 +103,7 @@ func ParseDockerignore(containerfiles []string, root string) ([]string, string, 
 				}
 			}
 		}
-		if dockerIgnoreErr != nil && !os.IsNotExist(dockerIgnoreErr) {
+		if dockerIgnoreErr != nil && !errors.Is(dockerIgnoreErr, os.ErrNotExist) {
 			return nil, ignoreFile, err
 		}
 	}
@@ -113,6 +111,10 @@ func ParseDockerignore(containerfiles []string, root string) ([]string, string, 
 	excludes := make([]string, 0, len(rawexcludes))
 	for _, e := range rawexcludes {
 		if len(e) == 0 || e[0] == '#' {
+			continue
+		}
+		e = strings.Trim(e, "/")
+		if len(e) == 0 {
 			continue
 		}
 		excludes = append(excludes, e)
@@ -173,7 +175,7 @@ func ParseSignal(rawSignal string) (syscall.Signal, error) {
 	return sig, nil
 }
 
-func getRootlessKeepIDMapping(uid, gid int, uids, gids []idtools.IDMap) (*stypes.IDMappingOptions, int, int, error) {
+func getRootlessKeepIDMapping(uid, gid int, uids, gids []idtools.IDMap, maxSize int) (*stypes.IDMappingOptions, int, int, error) {
 	options := stypes.IDMappingOptions{
 		HostUIDMapping: false,
 		HostGIDMapping: false,
@@ -184,6 +186,11 @@ func getRootlessKeepIDMapping(uid, gid int, uids, gids []idtools.IDMap) (*stypes
 	}
 	for _, g := range gids {
 		maxGID += g.Size
+	}
+	if maxSize > 0 {
+		// If maxSize is set, we need to ensure that the mappings are within the available range
+		maxUID = min(maxUID, maxSize-1)
+		maxGID = min(maxGID, maxSize-1)
 	}
 
 	options.UIDMap, options.GIDMap = nil, nil
@@ -240,13 +247,17 @@ func GetKeepIDMapping(opts *namespaces.KeepIDUserNsOptions) (*stypes.IDMappingOp
 	if opts.GID != nil {
 		gid = int(*opts.GID)
 	}
+	maxSize := 0
+	if opts.MaxSize != nil {
+		maxSize = int(*opts.MaxSize)
+	}
 
 	uids, gids, err := rootless.GetConfiguredMappings(true)
 	if err != nil {
 		return nil, -1, -1, fmt.Errorf("cannot read mappings: %w", err)
 	}
 
-	return getRootlessKeepIDMapping(uid, gid, uids, gids)
+	return getRootlessKeepIDMapping(uid, gid, uids, gids, maxSize)
 }
 
 // GetNoMapMapping returns the mappings and the user to use when nomap is used
@@ -385,7 +396,7 @@ func parseTriple(spec []string, parentMapping []ruser.IDMap, mapSetting string) 
 
 	if hidIsParent {
 		if (mapSetting == "UID" && flags.UserMap) || (mapSetting == "GID" && flags.GroupMap) {
-			for i := uint64(0); i < sz; i++ {
+			for i := range sz {
 				cids = append(cids, cid+i)
 				mappedID, err := mapIDwithMapping(hid+i, parentMapping, mapSetting)
 				if err != nil {
@@ -417,20 +428,6 @@ func parseTriple(spec []string, parentMapping []ruser.IDMap, mapSetting string) 
 		})
 	}
 	return mappings, flags, nil
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 // Remove any conflicting mapping from mapping present in extension, so
@@ -555,16 +552,16 @@ func breakInsert(mapping []idtools.IDMap, extension idtools.IDMap) (result []idt
 // containing all integers found in fullRanges and not found in usedRanges.
 func getAvailableIDRanges(fullRanges, usedRanges [][2]int) (availableRanges [][2]int) {
 	// Sort them
-	sort.Slice(fullRanges, func(i, j int) bool {
-		return fullRanges[i][0] < fullRanges[j][0]
+	slices.SortFunc(fullRanges, func(a, b [2]int) int {
+		return cmp.Compare(a[0], b[0])
 	})
 
 	if len(usedRanges) == 0 {
 		return fullRanges
 	}
 
-	sort.Slice(usedRanges, func(i, j int) bool {
-		return usedRanges[i][0] < usedRanges[j][0]
+	slices.SortFunc(usedRanges, func(a, b [2]int) int {
+		return cmp.Compare(a[0], b[0])
 	})
 
 	// To traverse usedRanges
@@ -620,13 +617,13 @@ func getAvailableIDRanges(fullRanges, usedRanges [][2]int) (availableRanges [][2
 // multirange of unassigned subordinated ids.
 func getAvailableIDRangesFromMappings(idmap []idtools.IDMap, parentMapping []ruser.IDMap) (availableRanges [][2]int) {
 	// Get all subordinated ids from parentMapping:
-	fullRanges := [][2]int{} // {Multirange: [start, end), [start, end), ...}
+	fullRanges := make([][2]int, 0, len(parentMapping)) // {Multirange: [start, end), [start, end), ...}
 	for _, mapPiece := range parentMapping {
 		fullRanges = append(fullRanges, [2]int{int(mapPiece.ID), int(mapPiece.ID + mapPiece.Count)})
 	}
 
 	// Get the ids already mapped:
-	usedRanges := [][2]int{}
+	usedRanges := make([][2]int, 0, len(idmap))
 	for _, mapPiece := range idmap {
 		usedRanges = append(usedRanges, [2]int{mapPiece.HostID, mapPiece.HostID + mapPiece.Size})
 	}
@@ -641,8 +638,8 @@ func getAvailableIDRangesFromMappings(idmap []idtools.IDMap, parentMapping []rus
 // Returns the filled idmap.
 func fillIDMap(idmap []idtools.IDMap, availableRanges [][2]int) (output []idtools.IDMap) {
 	idmapByCid := append([]idtools.IDMap{}, idmap...)
-	sort.Slice(idmapByCid, func(i, j int) bool {
-		return idmapByCid[i].ContainerID < idmapByCid[j].ContainerID
+	slices.SortFunc(idmapByCid, func(a, b idtools.IDMap) int {
+		return cmp.Compare(a.ContainerID, b.ContainerID)
 	})
 
 	if len(availableRanges) == 0 {
@@ -782,8 +779,8 @@ func ParseIDMap(mapSpec []string, mapSetting string, parentMapping []ruser.IDMap
 // entries that are consecutive.
 func sortAndMergeConsecutiveMappings(idmap []idtools.IDMap) (finalIDMap []idtools.IDMap) {
 	idmapByCid := append([]idtools.IDMap{}, idmap...)
-	sort.Slice(idmapByCid, func(i, j int) bool {
-		return idmapByCid[i].ContainerID < idmapByCid[j].ContainerID
+	slices.SortFunc(idmapByCid, func(a, b idtools.IDMap) int {
+		return cmp.Compare(a.ContainerID, b.ContainerID)
 	})
 	for i, mapPiece := range idmapByCid {
 		if i == 0 {
@@ -851,7 +848,7 @@ func parseAutoTriple(spec []string, parentMapping []ruser.IDMap, mapSetting stri
 	}
 
 	if hidIsParent {
-		for i := uint64(0); i < sz; i++ {
+		for i := range sz {
 			cids = append(cids, cid+i)
 			mappedID, err := mapIDwithMapping(hid+i, parentMapping, mapSetting)
 			if err != nil {
@@ -927,7 +924,7 @@ func GetAutoOptions(n namespaces.UsernsMode) (*stypes.AutoUserNsOptions, error) 
 		}
 	}
 
-	for _, o := range strings.Split(opts, ",") {
+	for o := range strings.SplitSeq(opts, ",") {
 		key, val, hasVal := strings.Cut(o, "=")
 		if !hasVal {
 			return nil, fmt.Errorf("invalid option specified: %q", o)
@@ -1047,62 +1044,14 @@ func ParseIDMapping(mode namespaces.UsernsMode, uidMapSlice, gidMapSlice []strin
 	return &options, nil
 }
 
-type tomlOptionsConfig struct {
-	MountProgram string `toml:"mount_program"`
-}
-
-type tomlConfig struct {
-	Storage struct {
-		Driver    string                      `toml:"driver"`
-		RunRoot   string                      `toml:"runroot"`
-		GraphRoot string                      `toml:"graphroot"`
-		Options   struct{ tomlOptionsConfig } `toml:"options"`
-	} `toml:"storage"`
-}
-
-func getTomlStorage(storeOptions *stypes.StoreOptions) *tomlConfig {
-	config := new(tomlConfig)
-
-	config.Storage.Driver = storeOptions.GraphDriverName
-	config.Storage.RunRoot = storeOptions.RunRoot
-	config.Storage.GraphRoot = storeOptions.GraphRoot
-	for _, i := range storeOptions.GraphDriverOptions {
-		program, hasPrefix := strings.CutPrefix(i, "overlay.mount_program=")
-		if hasPrefix {
-			config.Storage.Options.MountProgram = program
-		}
-	}
-
-	return config
-}
-
-// WriteStorageConfigFile writes the configuration to a file
-func WriteStorageConfigFile(storageOpts *stypes.StoreOptions, storageConf string) error {
-	if err := os.MkdirAll(filepath.Dir(storageConf), 0755); err != nil {
-		return err
-	}
-	storageFile, err := os.OpenFile(storageConf, os.O_RDWR|os.O_TRUNC, 0600)
-	if err != nil {
-		return err
-	}
-	tomlConfiguration := getTomlStorage(storageOpts)
-	defer errorhandling.CloseQuiet(storageFile)
-	enc := toml.NewEncoder(storageFile)
-	if err := enc.Encode(tomlConfiguration); err != nil {
-		if err := os.Remove(storageConf); err != nil {
-			logrus.Error(err)
-		}
-		return err
-	}
-	return nil
-}
-
 // ParseInputTime takes the users input and to determine if it is valid and
 // returns a time format and error.  The input is compared to known time formats
 // or a duration which implies no-duration
 func ParseInputTime(inputTime string, since bool) (time.Time, error) {
-	timeFormats := []string{time.RFC3339Nano, time.RFC3339, "2006-01-02T15:04:05", "2006-01-02T15:04:05.999999999",
-		"2006-01-02Z07:00", "2006-01-02"}
+	timeFormats := []string{
+		time.RFC3339Nano, time.RFC3339, "2006-01-02T15:04:05", "2006-01-02T15:04:05.999999999",
+		"2006-01-02Z07:00", "2006-01-02",
+	}
 	// iterate the supported time formats
 	for _, tf := range timeFormats {
 		t, err := time.Parse(tf, inputTime)
@@ -1126,33 +1075,6 @@ func ParseInputTime(inputTime string, since bool) (time.Time, error) {
 		return time.Now().Add(-duration), nil
 	}
 	return time.Now().Add(duration), nil
-}
-
-// OpenExclusiveFile opens a file for writing and ensure it doesn't already exist
-func OpenExclusiveFile(path string) (*os.File, error) {
-	baseDir := filepath.Dir(path)
-	if baseDir != "" {
-		if err := fileutils.Exists(baseDir); err != nil {
-			return nil, err
-		}
-	}
-	return os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0666)
-}
-
-// ExitCode reads the error message when failing to executing container process
-// and then returns 0 if no error, 126 if command does not exist, or 127 for
-// all other errors
-func ExitCode(err error) int {
-	if err == nil {
-		return 0
-	}
-	e := strings.ToLower(err.Error())
-	if strings.Contains(e, "file not found") ||
-		strings.Contains(e, "no such file or directory") {
-		return 127
-	}
-
-	return 126
 }
 
 func Tmpdir() string {
@@ -1261,7 +1183,7 @@ func IDtoolsToRuntimeSpec(idMaps []idtools.IDMap) (convertedIDMap []specs.LinuxI
 	return convertedIDMap
 }
 
-// RuntimeSpecToIDtoolsTo converts runtime spec to the one of the idtools ID mapping
+// RuntimeSpecToIDtools converts runtime spec to the one of the idtools ID mapping
 func RuntimeSpecToIDtools(idMaps []specs.LinuxIDMapping) (convertedIDMap []idtools.IDMap) {
 	for _, idmap := range idMaps {
 		tempIDMap := idtools.IDMap{
@@ -1282,14 +1204,6 @@ func LookupUser(name string) (*user.User, error) {
 	return user.Lookup(name)
 }
 
-// SizeOfPath determines the file usage of a given path. it was called volumeSize in v1
-// and now is made to be generic and take a path instead of a libpod volume
-// Deprecated: use github.com/containers/storage/pkg/directory.Size() instead.
-func SizeOfPath(path string) (uint64, error) {
-	size, err := directory.Size(path)
-	return uint64(size), err
-}
-
 // ParseRestartPolicy parses the value given to the --restart flag and returns the policy
 // and restart retries value
 func ParseRestartPolicy(policy string) (string, uint, error) {
@@ -1302,7 +1216,7 @@ func ParseRestartPolicy(policy string) (string, uint, error) {
 	case 1:
 		// No retries specified
 		policyType = splitRestart[0]
-		if strings.ToLower(splitRestart[0]) == "never" {
+		if strings.EqualFold(splitRestart[0], "never") {
 			policyType = define.RestartPolicyNo
 		}
 	case 2:

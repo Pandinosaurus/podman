@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/containers/podman/v5/libpod/define"
+	"go.podman.io/podman/v6/libpod/define"
 )
 
 // GetPodPidInformation returns process-related data of all processes in
@@ -48,7 +48,7 @@ func (p *Pod) GetPodPidInformation(descriptors []string) ([]string, error) {
 	// Also support comma-separated input.
 	psDescriptors := []string{}
 	for _, d := range descriptors {
-		for _, s := range strings.Split(d, ",") {
+		for s := range strings.SplitSeq(d, ",") {
 			if s != "" {
 				psDescriptors = append(psDescriptors, s)
 			}

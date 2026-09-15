@@ -4,7 +4,7 @@
 package swagger
 
 import (
-	"github.com/containers/podman/v5/pkg/errorhandling"
+	"go.podman.io/podman/v6/pkg/errorhandling"
 )
 
 // Error model embedded in swagger:response to aid in documentation generation
@@ -16,9 +16,37 @@ type imageNotFound struct {
 	Body errorhandling.ErrorModel
 }
 
+// No such file
+// swagger:response
+type fileNotFound struct {
+	// in:body
+	Body errorhandling.ErrorModel
+}
+
 // No such container
 // swagger:response
 type containerNotFound struct {
+	// in:body
+	Body errorhandling.ErrorModel
+}
+
+// No such artifact
+// swagger:response
+type artifactNotFound struct {
+	// in:body
+	Body errorhandling.ErrorModel
+}
+
+// error in authentication
+// swagger:response
+type artifactBadAuth struct {
+	// in:body
+	Body errorhandling.ErrorModel
+}
+
+// Error from registry
+// swagger:response
+type errorFromRegistry struct {
 	// in:body
 	Body errorhandling.ErrorModel
 }
@@ -54,6 +82,13 @@ type volumeNotFound struct {
 // No such pod
 // swagger:response
 type podNotFound struct {
+	// in:body
+	Body errorhandling.ErrorModel
+}
+
+// No such quadlet
+// swagger:response
+type quadletNotFound struct {
 	// in:body
 	Body errorhandling.ErrorModel
 }

@@ -13,9 +13,7 @@ Once connected, the container can communicate with other containers in the same 
 ## OPTIONS
 #### **--alias**=*name*
 Add network-scoped alias for the container. If the network has DNS enabled (`podman network inspect -f {{.DNSEnabled}} <NAME>`),
-these aliases can be used for name resolution on the given network.  Multiple *--alias* options may be specified as input.
-NOTE: When using CNI, a container only has access to aliases on the first network that it joins. This limitation does
-not exist with netavark/aardvark-dns.
+these aliases can be used for name resolution on the given network in addition to the container name.  Multiple *--alias* options may be specified as input. See **DNS NOTES** in **[podman-network(1)](podman-network.1.md)**.
 
 #### **--ip**=*address*
 Set a static ipv4 address for this container on this network.
@@ -26,7 +24,7 @@ Set a static ipv6 address for this container on this network.
 #### **--mac-address**=*address*
 Set a static mac address for this container on this network.
 
-## EXAMPLE
+## EXAMPLES
 
 Connect specified container to a named network:
 ```
@@ -41,6 +39,11 @@ podman network connect --alias web1 --alias web2 test web
 Connect specified container to named network with a static ip:
 ```
 podman network connect --ip 10.89.1.13 test web
+```
+
+Connect specified container to named network with a static mac address:
+```
+podman network connect --mac-address 92:d0:c6:0a:29:33 test web
 ```
 
 ## SEE ALSO

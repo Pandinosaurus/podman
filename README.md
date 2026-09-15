@@ -3,7 +3,12 @@
 # Podman: A tool for managing OCI containers and pods
 ![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)
 ![GitHub release (latest SemVer)](https://img.shields.io/github/v/release/containers/podman)
-[![Go Report Card](https://goreportcard.com/badge/github.com/containers/libpod)](https://goreportcard.com/report/github.com/containers/libpod)
+[![Go Report Card](https://goreportcard.com/badge/github.com/containers/podman/v6)](https://goreportcard.com/report/github.com/containers/podman/v6)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/10499/badge)](https://www.bestpractices.dev/projects/10499)
+
+[![LFX Health Score](https://insights.linuxfoundation.org/api/badge/health-score?project=podman-container-tools&repos=https://github.com/containers/podman)](https://insights.linuxfoundation.org/project/podman-container-tools/repository/containers-podman)
+[![LFX Contributors](https://insights.linuxfoundation.org/api/badge/contributors?project=podman-container-tools&repos=https://github.com/containers/podman)](https://insights.linuxfoundation.org/project/podman-container-tools/repository/containers-podman)
+
 
 <br/>
 
@@ -11,11 +16,12 @@ Podman (the POD MANager) is a tool for managing containers and images, volumes m
 Podman runs containers on Linux, but can also be used on Mac and Windows systems using a Podman-managed virtual machine.
 Podman is based on libpod, a library for container lifecycle management that is also contained in this repository. The libpod library provides APIs for managing containers, pods, container images, and volumes.
 
+Podman releases a new major or minor release 4 times a year, during the second week of February, May, August, and November. Patch releases are more frequent and may occur at any time to get bugfixes out to users. All releases are PGP signed. Public keys of members of the team approved to make releases are located [here](https://github.com/containers/release-keys/tree/main/podman).
 
-All releases are PGP signed. Public keys of members of the team approved to make releases are located [here](https://github.com/containers/release-keys/tree/main/podman).
+Only the most recent release receives upstream support. Exceptions are sometimes made after a major Podman release, in recognition of the fact that not all users and distributions will be able to quickly migrate to a breaking change release. After the release of Podman 6.0, the Podman maintainers have decided to extend upstream support of the v5.8 series of releases until the 2nd week of June in 2027, one year after the release of Podman 6.0. This support will only include CVE fixes and critical bugfixes.
 
 * Continuous Integration:
-  * [![Build Status](https://api.cirrus-ci.com/github/containers/podman.svg)](https://cirrus-ci.com/github/containers/podman/main)
+  * [![Build Status](https://github.com/containers/podman/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/containers/podman/actions/workflows/ci.yml?query=branch%3Amain)
   * [GoDoc: ![GoDoc](https://godoc.org/github.com/containers/podman/libpod?status.svg)](https://godoc.org/github.com/containers/podman/libpod)
   * [Downloads](DOWNLOADS.md)
 
@@ -37,11 +43,7 @@ At a high level, the scope of Podman and libpod is the following:
 
 ## Roadmap
 
-1. Further improvements to `podman machine` to better support Podman Desktop and other developer usecases.
-1. Support for [conmon-rs](https://github.com/containers/conmon-rs), which will improve container logging.
-1. Support for the BuildKit API.
-1. Performance and stability improvements.
-1. Reductions to the size of the Podman binary.
+The future of Podman feature development can be found in its **[roadmap](ROADMAP.md)**.
 
 ## Communications
 
@@ -59,6 +61,18 @@ tracking system.
 
 There is also a [mailing list](https://lists.podman.io/archives/) at `lists.podman.io`.
 You can subscribe by sending a message to `podman-join@lists.podman.io` with the subject `subscribe`.
+
+### Community Meetings
+
+All Podman meetings are open to everyone, free to attend, and hosted via Zoom through the CNCF/Linux Foundation.
+The full calendar is available on the [Podman Container Tools LFX Meetings page](https://zoom-lfx.platform.linuxfoundation.org/meetings/podman-container-tools?view=month).
+Registering for a meeting sends you an invite for that meeting and all subsequent recurring instances.
+
+| Meeting | Schedule | Format |
+|---------|----------|--------|
+| [Podman Community Meeting](https://zoom-lfx.platform.linuxfoundation.org/meeting/97486138230?password=3144ae43-0fd5-457e-a495-bb4e0202e9c2) and its [agenda](https://hackmd.io/fc1zraYdS0-klJ2KJcfC7w?both) | First **Tuesday of even-numbered months** (Feb, Apr, Jun, Aug, Oct, Dec) at **11:00 a.m. Eastern** (UTC-4 summer / UTC-5 winter) | ~1 hour — demos, announcements, and community updates |
+| [Podman Monday Office Hours](https://zoom-lfx.platform.linuxfoundation.org/meeting/92776077694?password=deea5903-07a5-4e4d-9ad9-a6f52319fabe) and its [agenda](https://hackmd.io/@TomSweeneyRedHat/H1qIC9nkMe) | Every **Monday at 10:00 a.m. Eastern** (UTC-4 summer / UTC-5 winter) | 30 min — technical discussions, open topics |
+| [Podman Thursday Office Hours](https://zoom-lfx.platform.linuxfoundation.org/meeting/96031375483?password=97015335-907e-4f54-9eff-b3068d7052c9) and its [agenda](https://hackmd.io/@TomSweeneyRedHat/H1qIC9nkMe) | Every **Thursday at 11:00 a.m. Eastern** (UTC-4 summer / UTC-5 winter) | 30 min — technical discussions, open topics |
 
 ## Rootless
 Podman can be easily run as a normal user, without requiring a setuid binary.
@@ -92,10 +106,10 @@ Podman uses OCI projects and best of breed libraries for different aspects:
 - Runtime: We use the [OCI runtime tools](https://github.com/opencontainers/runtime-tools) to generate OCI runtime configurations that can be used with any OCI-compliant runtime, like [crun](https://github.com/containers/crun/) and [runc](https://github.com/opencontainers/runc/).
 - Images: Image management uses the [containers/image](https://github.com/containers/image) library.
 - Storage: Container and image storage is managed by [containers/storage](https://github.com/containers/storage).
-- Networking: Networking support through use of [Netavark](https://github.com/containers/netavark) and [Aardvark](https://github.com/containers/aardvark-dns).  Rootless networking is handled via [slirp4netns](https://github.com/rootless-containers/slirp4netns).
+- Networking: Networking support through use of [Netavark](https://github.com/containers/netavark) and [Aardvark](https://github.com/containers/aardvark-dns).  Rootless networking is handled via [pasta](https://passt.top/passt).
 - Builds: Builds are supported via [Buildah](https://github.com/containers/buildah).
 - Conmon: [Conmon](https://github.com/containers/conmon) is a tool for monitoring OCI runtimes, used by both Podman and CRI-O.
-- Seccomp: A unified [Seccomp](https://github.com/containers/common/blob/main/pkg/seccomp/seccomp.json) policy for Podman, Buildah, and CRI-O.
+- Seccomp: A unified [Seccomp](https://github.com/containers/container-libs/blob/main/common/pkg/seccomp/seccomp.json) policy for Podman, Buildah, and CRI-O.
 
 ## Podman Information for Developers
 
@@ -104,7 +118,7 @@ For blogs, release announcements and more, please checkout the [podman.io](https
 **[Installation notes](install.md)**
 Information on how to install Podman in your environment.
 
-**[OCI Hooks Support](https://github.com/containers/common/blob/main/pkg/hooks/README.md)**
+**[OCI Hooks Support](https://github.com/containers/container-libs/blob/main/common/pkg/hooks/README.md)**
 Information on how Podman configures [OCI Hooks][spec-hooks] to run when launching a container.
 
 **[Podman API](https://docs.podman.io/en/latest/_static/api.html)**

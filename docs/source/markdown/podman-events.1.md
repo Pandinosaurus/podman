@@ -70,6 +70,12 @@ The *image* event type reports the following statuses:
  * unmount
  * untag
 
+The *artifact* event type reports the following statuses:
+ * create
+ * pull
+ * push
+ * remove
+
 The *system* type reports the following statuses:
  * refresh
  * renumber
@@ -77,6 +83,16 @@ The *system* type reports the following statuses:
 The *volume* type reports the following statuses:
  * create
  * prune
+ * remove
+
+The *secret* type reports the following statuses:
+ * create
+ * remove
+
+ The *network* type reports the following statuses:
+ * create
+ * connect
+ * disconnect
  * remove
 
 #### Verbose Create Events
@@ -92,10 +108,12 @@ filters are supported:
 
 | **Filter** | **Description**                     |
 |------------|-------------------------------------|
+| artifact   | [Name or ID] Artifact name or ID    |
 | container  | [Name or ID] Container's name or ID |
 | event      | event_status (described above)      |
 | image      | [Name or ID] Image name or ID       |
-| label      | [key=value] label                   |
+| label      | [key] or [key=value] label          |
+| network    | [Name] Network name                 |
 | pod        | [Name or ID] Pod name or ID         |
 | volume     | [Name or ID] Volume name or ID      |
 | type       | Event_type (described above)        |
@@ -117,6 +135,7 @@ Format the output to JSON Lines or using the given Go template.
 | .Image                | Name of image being run (string)                                     |
 | .Name                 | Container name (string)                                              |
 | .Network              | Name of network being used (string)                                  |
+| .OOMKilled            | Whether container was killed due to OOM (bool)                       |
 | .PodID                | ID of pod associated with container, if any                          |
 | .Status               | Event status (e.g., create, start, died, ...)                        |
 | .Time                 | Event timestamp (string)                                             |
@@ -156,8 +175,8 @@ The journald events-backend of Podman uses the following journald identifiers.  
 | PODMAN_EVENT                  | The event status as described above                     |
 | PODMAN_TYPE                   | The event type as described above                       |
 | PODMAN_TIME                   | The time stamp when the event was written               |
-| PODMAN_NAME                   | Name of the event object (e.g., container, image)       |
-| PODMAN_ID                     | ID of the event object (e.g., container, image)         |
+| PODMAN_NAME                   | Name of the event object (e.g., container, image, artifact) |
+| PODMAN_ID                     | ID of the event object (e.g., container, image, artifact)   |
 | PODMAN_EXIT_CODE              | Exit code of the container                              |
 | PODMAN_POD_ID                 | Pod ID of the container                                 |
 | PODMAN_LABELS                 | Labels of the container                                 |
@@ -211,7 +230,7 @@ $ podman events --format json
 ```
 
 ## SEE ALSO
-**[podman(1)](podman.1.md)**, **[containers.conf(5)](https://github.com/containers/common/blob/main/docs/containers.conf.5.md)**
+**[podman(1)](podman.1.md)**, **[containers.conf(5)](https://github.com/containers/container-libs/blob/main/common/docs/containers.conf.5.md)**
 
 ## HISTORY
 March 2019, Originally compiled by Brent Baude <bbaude@redhat.com>

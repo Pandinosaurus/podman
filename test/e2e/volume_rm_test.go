@@ -5,13 +5,12 @@ package integration
 import (
 	"fmt"
 
-	. "github.com/containers/podman/v5/test/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	. "go.podman.io/podman/v6/test/utils"
 )
 
 var _ = Describe("Podman volume rm", func() {
-
 	AfterEach(func() {
 		podmanTest.CleanupVolume()
 	})
@@ -28,7 +27,7 @@ var _ = Describe("Podman volume rm", func() {
 		session = podmanTest.Podman([]string{"volume", "ls"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
-		Expect(session.OutputToStringArray()).To(BeEmpty())
+		Expect(session.OutputToStringArray()).To(HaveLen(1))
 	})
 
 	It("podman volume rm with --force flag", func() {
@@ -48,7 +47,7 @@ var _ = Describe("Podman volume rm", func() {
 		session = podmanTest.Podman([]string{"volume", "ls"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
-		Expect(session.OutputToStringArray()).To(BeEmpty())
+		Expect(session.OutputToStringArray()).To(HaveLen(1))
 	})
 
 	It("podman volume remove bogus", func() {
@@ -73,7 +72,7 @@ var _ = Describe("Podman volume rm", func() {
 		session = podmanTest.Podman([]string{"volume", "ls"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
-		Expect(session.OutputToStringArray()).To(BeEmpty())
+		Expect(session.OutputToStringArray()).To(HaveLen(1))
 	})
 
 	It("podman volume rm by partial name", func() {
@@ -88,7 +87,7 @@ var _ = Describe("Podman volume rm", func() {
 		session = podmanTest.Podman([]string{"volume", "ls"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
-		Expect(session.OutputToStringArray()).To(BeEmpty())
+		Expect(session.OutputToStringArray()).To(HaveLen(1))
 	})
 
 	It("podman volume rm by nonunique partial name", func() {
@@ -103,15 +102,21 @@ var _ = Describe("Podman volume rm", func() {
 		session = podmanTest.Podman([]string{"volume", "rm", "myv"})
 		session.WaitWithDefaultTimeout()
 		expect := "more than one result for volume name myv: volume already exists"
-		if podmanTest.DatabaseBackend == "boltdb" {
-			// boltdb issues volume name in quotes
-			expect = `more than one result for volume name "myv": volume already exists`
-		}
 		Expect(session).To(ExitWithError(125, expect))
 
 		session = podmanTest.Podman([]string{"volume", "ls"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 		Expect(len(session.OutputToStringArray())).To(BeNumerically(">=", 2))
+	})
+
+	It("podman volume rm by unique partial name - case & underscore insensitive", func() {
+		volNames := []string{"test_volume", "test-volume", "test", "Test"}
+		for _, name := range volNames {
+			podmanTest.PodmanExitCleanly("volume", "create", name)
+		}
+
+		podmanTest.PodmanExitCleanly("volume", "rm", volNames[0])
+		podmanTest.PodmanExitCleanly("volume", "rm", volNames[2])
 	})
 })

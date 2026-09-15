@@ -5,20 +5,29 @@ package integration
 import (
 	"fmt"
 
-	. "github.com/containers/podman/v5/test/utils"
-	"github.com/containers/podman/v5/version"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	. "github.com/onsi/gomega/gexec"
+	. "go.podman.io/podman/v6/test/utils"
+	"go.podman.io/podman/v6/version"
 )
 
 var _ = Describe("Podman version", func() {
-
 	It("podman version", func() {
 		session := podmanTest.Podman([]string{"version"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 		Expect(session.Out.Contents()).Should(ContainSubstring(version.Version.String()))
+	})
+
+	It("podman version: check for client information when no system service", func() {
+		SkipIfNotRemote("testing only failed remote connections")
+		podmanTest.StopRemoteService()
+		defer podmanTest.StartRemoteService()
+		version := podmanTest.Podman([]string{"version"})
+		version.WaitWithDefaultTimeout()
+		Expect(version.OutputToString()).To(ContainSubstring("Client:"))
+		Expect(version).ToNot(ExitCleanly())
 	})
 
 	It("podman -v", func() {
@@ -59,7 +68,11 @@ var _ = Describe("Podman version", func() {
 
 			desc := fmt.Sprintf("JSON test(%q)", tt.input)
 			Expect(session).Should(Exit(tt.exitCode), desc)
-			Expect(session.IsJSONOutputValid()).To(Equal(tt.success), desc)
+			if tt.success {
+				Expect(session.OutputToString()).To(BeValidJSON(), desc)
+			} else {
+				Expect(session.OutputToString()).ToNot(BeValidJSON(), desc)
+			}
 		}
 	})
 

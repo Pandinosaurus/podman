@@ -10,18 +10,18 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/containers/podman/v5/libpod/define"
+	"go.podman.io/podman/v6/libpod/define"
 
-	v1 "github.com/containers/podman/v5/pkg/k8s.io/api/core/v1"
-	"github.com/containers/podman/v5/pkg/util"
-	. "github.com/containers/podman/v5/test/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/opencontainers/selinux/go-selinux"
+	v1 "go.podman.io/podman/v6/pkg/k8s.io/api/core/v1"
+	"go.podman.io/podman/v6/pkg/util"
+	. "go.podman.io/podman/v6/test/utils"
 	"sigs.k8s.io/yaml"
 )
 
 var _ = Describe("Podman kube generate", func() {
-
 	It("pod on bogus object", func() {
 		session := podmanTest.Podman([]string{"generate", "kube", "foobarpod"})
 		session.WaitWithDefaultTimeout()
@@ -62,6 +62,37 @@ var _ = Describe("Podman kube generate", func() {
 		Expect(numContainers).To(Equal(1))
 	})
 
+	It("on container with volume emits SELinux note only when rootless and SELinux enabled", func() {
+		vol1 := filepath.Join(podmanTest.TempDir, "vol-selinux-note")
+		err := os.MkdirAll(vol1, 0o755)
+		Expect(err).ToNot(HaveOccurred())
+
+		ctrName := "test-selinux-note-ctr"
+		session := podmanTest.Podman([]string{"run", "-d", "--name", ctrName, "-v", vol1 + ":/volume/:z", CITEST_IMAGE, "top"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+
+		outputFile := filepath.Join(podmanTest.RunRoot, "ctr.yaml")
+		kube := podmanTest.Podman([]string{"kube", "generate", ctrName, "-f", outputFile})
+		kube.WaitWithDefaultTimeout()
+		Expect(kube).Should(ExitCleanly())
+
+		b, err := os.ReadFile(outputFile)
+		Expect(err).ShouldNot(HaveOccurred())
+
+		// The SELinux volume-permissions NOTE only applies to unprivileged,
+		// rootless containers on an SELinux-enabled host.
+		if isRootless() && selinux.GetEnabled() {
+			Expect(string(b)).To(ContainSubstring("check the podman generate kube man page"))
+		} else {
+			Expect(string(b)).NotTo(ContainSubstring("check the podman generate kube man page"))
+		}
+
+		rm := podmanTest.Podman([]string{"rm", "-t", "0", "-f", ctrName})
+		rm.WaitWithDefaultTimeout()
+		Expect(rm).Should(ExitCleanly())
+	})
+
 	It("service on container with --security-opt level", func() {
 		session := podmanTest.Podman([]string{"create", "--name", "test", "--security-opt", "label=level:s0:c100,c200", CITEST_IMAGE})
 		session.WaitWithDefaultTimeout()
@@ -90,7 +121,6 @@ var _ = Describe("Podman kube generate", func() {
 		err = yaml.Unmarshal(kube.Out.Contents(), pod)
 		Expect(err).ToNot(HaveOccurred())
 		Expect(kube.OutputToString()).To(ContainSubstring("type: spc_t"))
-
 	})
 
 	It("service kube on container with --security-opt type", func() {
@@ -353,7 +383,8 @@ var _ = Describe("Podman kube generate", func() {
 	It("on pod with hostAliases", func() {
 		podName := "testHost"
 		testIP := "127.0.0.1"
-		podSession := podmanTest.Podman([]string{"pod", "create", "--name", podName,
+		podSession := podmanTest.Podman([]string{
+			"pod", "create", "--name", podName,
 			"--add-host", "test1.podman.io" + ":" + testIP,
 			"--add-host", "test2.podman.io" + ":" + testIP,
 		})
@@ -511,7 +542,7 @@ var _ = Describe("Podman kube generate", func() {
 	})
 
 	It("on pod with restartPolicy set for container in a pod", func() {
-		//TODO: v5.0 - change/remove test once we block --restart on container when it is in a pod
+		// TODO: v5.0 - change/remove test once we block --restart on container when it is in a pod
 		// podName,  set,  expect
 		testSli := [][]string{
 			{"testPod1", "", ""}, // some pod create from cmdline, so set it to an empty string and let k8s default it to Always
@@ -529,8 +560,10 @@ var _ = Describe("Podman kube generate", func() {
 			Expect(podSession).Should(ExitCleanly())
 
 			ctrName := "ctr" + strconv.Itoa(k)
-			ctr1Session := podmanTest.Podman([]string{"create", "--name", ctrName, "--pod", podName,
-				"--restart", v[1], CITEST_IMAGE, "top"})
+			ctr1Session := podmanTest.Podman([]string{
+				"create", "--name", ctrName, "--pod", podName,
+				"--restart", v[1], CITEST_IMAGE, "top",
+			})
 			ctr1Session.WaitWithDefaultTimeout()
 			Expect(ctr1Session).Should(ExitCleanly())
 
@@ -608,7 +641,6 @@ var _ = Describe("Podman kube generate", func() {
 	})
 
 	It("on pod with memory limit", func() {
-		SkipIfRootlessCgroupsV1("Not supported for rootless + CgroupsV1")
 		podName := "testMemoryLimit"
 		podSession := podmanTest.Podman([]string{"pod", "create", "--name", podName})
 		podSession.WaitWithDefaultTimeout()
@@ -634,21 +666,24 @@ var _ = Describe("Podman kube generate", func() {
 	})
 
 	It("on pod with cpu limit", func() {
-		SkipIfRootlessCgroupsV1("Not supported for rootless + CgroupsV1")
 		podName := "testCpuLimit"
 		podSession := podmanTest.Podman([]string{"pod", "create", "--name", podName})
 		podSession.WaitWithDefaultTimeout()
 		Expect(podSession).Should(ExitCleanly())
 
 		ctr1Name := "ctr1"
-		ctr1Session := podmanTest.Podman([]string{"create", "--name", ctr1Name, "--pod", podName,
-			"--cpus", "0.5", CITEST_IMAGE, "top"})
+		ctr1Session := podmanTest.Podman([]string{
+			"create", "--name", ctr1Name, "--pod", podName,
+			"--cpus", "0.5", CITEST_IMAGE, "top",
+		})
 		ctr1Session.WaitWithDefaultTimeout()
 		Expect(ctr1Session).Should(ExitCleanly())
 
 		ctr2Name := "ctr2"
-		ctr2Session := podmanTest.Podman([]string{"create", "--name", ctr2Name, "--pod", podName,
-			"--cpu-period", "100000", "--cpu-quota", "50000", CITEST_IMAGE, "top"})
+		ctr2Session := podmanTest.Podman([]string{
+			"create", "--name", ctr2Name, "--pod", podName,
+			"--cpu-period", "100000", "--cpu-quota", "50000", CITEST_IMAGE, "top",
+		})
 		ctr2Session.WaitWithDefaultTimeout()
 		Expect(ctr2Session).Should(ExitCleanly())
 
@@ -704,11 +739,12 @@ var _ = Describe("Podman kube generate", func() {
 				// have anything for protocol under the ports as tcp is the default
 				// for k8s
 				Expect(port.Protocol).To(BeEmpty())
-				if port.HostPort == 4008 {
+				switch port.HostPort {
+				case 4008:
 					foundPort400x++
-				} else if port.HostPort == 5008 {
+				case 5008:
 					foundPort500x++
-				} else {
+				default:
 					foundOtherPort++
 				}
 			}
@@ -812,7 +848,7 @@ var _ = Describe("Podman kube generate", func() {
 
 	It("with volume", func() {
 		vol1 := filepath.Join(podmanTest.TempDir, "vol-test1")
-		err := os.MkdirAll(vol1, 0755)
+		err := os.MkdirAll(vol1, 0o755)
 		Expect(err).ToNot(HaveOccurred())
 
 		// we need a container name because IDs don't persist after rm/play
@@ -849,14 +885,68 @@ var _ = Describe("Podman kube generate", func() {
 		Expect(inspect.OutputToString()).To(ContainSubstring(vol1))
 	})
 
+	It("with subpath volume", func() {
+		// We want to verify that generating Volume's subPath is working properly
+		// https://kubernetes.io/docs/concepts/storage/volumes/#using-subpath
+		// by creating a volume with two directories and mounthing them separately
+		volName := "vol-test1"
+		pvcName := fmt.Sprintf("%s-pvc", volName)
+		podmanTest.PodmanExitCleanly("volume", "create", volName)
+
+		mountPoint := "/mnt"
+
+		etcFile := "etcfile"
+		etcDirPath := filepath.Join(mountPoint, "etc")
+		etcSubPath := filepath.Join("/etc", etcFile)
+		etcMountSubPath := filepath.Join(mountPoint, etcSubPath)
+		populateEtcCmd := fmt.Sprintf("mkdir -p %s; touch %s", etcDirPath, etcMountSubPath)
+
+		varFile := "varfile"
+		varDirPath := filepath.Join(mountPoint, "var")
+		varSubPath := filepath.Join("/var", varFile)
+		varMountSubPath := filepath.Join(mountPoint, varSubPath)
+		populateVarCmd := fmt.Sprintf("mkdir -p %s; touch %s", varDirPath, varMountSubPath)
+
+		cmd := fmt.Sprintf("%s; %s", populateEtcCmd, populateVarCmd)
+		vol := fmt.Sprintf("%s:%s", volName, mountPoint)
+		podmanTest.PodmanExitCleanly("run", "-v", vol, ALPINE, "sh", "-c", cmd)
+
+		etcTargetPath := filepath.Join(mountPoint, etcFile)
+		varTargetPath := filepath.Join(mountPoint, varFile)
+		mountTemplate := "type=volume,source=%s,volume-subpath=%s,target=%s"
+		podmanTest.PodmanExitCleanly("run", "-d", "--pod", "new:test1", "--name", "test-ctr",
+			"--mount", fmt.Sprintf(mountTemplate, volName, etcSubPath, etcTargetPath),
+			"--mount", fmt.Sprintf(mountTemplate, volName, varSubPath, varTargetPath),
+			CITEST_IMAGE, "top")
+
+		kube := podmanTest.PodmanExitCleanly("kube", "generate", "test1")
+
+		pod := new(v1.Pod)
+		err = yaml.Unmarshal(kube.Out.Contents(), pod)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(pod.Spec.Containers[0].VolumeMounts).To(
+			ContainElements(v1.VolumeMount{
+				Name:      pvcName,
+				MountPath: etcTargetPath,
+				SubPath:   etcSubPath,
+			}, v1.VolumeMount{
+				Name:      pvcName,
+				MountPath: varTargetPath,
+				SubPath:   varSubPath,
+			}),
+		)
+	})
+
 	It("when bind-mounting '/' and '/root' at the same time ", func() {
 		// Fixes https://github.com/containers/podman/issues/9764
 
 		ctrName := "mount-root-ctr"
-		session1 := podmanTest.Podman([]string{"run", "-d", "--pod", "new:mount-root-conflict", "--name", ctrName,
+		session1 := podmanTest.Podman([]string{
+			"run", "-d", "--pod", "new:mount-root-conflict", "--name", ctrName,
 			"-v", "/:/volume1/",
 			"-v", "/root:/volume2/",
-			CITEST_IMAGE, "top"})
+			CITEST_IMAGE, "top",
+		})
 		session1.WaitWithDefaultTimeout()
 		Expect(session1).Should(ExitCleanly())
 
@@ -869,7 +959,6 @@ var _ = Describe("Podman kube generate", func() {
 		Expect(err).ToNot(HaveOccurred())
 
 		Expect(pod.Spec.Volumes).To(HaveLen(2))
-
 	})
 
 	It("with persistent volume claim", func() {
@@ -1119,7 +1208,7 @@ var _ = Describe("Podman kube generate", func() {
 ENTRYPOINT ["sleep"]`
 
 		containerfilePath := filepath.Join(podmanTest.TempDir, "Containerfile")
-		err = os.WriteFile(containerfilePath, []byte(containerfile), 0644)
+		err = os.WriteFile(containerfilePath, []byte(containerfile), 0o644)
 		Expect(err).ToNot(HaveOccurred())
 
 		image := "generatekube:test"
@@ -1171,7 +1260,7 @@ ENTRYPOINT ["sleep"]`
 USER 1000`
 
 		containerfilePath := filepath.Join(podmanTest.TempDir, "Containerfile")
-		err = os.WriteFile(containerfilePath, []byte(containerfile), 0644)
+		err = os.WriteFile(containerfilePath, []byte(containerfile), 0o644)
 		Expect(err).ToNot(HaveOccurred())
 
 		image := "generatekube:test"
@@ -1240,7 +1329,7 @@ RUN adduser -u 10001 -S test1
 USER test1`
 
 		containerfilePath := filepath.Join(podmanTest.TempDir, "Containerfile")
-		err = os.WriteFile(containerfilePath, []byte(containerfile), 0644)
+		err = os.WriteFile(containerfilePath, []byte(containerfile), 0o644)
 		Expect(err).ToNot(HaveOccurred())
 
 		image := "generatekube:test"
@@ -1366,10 +1455,12 @@ USER test1`
 		ctrName := "gen-kube-env-ctr"
 		podName := "gen-kube-env"
 		// In proxy environment, this test needs to the --http-proxy=false option (#16684)
-		session1 := podmanTest.Podman([]string{"run", "-d", "--http-proxy=false", "--pod", "new:" + podName, "--name", ctrName,
+		session1 := podmanTest.Podman([]string{
+			"run", "-d", "--http-proxy=false", "--pod", "new:" + podName, "--name", ctrName,
 			"-e", "FOO=bar",
 			"-e", "HELLO=WORLD",
-			CITEST_IMAGE, "top"})
+			CITEST_IMAGE, "top",
+		})
 		session1.WaitWithDefaultTimeout()
 		Expect(session1).Should(ExitCleanly())
 
@@ -1616,7 +1707,7 @@ USER test1`
 		ctr2 := "ctr2"
 		vol1 := filepath.Join(podmanTest.TempDir, "vol-test1")
 
-		err := os.MkdirAll(vol1, 0755)
+		err := os.MkdirAll(vol1, 0o755)
 		Expect(err).ToNot(HaveOccurred())
 
 		session := podmanTest.Podman([]string{"create", "--name", ctr1, "-v", vol1, CITEST_IMAGE})
@@ -1647,10 +1738,10 @@ USER test1`
 		vol1 := filepath.Join(podmanTest.TempDir, "vol-test1")
 		vol2 := filepath.Join(podmanTest.TempDir, "vol-test2")
 
-		err1 := os.MkdirAll(vol1, 0755)
+		err1 := os.MkdirAll(vol1, 0o755)
 		Expect(err1).ToNot(HaveOccurred())
 
-		err2 := os.MkdirAll(vol2, 0755)
+		err2 := os.MkdirAll(vol2, 0o755)
 		Expect(err2).ToNot(HaveOccurred())
 
 		session := podmanTest.Podman([]string{"create", "--name", srcctr1, "-v", vol1, CITEST_IMAGE})
@@ -1942,5 +2033,48 @@ EXPOSE 2004-2005/tcp`, CITEST_IMAGE)
 		kube := podmanTest.Podman([]string{"kube", "generate", "--type", "daemonset", podName})
 		kube.WaitWithDefaultTimeout()
 		Expect(kube).Should(ExitWithError(125, "k8s DaemonSets can only have restartPolicy set to Always"))
+	})
+
+	It("on container with healthcheck exports LivenessProbe", func() {
+		testCases := []struct {
+			name            string
+			healthCmd       string
+			healthCmdExpect []string
+		}{
+			{"test-hc-ctr-1", "CMD /bin/true", []string{"/bin/true"}},
+			{"test-hc-ctr-2", "CMD-SHELL /bin/true", []string{"/bin/sh", "-c", "/bin/true"}},
+		}
+
+		for _, ctr := range testCases {
+			session := podmanTest.Podman([]string{
+				"create", "--name", ctr.name,
+				"--health-cmd", ctr.healthCmd,
+				"--health-interval", "10s",
+				"--health-timeout", "5s",
+				"--health-retries", "3",
+				"--health-start-period", "2s",
+				CITEST_IMAGE, "top",
+			})
+			session.WaitWithDefaultTimeout()
+			Expect(session).Should(ExitCleanly())
+
+			kube := podmanTest.Podman([]string{"kube", "generate", ctr.name})
+			kube.WaitWithDefaultTimeout()
+			Expect(kube).Should(ExitCleanly())
+
+			pod := new(v1.Pod)
+			err := yaml.Unmarshal(kube.Out.Contents(), pod)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(pod.Spec.Containers).To(HaveLen(1))
+
+			probe := pod.Spec.Containers[0].LivenessProbe
+			Expect(probe).ToNot(BeNil(), "LivenessProbe should be set when container has a healthcheck")
+			Expect(probe.Exec).ToNot(BeNil())
+			Expect(probe.Exec.Command).To(Equal(ctr.healthCmdExpect))
+			Expect(probe.PeriodSeconds).To(Equal(int32(10)))
+			Expect(probe.TimeoutSeconds).To(Equal(int32(5)))
+			Expect(probe.FailureThreshold).To(Equal(int32(3)))
+			Expect(probe.InitialDelaySeconds).To(Equal(int32(2)))
+		}
 	})
 })

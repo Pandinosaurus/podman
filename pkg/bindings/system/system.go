@@ -3,16 +3,14 @@ package system
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/bindings"
-	"github.com/containers/podman/v5/pkg/domain/entities/types"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/bindings"
+	"go.podman.io/podman/v6/pkg/domain/entities/types"
 )
 
 // Events allows you to monitor libdpod related events like container creation and
@@ -31,7 +29,6 @@ func Events(ctx context.Context, eventChan chan types.Event, cancelChan chan boo
 	if err != nil {
 		return err
 	}
-	defer response.Body.Close()
 
 	if cancelChan != nil {
 		go func() {
@@ -43,33 +40,28 @@ func Events(ctx context.Context, eventChan chan types.Event, cancelChan chan boo
 	}
 
 	if response.StatusCode != http.StatusOK {
+		defer response.Body.Close()
 		return response.Process(nil)
 	}
 
-	dec := json.NewDecoder(response.Body)
-	for err = (error)(nil); err == nil; {
-		var e = types.Event{}
-		err = dec.Decode(&e)
-		if err == nil {
-			eventChan <- e
+	go func() {
+		defer response.Body.Close()
+		defer close(eventChan)
+		dec := json.NewDecoder(response.Body)
+		for err = error(nil); err == nil; {
+			e := types.Event{}
+			err = dec.Decode(&e)
+			if err == nil {
+				eventChan <- e
+			}
 		}
-	}
-	close(eventChan)
-	switch {
-	case err == nil:
-		return nil
-	case errors.Is(err, io.EOF):
-		return nil
-	default:
-		return fmt.Errorf("unable to decode event response: %w", err)
-	}
+	}()
+	return nil
 }
 
 // Prune removes all unused system data.
 func Prune(ctx context.Context, options *PruneOptions) (*types.SystemPruneReport, error) {
-	var (
-		report types.SystemPruneReport
-	)
+	var report types.SystemPruneReport
 	conn, err := bindings.GetClient(ctx)
 	if err != nil {
 		return nil, err

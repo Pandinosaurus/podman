@@ -8,10 +8,10 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/containers/common/pkg/resize"
-	"github.com/containers/podman/v5/libpod"
-	"github.com/containers/podman/v5/libpod/define"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/pkg/resize"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/libpod/define"
 	"golang.org/x/term"
 )
 
@@ -35,13 +35,16 @@ func ExecAttachCtr(ctx context.Context, ctr *libpod.Container, execConfig *libpo
 			}
 		}()
 	}
-	return ctr.Exec(execConfig, streams, resizechan)
+	// Forward our signals on, so killing `podman exec` stops what it started.
+	return ctr.Exec(execConfig, streams, resizechan, func(sessionID string) {
+		ProxyExecSignals(ctr, sessionID)
+	})
 }
 
 // StartAttachCtr starts and (if required) attaches to a container
 // if you change the signature of this function from os.File to io.Writer, it will trigger a downstream
 // error. we may need to just lint disable this one.
-func StartAttachCtr(ctx context.Context, ctr *libpod.Container, stdout, stderr, stdin *os.File, detachKeys string, sigProxy bool, startContainer bool) error { //nolint: interfacer
+func StartAttachCtr(ctx context.Context, ctr *libpod.Container, stdout, stderr, stdin *os.File, detachKeys string, sigProxy bool, startContainer bool) error {
 	resize := make(chan resize.TerminalSize)
 
 	haveTerminal := term.IsTerminal(int(os.Stdin.Fd()))

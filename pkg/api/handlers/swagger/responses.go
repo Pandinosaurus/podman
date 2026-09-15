@@ -4,17 +4,18 @@
 package swagger
 
 import (
-	"github.com/containers/common/libnetwork/types"
-	"github.com/containers/image/v5/manifest"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/api/handlers"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/domain/entities/reports"
-	"github.com/containers/podman/v5/pkg/inspect"
-	dockerAPI "github.com/docker/docker/api/types"
-	dockerImage "github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/api/types/network"
-	"github.com/docker/docker/api/types/volume"
+	"github.com/moby/moby/api/types/container"
+	dockerImage "github.com/moby/moby/api/types/image"
+	"github.com/moby/moby/api/types/network"
+	"github.com/moby/moby/api/types/registry"
+	"github.com/moby/moby/api/types/volume"
+	"go.podman.io/common/libnetwork/types"
+	"go.podman.io/image/v5/manifest"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/api/handlers"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/domain/entities/reports"
+	"go.podman.io/podman/v6/pkg/inspect"
 )
 
 // Image Tree
@@ -59,7 +60,7 @@ type imagesImportResponseLibpod struct {
 	Body entities.ImageImportReport
 }
 
-// Image Pull
+// Image Pull. Errors may be detected later even if this returns HTTP status 200, and in that case, the error description will be in the `error` field.
 // swagger:response
 type imagesPullResponseLibpod struct {
 	// in:body
@@ -94,24 +95,14 @@ type imageDeleteResponse struct {
 // swagger:response
 type registrySearchResponse struct {
 	// in:body
-	Body struct {
-		// Index is the image index
-		// example: quay.io
-		Index string
-		// Name is the canonical name of the image
-		// example: docker.io/library/alpine"
-		Name string
-		// Description of the image.
-		Description string
-		// Stars is the number of stars of the image.
-		Stars int
-		// Official indicates if it's an official image.
-		Official string
-		// Automated indicates if the image was created by an automated build.
-		Automated string
-		// Tag is the image tag
-		Tag string
-	}
+	Body []registry.SearchResult
+}
+
+// Registry Search
+// swagger:response
+type registrySearchResponseLibpod struct {
+	// in:body
+	Body []entities.ImageSearchReport
 }
 
 // Inspect Image
@@ -125,7 +116,7 @@ type inspectImageResponseLibpod struct {
 // swagger:response
 type containerInspectResponse struct {
 	// in:body
-	Body dockerAPI.ContainerJSON
+	Body container.InspectResponse
 }
 
 // List processes in container
@@ -324,9 +315,13 @@ type containerCreateResponse struct {
 	Body entities.ContainerCreateResponse
 }
 
+// Update container
+// swagger:response
 type containerUpdateResponse struct {
 	// in:body
-	ID string
+	Body struct {
+		ID string
+	}
 }
 
 // Wait container
@@ -473,4 +468,67 @@ type networkCreateResponse struct {
 type networkPruneResponse struct {
 	// in:body
 	Body []entities.NetworkPruneReport
+}
+
+// Inspect Artifact
+// swagger:response
+type inspectArtifactResponse struct {
+	// in:body
+	Body entities.ArtifactInspectReport
+}
+
+// Artifact list
+// swagger:response
+type artifactListResponse struct {
+	// in:body
+	Body []entities.ArtifactListReport
+}
+
+// Artifact Pull
+// swagger:response
+type artifactPullResponse struct {
+	// in:body
+	Body entities.ArtifactPullReport
+}
+
+// Artifact Remove
+// swagger:response
+type artifactRemoveResponse struct {
+	// in:body
+	Body entities.ArtifactRemoveReport
+}
+
+// Artifact Add
+// swagger:response
+type artifactAddResponse struct {
+	// in:body
+	Body entities.ArtifactAddReport
+}
+
+// Artifact Push
+// swagger:response
+type artifactPushResponse struct {
+	// in:body
+	Body entities.ArtifactPushReport
+}
+
+// Quadlet list
+// swagger:response
+type quadletListResponse struct {
+	// in:body
+	Body []entities.ListQuadlet
+}
+
+// Quadlet file
+// swagger:response
+type quadletFileResponse struct {
+	// in:body
+	Body string
+}
+
+// Quadlet remove
+// swagger:response
+type quadletRemoveResponse struct {
+	// in:body
+	Body entities.QuadletRemoveReport
 }

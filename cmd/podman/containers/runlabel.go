@@ -4,14 +4,14 @@ import (
 	"context"
 	"strings"
 
-	"github.com/containers/common/pkg/auth"
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/image/v5/types"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/auth"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 // runlabelOptionsWrapper allows for combining API-only with CLI-only options
@@ -33,8 +33,8 @@ var (
 		Args:              cobra.MinimumNArgs(2),
 		ValidArgsFunction: common.AutocompleteRunlabelCommand,
 		Example: `podman container runlabel run imageID
-  podman container runlabel install imageID arg1 arg2
-  podman container runlabel --display run myImage`,
+podman container runlabel install imageID arg1 arg2
+podman container runlabel --display run myImage`,
 	}
 )
 

@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package libpod
 
@@ -8,20 +8,22 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
-	"github.com/containers/podman/v5/libpod"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/api/handlers"
-	"github.com/containers/podman/v5/pkg/api/handlers/compat"
-	"github.com/containers/podman/v5/pkg/api/handlers/utils"
-	api "github.com/containers/podman/v5/pkg/api/types"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/domain/infra/abi"
-	"github.com/containers/podman/v5/pkg/util"
 	"github.com/gorilla/schema"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/api/handlers"
+	"go.podman.io/podman/v6/pkg/api/handlers/compat"
+	"go.podman.io/podman/v6/pkg/api/handlers/utils"
+	api "go.podman.io/podman/v6/pkg/api/types"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/domain/infra/abi"
+	"go.podman.io/podman/v6/pkg/specgenutil"
+	"go.podman.io/podman/v6/pkg/util"
 )
 
 func ContainerExists(w http.ResponseWriter, r *http.Request) {
@@ -307,6 +309,7 @@ func Restore(w http.ResponseWriter, r *http.Request) {
 	query := struct {
 		Keep            bool   `schema:"keep"`
 		TCPEstablished  bool   `schema:"tcpEstablished"`
+		TCPClose        bool   `schema:"tcpClose"`
 		Import          bool   `schema:"import"`
 		Name            string `schema:"name"`
 		IgnoreRootFS    bool   `schema:"ignoreRootFS"`
@@ -329,6 +332,7 @@ func Restore(w http.ResponseWriter, r *http.Request) {
 		Name:            query.Name,
 		Keep:            query.Keep,
 		TCPEstablished:  query.TCPEstablished,
+		TCPClose:        query.TCPClose,
 		IgnoreRootFS:    query.IgnoreRootFS,
 		IgnoreVolumes:   query.IgnoreVolumes,
 		IgnoreStaticIP:  query.IgnoreStaticIP,
@@ -406,6 +410,54 @@ func InitContainer(w http.ResponseWriter, r *http.Request) {
 	utils.WriteResponse(w, http.StatusNoContent, "")
 }
 
+// UInt64OrMinusOne is a small helper that unmarshals JSON numbers and allows negative numbers,
+// mapping them to uint64 max to represent "unlimited" for rlimits.
+type UInt64OrMinusOne uint64
+
+func (x *UInt64OrMinusOne) UnmarshalJSON(b []byte) error {
+	var n json.Number
+
+	dec := json.NewDecoder(strings.NewReader(string(b)))
+	dec.UseNumber()
+	if err := dec.Decode(&n); err != nil {
+		return err
+	}
+
+	// Handle signed numbers for the unlimited/maximum case
+	if i, err := n.Int64(); err == nil {
+		if i < 0 {
+			*x = UInt64OrMinusOne(^uint64(0))
+			return nil
+		}
+		*x = UInt64OrMinusOne(uint64(i))
+		return nil
+	}
+
+	// Handle large unsigned values
+	u, err := strconv.ParseUint(n.String(), 10, 64)
+	if err != nil {
+		return fmt.Errorf("failed to parse UInt64OrMinusOne: %w", err)
+	}
+	*x = UInt64OrMinusOne(u)
+	return nil
+}
+
+type WirePOSIXRlimit struct {
+	// Type of the rlimit to set
+	Type string `json:"type"`
+	// Hard is the hard limit for the specified type
+	Hard UInt64OrMinusOne `json:"hard"`
+	// Soft is the soft limit for the specified type
+	Soft UInt64OrMinusOne `json:"soft"`
+}
+
+// updateEntitiesWire mirrors handlers.UpdateEntities but allows -1 for rlimits
+// via the WirePOSIXRlimit numbers.
+type updateEntitiesWire struct {
+	handlers.UpdateEntities
+	Rlimits []WirePOSIXRlimit `json:"r_limits,omitempty"`
+}
+
 func UpdateContainer(w http.ResponseWriter, r *http.Request) {
 	name := utils.GetName(r)
 	runtime := r.Context().Value(api.RuntimeKey).(*libpod.Runtime)
@@ -443,12 +495,36 @@ func UpdateContainer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	options := &handlers.UpdateEntities{Resources: &specs.LinuxResources{}}
-	if err := json.NewDecoder(r.Body).Decode(&options.Resources); err != nil {
-		utils.Error(w, http.StatusInternalServerError, fmt.Errorf("decode(): %w", err))
+	wire := updateEntitiesWire{}
+	if err := utils.ReadJSONFromBody(r, &wire); err != nil {
+		utils.Error(w, http.StatusBadRequest, err)
 		return
 	}
-	err = ctr.Update(options.Resources, restartPolicy, restartRetries)
+
+	options := wire.UpdateEntities
+	resourceLimits, err := specgenutil.UpdateMajorAndMinorNumbers(&options.LinuxResources, &options.UpdateContainerDevicesLimits)
+	if err != nil {
+		utils.InternalServerError(w, err)
+		return
+	}
+
+	rlimits, err := parseRLimits(wire.Rlimits)
+	if err != nil {
+		utils.Error(w, http.StatusBadRequest, fmt.Errorf("invalid rlimit: %w", err))
+		return
+	}
+
+	updateOptions := &entities.ContainerUpdateOptions{
+		Resources:                       resourceLimits,
+		ChangedHealthCheckConfiguration: &options.UpdateHealthCheckConfig,
+		RestartPolicy:                   restartPolicy,
+		RestartRetries:                  restartRetries,
+		Env:                             options.Env,
+		UnsetEnv:                        options.UnsetEnv,
+		Rlimits:                         rlimits,
+	}
+
+	err = ctr.Update(updateOptions)
 	if err != nil {
 		utils.InternalServerError(w, err)
 		return
@@ -456,25 +532,23 @@ func UpdateContainer(w http.ResponseWriter, r *http.Request) {
 	utils.WriteResponse(w, http.StatusCreated, ctr.ID())
 }
 
-func ShouldRestart(w http.ResponseWriter, r *http.Request) {
-	runtime := r.Context().Value(api.RuntimeKey).(*libpod.Runtime)
-	// Now use the ABI implementation to prevent us from having duplicate
-	// code.
-	containerEngine := abi.ContainerEngine{Libpod: runtime}
-
-	name := utils.GetName(r)
-	report, err := containerEngine.ShouldRestart(r.Context(), name)
-	if err != nil {
-		if errors.Is(err, define.ErrNoSuchCtr) {
-			utils.ContainerNotFound(w, name, err)
-			return
+// parseRLimits parses slice of WirePOSIXRlimit to slice of specs.POSIXRlimit.
+// Returns nil when rLimits is empty so that the caller can distinguish if
+// limits are set. Otherwise rlimits will be wiped on every run.
+func parseRLimits(rLimits []WirePOSIXRlimit) ([]specs.POSIXRlimit, error) {
+	if len(rLimits) == 0 {
+		return nil, nil
+	}
+	rl := make([]specs.POSIXRlimit, 0, len(rLimits))
+	for _, rLimit := range rLimits {
+		if rLimit.Type == "" {
+			return nil, fmt.Errorf("invalid value for POSIXRlimit.type: empty")
 		}
-		utils.InternalServerError(w, err)
-		return
+		rl = append(rl, specs.POSIXRlimit{
+			Type: rLimit.Type,
+			Soft: uint64(rLimit.Soft),
+			Hard: uint64(rLimit.Hard),
+		})
 	}
-	if report.Value {
-		utils.WriteResponse(w, http.StatusNoContent, "")
-	} else {
-		utils.ContainerNotFound(w, name, define.ErrNoSuchCtr)
-	}
+	return rl, nil
 }

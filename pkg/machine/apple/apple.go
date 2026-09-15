@@ -9,20 +9,18 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"syscall"
 	"time"
 
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/common/pkg/strongunits"
 	gvproxy "github.com/containers/gvisor-tap-vsock/pkg/types"
-	"github.com/containers/podman/v5/pkg/machine"
-	"github.com/containers/podman/v5/pkg/machine/define"
-	"github.com/containers/podman/v5/pkg/machine/ignition"
-	"github.com/containers/podman/v5/pkg/machine/sockets"
-	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
-	"github.com/containers/podman/v5/pkg/systemd/parser"
 	vfConfig "github.com/crc-org/vfkit/pkg/config"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/common/pkg/strongunits"
+	"go.podman.io/podman/v6/pkg/machine/define"
+	"go.podman.io/podman/v6/pkg/machine/sockets"
+	"go.podman.io/podman/v6/pkg/machine/vmconfigs"
 )
 
 const applehvMACAddress = "5a:94:ef:e4:0c:ee"
@@ -65,85 +63,9 @@ func SetProviderAttrs(mc *vmconfigs.MachineConfig, opts define.SetOptions, state
 	return nil
 }
 
-func GenerateSystemDFilesForVirtiofsMounts(mounts []machine.VirtIoFs) ([]ignition.Unit, error) {
-	// mounting in fcos with virtiofs is a bit of a dance.  we need a unit file for the mount, a unit file
-	// for automatic mounting on boot, and a "preparatory" service file that disables FCOS security, performs
-	// the mkdir of the mount point, and then re-enables security.  This must be done for each mount.
-
-	unitFiles := make([]ignition.Unit, 0, len(mounts))
-	for _, mnt := range mounts {
-		// Create mount unit for each mount
-		mountUnit := parser.NewUnitFile()
-		mountUnit.Add("Mount", "What", "%s")
-		mountUnit.Add("Mount", "Where", "%s")
-		mountUnit.Add("Mount", "Type", "virtiofs")
-		mountUnit.Add("Mount", "Options", fmt.Sprintf("context=\"%s\"", machine.NFSSELinuxContext))
-		mountUnit.Add("Install", "WantedBy", "multi-user.target")
-		mountUnitFile, err := mountUnit.ToString()
-		if err != nil {
-			return nil, err
-		}
-
-		virtiofsMount := ignition.Unit{
-			Enabled:  ignition.BoolToPtr(true),
-			Name:     fmt.Sprintf("%s.mount", parser.PathEscape(mnt.Target)),
-			Contents: ignition.StrToPtr(fmt.Sprintf(mountUnitFile, mnt.Tag, mnt.Target)),
-		}
-
-		unitFiles = append(unitFiles, virtiofsMount)
-	}
-
-	// This is a way to workaround the FCOS limitation of creating directories
-	// at the rootfs / and then mounting to them.
-	immutableRootOff := parser.NewUnitFile()
-	immutableRootOff.Add("Unit", "Description", "Allow systemd to create mount points on /")
-	immutableRootOff.Add("Unit", "DefaultDependencies", "no")
-
-	immutableRootOff.Add("Service", "Type", "oneshot")
-	immutableRootOff.Add("Service", "ExecStart", "chattr -i /")
-
-	immutableRootOff.Add("Install", "WantedBy", "remote-fs-pre.target")
-	immutableRootOffFile, err := immutableRootOff.ToString()
-	if err != nil {
-		return nil, err
-	}
-
-	immutableRootOffUnit := ignition.Unit{
-		Contents: ignition.StrToPtr(immutableRootOffFile),
-		Name:     "immutable-root-off.service",
-		Enabled:  ignition.BoolToPtr(true),
-	}
-	unitFiles = append(unitFiles, immutableRootOffUnit)
-
-	immutableRootOn := parser.NewUnitFile()
-	immutableRootOn.Add("Unit", "Description", "Set / back to immutable after mounts are done")
-	immutableRootOn.Add("Unit", "DefaultDependencies", "no")
-	immutableRootOn.Add("Unit", "After", "remote-fs.target")
-
-	immutableRootOn.Add("Service", "Type", "oneshot")
-	immutableRootOn.Add("Service", "ExecStart", "chattr +i /")
-
-	immutableRootOn.Add("Install", "WantedBy", "remote-fs.target")
-	immutableRootOnFile, err := immutableRootOn.ToString()
-	if err != nil {
-		return nil, err
-	}
-
-	immutableRootOnUnit := ignition.Unit{
-		Contents: ignition.StrToPtr(immutableRootOnFile),
-		Name:     "immutable-root-on.service",
-		Enabled:  ignition.BoolToPtr(true),
-	}
-	unitFiles = append(unitFiles, immutableRootOnUnit)
-
-	return unitFiles, nil
-}
-
 // StartGenericAppleVM is wrapped by apple provider methods and starts the vm
 func StartGenericAppleVM(mc *vmconfigs.MachineConfig, cmdBinary string, bootloader vfConfig.Bootloader, endpoint string) (func() error, func() error, error) {
-	var (
-		ignitionSocket *define.VMFile
-	)
+	var ignitionSocket *define.VMFile
 
 	// Add networking
 	netDevice, err := vfConfig.VirtioNetNew(applehvMACAddress)
@@ -151,17 +73,14 @@ func StartGenericAppleVM(mc *vmconfigs.MachineConfig, cmdBinary string, bootload
 		return nil, nil, err
 	}
 	// Set user networking with gvproxy
-
 	gvproxySocket, err := mc.GVProxySocket()
 	if err != nil {
 		return nil, nil, err
 	}
-
 	// Wait on gvproxy to be running and aware
 	if err := sockets.WaitForSocketWithBackoffs(gvProxyMaxBackoffAttempts, gvProxyWaitBackoff, gvproxySocket.GetPath(), "gvproxy"); err != nil {
 		return nil, nil, err
 	}
-
 	netDevice.SetUnixSocketPath(gvproxySocket.GetPath())
 
 	// create a one-time virtual machine for starting because we dont want all this information in the
@@ -181,6 +100,14 @@ func StartGenericAppleVM(mc *vmconfigs.MachineConfig, cmdBinary string, bootload
 		return nil, nil, err
 	}
 	vm.Devices = append(vm.Devices, mounts...)
+
+	timesync, err := vfConfig.TimeSyncNew(define.TimeSyncVsockPort)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := vm.AddDevice(timesync); err != nil {
+		return nil, nil, err
+	}
 
 	// To start the VM, we need to call vfkit
 	cfg, err := config.Default()
@@ -216,11 +143,6 @@ func StartGenericAppleVM(mc *vmconfigs.MachineConfig, cmdBinary string, bootload
 
 	cmd.Args = append(cmd.Args, endpointArgs...)
 
-	firstBoot, err := mc.IsFirstBoot()
-	if err != nil {
-		return nil, nil, err
-	}
-
 	if logrus.IsLevelEnabled(logrus.DebugLevel) {
 		debugDevArgs, err := GetDebugDevicesCMDArgs()
 		if err != nil {
@@ -230,7 +152,14 @@ func StartGenericAppleVM(mc *vmconfigs.MachineConfig, cmdBinary string, bootload
 		cmd.Args = append(cmd.Args, "--gui") // add command line switch to pop the gui open
 	}
 
-	if firstBoot {
+	if mc.LibKrunHypervisor != nil {
+		// Nested Virtualization requires an M3 chip or newer, and to be running
+		// macOS 15+. If those requirements are not met, then krunkit will ignore the
+		// argument and keep Nested Virtualization disabled.
+		cmd.Args = append(cmd.Args, "--nested")
+	}
+
+	if mc.IsFirstBoot() {
 		// If this is the first boot of the vm, we need to add the vsock
 		// device to vfkit so we can inject the ignition file
 		socketName := fmt.Sprintf("%s-%s", mc.Name, ignitionSocketName)
@@ -286,7 +215,7 @@ func StartGenericAppleVM(mc *vmconfigs.MachineConfig, cmdBinary string, bootload
 		if err != nil {
 			return nil, nil, err
 		}
-		err = os.Chmod(kdFile.Path, 0744)
+		err = os.Chmod(kdFile.Path, 0o744)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -296,7 +225,7 @@ func StartGenericAppleVM(mc *vmconfigs.MachineConfig, cmdBinary string, bootload
 			return nil, nil, err
 		}
 		for _, arg := range cmd.Args {
-			_, err = f.WriteString(fmt.Sprintf("%q ", arg))
+			_, err = fmt.Fprintf(f, "%q ", arg)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -313,24 +242,62 @@ func StartGenericAppleVM(mc *vmconfigs.MachineConfig, cmdBinary string, bootload
 		return nil, nil, err
 	}
 
-	returnFunc := func() error {
+	// Start a goroutine that will evenutally propagate a
+	// terminate signal to the VM process.
+	// If the user decides to abort `podman machine start`
+	// while the VM is starting, we want the VM to be stopped
+	// too. Or the machine will be left in an inconsistent
+	// state. Note that the goroutine will wait until the
+	// the main goroutine completes.
+	term := make(chan os.Signal, 1)
+	signal.Notify(term, os.Interrupt, syscall.SIGTERM)
+	// Get the PID first because cmd.Process will
+	// be released in the main thread
+	pid := cmd.Process.Pid
+	go func() {
+		<-term
+		logrus.Debugf("Termination signal forwarded to the VM process (PID: %d)\n", pid)
+		p, err := os.FindProcess(pid)
+		if err != nil {
+			logrus.Errorf("Failed to find process %d: %v", pid, err)
+			return
+		}
+		err = p.Signal(os.Interrupt)
+		if err != nil {
+			logrus.Errorf("Termination signal received, but terminating the VM process (PID: %d) failed: %v", pid, err)
+			return
+		}
+		// Wait and release the resources associated with the process
+		if _, err := p.Wait(); err != nil {
+			logrus.Debugf("Failed waiting for the process after terminating it: %v", err)
+		}
+	}()
+
+	// waitForReadyFunc is the callback that the caller of StartVM()
+	// uses to block its execution until the the VM is ready or an error
+	// occurs
+	waitForReadyFunc := func() error {
 		processErrChan := make(chan error)
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
+		// The VM readiness will be communicated on readyChan. In the
+		// meantime, the following goroutine checks every 500ms that the VM
+		// process is running. If it's not, returns an error on processErrChan.
 		go func() {
 			defer close(processErrChan)
+			ticker := time.NewTicker(500 * time.Millisecond)
+			defer ticker.Stop()
 			for {
-				select {
-				case <-ctx.Done():
-					return
-				default:
-				}
 				if err := CheckProcessRunning(cmdBinary, cmd.Process.Pid); err != nil {
 					processErrChan <- err
 					return
 				}
-				// lets poll status every half second
-				time.Sleep(500 * time.Millisecond)
+				select {
+				case <-ctx.Done():
+					logrus.Debug("VM waitForReadyFunc goroutine: ctx done")
+					return
+				case <-ticker.C:
+				}
 			}
 		}()
 
@@ -348,7 +315,26 @@ func StartGenericAppleVM(mc *vmconfigs.MachineConfig, cmdBinary string, bootload
 		}
 		return nil
 	}
-	return cmd.Process.Release, returnFunc, nil
+
+	// releaseCmdFunc is the callback that the caller of StartVM()
+	// uses to release the resources associated with cmd.Process.
+	// It's important to execute it after waitForReadyFunc completes,
+	// otherwise cmd.Process methods won't work anymore.
+	relCmdFunc := func() error {
+		if err := cmd.Process.Release(); err != nil {
+			logrus.Errorf("error releasing VM Start command associated resources: %v", err)
+		}
+		if ignitionSocket != nil {
+			if err := ignitionSocket.Delete(); err != nil {
+				logrus.Errorf("unable to delete ignition socket: %v", err)
+			}
+		}
+		if err := readySocket.Delete(); err != nil {
+			logrus.Errorf("unable to delete ready socket: %v", err)
+		}
+		return nil
+	}
+	return relCmdFunc, waitForReadyFunc, nil
 }
 
 // CheckProcessRunning checks non blocking if the pid exited
@@ -360,8 +346,14 @@ func CheckProcessRunning(processName string, pid int) error {
 		return fmt.Errorf("failed to read %s process status: %w", processName, err)
 	}
 	if pid > 0 {
-		// child exited
-		return fmt.Errorf("%s exited unexpectedly with exit code %d", processName, status.ExitStatus())
+		// Child exited, process is no longer running
+		if status.Exited() {
+			return fmt.Errorf("%s exited unexpectedly with exit code %d", processName, status.ExitStatus())
+		}
+		if status.Signaled() {
+			return fmt.Errorf("%s was terminated by signal: %s", processName, status.Signal().String())
+		}
+		return fmt.Errorf("%s exited unexpectedly", processName)
 	}
 	return nil
 }

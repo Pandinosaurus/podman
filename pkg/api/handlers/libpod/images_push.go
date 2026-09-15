@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package libpod
 
@@ -9,16 +9,16 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/containers/image/v5/types"
-	"github.com/containers/podman/v5/libpod"
-	"github.com/containers/podman/v5/pkg/api/handlers/utils"
-	api "github.com/containers/podman/v5/pkg/api/types"
-	"github.com/containers/podman/v5/pkg/auth"
-	"github.com/containers/podman/v5/pkg/channel"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/domain/infra/abi"
 	"github.com/gorilla/schema"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/pkg/api/handlers/utils"
+	api "go.podman.io/podman/v6/pkg/api/types"
+	"go.podman.io/podman/v6/pkg/auth"
+	"go.podman.io/podman/v6/pkg/channel"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/domain/infra/abi"
 )
 
 // PushImage is the handler for the compat http endpoint for pushing images.
@@ -38,6 +38,9 @@ func PushImage(w http.ResponseWriter, r *http.Request) {
 		RetryDelay             string `schema:"retryDelay"`
 		TLSVerify              bool   `schema:"tlsVerify"`
 		Quiet                  bool   `schema:"quiet"`
+		OS                     string `schema:"os"`
+		Arch                   string `schema:"arch"`
+		Variant                string `schema:"variant"`
 	}{
 		TLSVerify: true,
 		// #14971: older versions did not sent *any* data, so we need
@@ -89,6 +92,9 @@ func PushImage(w http.ResponseWriter, r *http.Request) {
 		RemoveSignatures:       query.RemoveSignatures,
 		RetryDelay:             query.RetryDelay,
 		Username:               username,
+		OS:                     query.OS,
+		Arch:                   query.Arch,
+		Variant:                query.Variant,
 	}
 
 	if _, found := r.URL.Query()["retry"]; found {
@@ -138,8 +144,8 @@ func PushImage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	w.WriteHeader(http.StatusOK)
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
 	flush()
 
 	enc := json.NewEncoder(w)

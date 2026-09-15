@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package checkpoint
 
@@ -9,17 +9,17 @@ import (
 	"os"
 
 	metadata "github.com/checkpoint-restore/checkpointctl/lib"
-	"github.com/containers/common/libimage"
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/podman/v5/libpod"
-	ann "github.com/containers/podman/v5/pkg/annotations"
-	"github.com/containers/podman/v5/pkg/checkpoint/crutils"
-	"github.com/containers/podman/v5/pkg/criu"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/specgen/generate"
-	"github.com/containers/podman/v5/pkg/specgenutil"
 	spec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/libimage"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/podman/v6/libpod"
+	ann "go.podman.io/podman/v6/pkg/annotations"
+	"go.podman.io/podman/v6/pkg/checkpoint/crutils"
+	"go.podman.io/podman/v6/pkg/criu"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/specgen/generate"
+	"go.podman.io/podman/v6/pkg/specgenutil"
 )
 
 // Prefixing the checkpoint/restore related functions with 'cr'
@@ -95,7 +95,7 @@ func CRImportCheckpoint(ctx context.Context, runtime *libpod.Runtime, restoreOpt
 
 	if restoreOptions.Pod != "" {
 		// Restoring into a Pod requires much newer versions of CRIU
-		if err := criu.CheckForCriu(criu.PodCriuVersion); err != nil {
+		if err := criu.CheckForCriu(criu.PodCriuVersion); err != nil { //nolint:staticcheck,nolintlint // false-positives on freebsd because this always errors there
 			return nil, fmt.Errorf("restoring containers into pod: %w", err)
 		}
 		// The runtime also has to support it
@@ -139,8 +139,6 @@ func CRImportCheckpoint(ctx context.Context, runtime *libpod.Runtime, restoreOpt
 				opts.StaticMAC = nil
 				ctrConfig.Networks[net] = opts
 			}
-			ctrConfig.StaticIP = nil
-			ctrConfig.StaticMAC = nil
 		}
 
 		if ctrConfig.PIDNsCtr != "" {
@@ -211,7 +209,6 @@ func CRImportCheckpoint(ctx context.Context, runtime *libpod.Runtime, restoreOpt
 		return nil, err
 	}
 
-	var containers []*libpod.Container
 	if container == nil {
 		return nil, nil
 	}
@@ -230,6 +227,5 @@ func CRImportCheckpoint(ctx context.Context, runtime *libpod.Runtime, restoreOpt
 		}
 	}
 
-	containers = append(containers, container)
-	return containers, nil
+	return []*libpod.Container{container}, nil
 }

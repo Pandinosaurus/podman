@@ -58,7 +58,7 @@ func (m *VMFile) ReadMagicNumber(n int) ([]byte, error) {
 	defer f.Close()
 	b := make([]byte, n)
 	n, err = io.ReadFull(f, b)
-	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
 		return b[:n], err
 	} else {
 		return b[:n], nil
@@ -108,7 +108,7 @@ func (m *VMFile) makeSymlink(symlink *string) error {
 	}
 	sl := filepath.Join(homeDir, ".podman", *symlink)
 	// make the symlink dir and throw away if it already exists
-	if err := os.MkdirAll(filepath.Dir(sl), 0700); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := os.MkdirAll(filepath.Dir(sl), 0o700); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	m.Symlink = &sl

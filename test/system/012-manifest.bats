@@ -82,10 +82,46 @@ function validate_instance_compression {
     run_podman rmi $mname
 }
 
+@test "podman manifest annotate --subject" {
+    local mname="m-$(safename):1.0"
+
+    run_podman manifest create $mname
+
+    run_podman manifest inspect $mname
+    assert "$(jq -r '.subject' <<<"$output")" == "null" \
+           "index has no subject before it is annotated"
+
+    # The subject belongs to the index itself, hence --index
+    run_podman manifest annotate --index --subject containers-storage:$IMAGE $mname
+
+    run_podman manifest inspect $mname
+    assert "$(jq -r '.subject.digest' <<<"$output")" =~ '^sha256:[0-9a-f]{64}$' \
+           "index subject is set after it is annotated"
+
+    run_podman manifest rm $mname
+}
+
+@test "podman manifest add --artifact-subject" {
+    local mname="m-$(safename):1.0"
+    echo oh yeah > $PODMAN_TMPDIR/listed.txt
+
+    run_podman manifest create $mname
+    run_podman manifest add --artifact \
+               --artifact-subject=containers-storage:$IMAGE \
+               $mname $PODMAN_TMPDIR/listed.txt
+
+    run_podman manifest inspect $mname
+    assert "$(jq -r '.subject.digest' <<<"$output")" =~ '^sha256:[0-9a-f]{64}$' \
+           "index subject is set by --artifact-subject"
+
+    run_podman manifest rm $mname
+}
+
 @test "podman manifest --tls-verify and --authfile" {
     skip_if_remote "running a local registry doesn't work with podman-remote"
 
-    manifest1="localhost:${PODMAN_LOGIN_REGISTRY_PORT}/m-$(safename):1.0"
+    manifest1_notag="localhost:${PODMAN_LOGIN_REGISTRY_PORT}/m-$(safename)"
+    manifest1="$manifest1_notag:1.0"
     run_podman manifest create $manifest1
     mid=$output
 
@@ -94,11 +130,15 @@ function validate_instance_compression {
         --tls-verify=false $mid \
         $manifest1
     run_podman manifest rm $manifest1
+    run_podman 1 manifest rm $manifest1
+    is "$output" "Error: $manifest1: image not known" "Missing manifest is reported"
+    run_podman manifest rm --ignore $manifest1
+    is "$output" "" "Missing manifest is ignored"
 
     # Default is to require TLS; also test explicit opts
     for opt in '' '--insecure=false' '--tls-verify=true' "--authfile=$authfile"; do
         run_podman 125 manifest inspect $opt $manifest1
-        assert "$output" =~ "Error: reading image \"docker://$manifest1\": pinging container registry localhost:${PODMAN_LOGIN_REGISTRY_PORT}:.*x509" \
+        assert "$output" =~ "Error: reading image \"docker://$manifest1\": fetching manifest 1.0 in $manifest1_notag: pinging container registry localhost:${PODMAN_LOGIN_REGISTRY_PORT}:.*x509" \
                "TLE check: fails (as expected) with ${opt:-default}"
     done
 

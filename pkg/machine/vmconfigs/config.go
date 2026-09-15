@@ -3,11 +3,11 @@ package vmconfigs
 import (
 	"time"
 
-	"github.com/containers/common/pkg/strongunits"
 	gvproxy "github.com/containers/gvisor-tap-vsock/pkg/types"
-	"github.com/containers/podman/v5/pkg/machine/define"
-	"github.com/containers/podman/v5/pkg/machine/ignition"
-	"github.com/containers/storage/pkg/lockfile"
+	"go.podman.io/common/pkg/strongunits"
+	"go.podman.io/podman/v6/pkg/machine/define"
+	"go.podman.io/podman/v6/pkg/machine/ignition"
+	"go.podman.io/storage/pkg/lockfile"
 )
 
 const MachineConfigVersion = 1
@@ -27,8 +27,7 @@ type MachineConfig struct {
 	SSH       SSHConfig
 	Version   uint
 
-	// Image stuff
-	imageDescription machineImage //nolint:unused
+	Swap strongunits.MiB
 
 	ImagePath *define.VMFile // Temporary only until a proper image struct is worked out
 
@@ -39,7 +38,7 @@ type MachineConfig struct {
 	QEMUHypervisor    *QEMUConfig    `json:",omitempty"`
 	WSLHypervisor     *WSLConfig     `json:",omitempty"`
 
-	lock *lockfile.LockFile //nolint:unused
+	lock *lockfile.LockFile
 
 	// configPath can be used for reading, writing, removing
 	configPath *define.VMFile
@@ -53,28 +52,10 @@ type MachineConfig struct {
 	Starting bool
 
 	Rosetta bool
-}
 
-type machineImage interface { //nolint:unused
-	download() error
-	path() string
-}
+	Ansible *AnsibleConfig
 
-type OCIMachineImage struct {
-	// registry
-	// TODO JSON serial/deserial will write string to disk
-	// but in code it is a types.ImageReference
-
-	// quay.io/podman/podman-machine-image:5.0
-	FQImageReference string
-}
-
-func (o OCIMachineImage) path() string {
-	return ""
-}
-
-func (o OCIMachineImage) download() error {
-	return nil
+	ImportNativeCA bool
 }
 
 type VMProvider interface { //nolint:interfacebloat
@@ -147,4 +128,10 @@ type VMStats struct {
 	Created time.Time
 	// LastUp contains the last recorded uptime
 	LastUp time.Time
+}
+
+type AnsibleConfig struct {
+	PlaybookPath string
+	Contents     string
+	User         string
 }

@@ -29,11 +29,11 @@ func (c *PodmanCmdline) add(args ...string) {
 	c.Args = append(c.Args, args...)
 }
 
-func (c *PodmanCmdline) addf(format string, a ...interface{}) {
+func (c *PodmanCmdline) addf(format string, a ...any) {
 	c.add(fmt.Sprintf(format, a...))
 }
 
-func (c *PodmanCmdline) addKeys(arg string, keys map[string]string) {
+func (c *PodmanCmdline) addKeys(arg string, keys map[string]*string) {
 	ks := make([]string, 0, len(keys))
 	for k := range keys {
 		ks = append(ks, k)
@@ -41,20 +41,12 @@ func (c *PodmanCmdline) addKeys(arg string, keys map[string]string) {
 	sort.Strings(ks)
 
 	for _, k := range ks {
-		c.add(arg, fmt.Sprintf("%s=%s", k, keys[k]))
+		if keys[k] != nil {
+			c.add(arg, fmt.Sprintf("%s=%s", k, *keys[k]))
+		} else {
+			c.add(arg, k)
+		}
 	}
-}
-
-func (c *PodmanCmdline) addEnv(env map[string]string) {
-	c.addKeys("--env", env)
-}
-
-func (c *PodmanCmdline) addLabels(labels map[string]string) {
-	c.addKeys("--label", labels)
-}
-
-func (c *PodmanCmdline) addAnnotations(annotations map[string]string) {
-	c.addKeys("--annotation", annotations)
 }
 
 func (c *PodmanCmdline) addBool(arg string, val bool) {

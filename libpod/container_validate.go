@@ -1,15 +1,18 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package libpod
 
 import (
+	"context"
 	"fmt"
+	"strings"
 
-	"github.com/containers/image/v5/docker"
-	"github.com/containers/image/v5/pkg/shortnames"
-	"github.com/containers/image/v5/transports/alltransports"
-	"github.com/containers/podman/v5/libpod/define"
 	spec "github.com/opencontainers/runtime-spec/specs-go"
+	"go.podman.io/common/pkg/libartifact"
+	"go.podman.io/image/v5/docker"
+	"go.podman.io/image/v5/pkg/shortnames"
+	"go.podman.io/image/v5/transports/alltransports"
+	"go.podman.io/podman/v6/libpod/define"
 )
 
 // Validate that the configuration of a container is valid.
@@ -19,7 +22,7 @@ func (c *Container) validate() error {
 	rootfsSet := c.config.Rootfs != ""
 
 	// If one of RootfsImageIDor RootfsImageName are set, both must be set.
-	if (imageIDSet || imageNameSet) && !(imageIDSet && imageNameSet) {
+	if (imageIDSet || imageNameSet) && (!imageIDSet || !imageNameSet) {
 		return fmt.Errorf("both RootfsImageName and RootfsImageID must be set if either is set: %w", define.ErrInvalidArg)
 	}
 
@@ -29,7 +32,7 @@ func (c *Container) validate() error {
 	}
 
 	// Must set at least one of RootfsImageID or Rootfs
-	if !(imageIDSet || rootfsSet) {
+	if !imageIDSet && !rootfsSet {
 		return fmt.Errorf("must set root filesystem source to either image or rootfs: %w", define.ErrInvalidArg)
 	}
 
@@ -77,16 +80,6 @@ func (c *Container) validate() error {
 		if !foundPid {
 			return fmt.Errorf("containers not creating Cgroups must create a private PID namespace: %w", define.ErrInvalidArg)
 		}
-	}
-
-	// Can only set static IP or MAC is creating a network namespace.
-	if !c.config.CreateNetNS && (c.config.StaticIP != nil || c.config.StaticMAC != nil) {
-		return fmt.Errorf("cannot set static IP or MAC address if not creating a network namespace: %w", define.ErrInvalidArg)
-	}
-
-	// Cannot set static IP or MAC if joining >1 network.
-	if len(c.config.Networks) > 1 && (c.config.StaticIP != nil || c.config.StaticMAC != nil) {
-		return fmt.Errorf("cannot set static IP or MAC address if joining more than one network: %w", define.ErrInvalidArg)
 	}
 
 	// Using image resolv.conf conflicts with various DNS settings.
@@ -173,6 +166,38 @@ func (c *Container) validate() error {
 	// Cannot set startup HC without a healthcheck
 	if c.config.HealthCheckConfig == nil && c.config.StartupHealthCheckConfig != nil {
 		return fmt.Errorf("cannot set a startup healthcheck when there is no regular healthcheck: %w", define.ErrInvalidArg)
+	}
+
+	// Ensure all ports list a single protocol
+	for _, p := range c.config.PortMappings {
+		if strings.Contains(p.Protocol, ",") {
+			return fmt.Errorf("each port mapping must define a single protocol, got a comma-separated list for container port %d (protocols requested %q): %w", p.ContainerPort, p.Protocol, define.ErrInvalidArg)
+		}
+	}
+
+	if c.config.IsDefaultInfra && !c.config.IsInfra {
+		return fmt.Errorf("default rootfs-based infra container is set for non-infra container")
+	}
+
+	if c.config.LogTag != "" && c.config.LogDriver != define.JournaldLogging {
+		return fmt.Errorf("log tags can only be used with the journald log driver but driver is %q: %w", c.config.LogDriver, define.ErrInvalidArg)
+	}
+
+	if len(c.config.ArtifactVolumes) > 0 {
+		artStore, err := c.runtime.ArtifactStore()
+		if err != nil {
+			return err
+		}
+		for _, artifactMount := range c.config.ArtifactVolumes {
+			asr, err := libartifact.NewArtifactStorageReference(artifactMount.Source)
+			if err != nil {
+				return err
+			}
+			_, err = artStore.Inspect(context.Background(), asr)
+			if err != nil {
+				return err
+			}
+		}
 	}
 
 	return nil

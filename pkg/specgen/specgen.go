@@ -6,11 +6,11 @@ import (
 	"strings"
 	"syscall"
 
-	nettypes "github.com/containers/common/libnetwork/types"
-	"github.com/containers/image/v5/manifest"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/storage/types"
 	spec "github.com/opencontainers/runtime-spec/specs-go"
+	nettypes "go.podman.io/common/libnetwork/types"
+	"go.podman.io/image/v5/manifest"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/storage/types"
 )
 
 // LogConfig describes the logging characteristics for a container
@@ -26,6 +26,10 @@ type LogConfig struct {
 	// Size is the maximum size of the log file
 	// Optional.
 	Size int64 `json:"size,omitempty"`
+	// A set of log labels to apply
+	// Only available if LogDriver is set to "journald".
+	// Optional
+	Labels map[string]string `json:"labels,omitempty"`
 	// A set of options to accompany the log driver.
 	// Optional.
 	Options map[string]string `json:"options,omitempty"`
@@ -138,12 +142,12 @@ type ContainerBasicConfig struct {
 	// PidNS is the container's PID namespace.
 	// It defaults to private.
 	// Mandatory.
-	PidNS Namespace `json:"pidns,omitempty"`
+	PidNS Namespace `json:"pidns"`
 	// UtsNS is the container's UTS namespace.
 	// It defaults to private.
 	// Must be set to Private to set Hostname.
 	// Mandatory.
-	UtsNS Namespace `json:"utsns,omitempty"`
+	UtsNS Namespace `json:"utsns"`
 	// Hostname is the container's hostname. If not set, the hostname will
 	// not be modified (if UtsNS is not private) or will be set to the
 	// container ID (if UtsNS is private).
@@ -305,6 +309,8 @@ type ContainerStorageConfig struct {
 	// Image volumes bind-mount a container-image mount into the container.
 	// Optional.
 	ImageVolumes []*ImageVolume `json:"image_volumes,omitempty"`
+	// ArtifactVolumes volumes based on an existing artifact.
+	ArtifactVolumes []*ArtifactVolume `json:"artifact_volumes,omitempty"`
 	// Devices are devices that will be added to the container.
 	// Optional.
 	Devices []spec.LinuxDevice `json:"devices,omitempty"`
@@ -316,11 +322,15 @@ type ContainerStorageConfig struct {
 	DevicesFrom []string `json:"devices_from,omitempty"`
 	// HostDeviceList is used to recreate the mounted device on inherited containers
 	HostDeviceList []spec.LinuxDevice `json:"host_device_list,omitempty"`
+	// GPUs contains GPU device identifiers for CDI resolution.
+	// These will be resolved to full CDI device paths on the server side.
+	// Optional.
+	GPUs []string `json:"gpus,omitempty"`
 	// IpcNS is the container's IPC namespace.
 	// Default is private.
 	// Conflicts with ShmSize if not set to private.
 	// Mandatory.
-	IpcNS Namespace `json:"ipcns,omitempty"`
+	IpcNS Namespace `json:"ipcns"`
 	// ShmSize is the size of the tmpfs to mount in at /dev/shm, in bytes.
 	// Conflicts with ShmSize if IpcNS is not private.
 	// Optional.
@@ -416,7 +426,7 @@ type ContainerSecurityConfig struct {
 	// created.
 	// If set to private, IDMappings must be set.
 	// Mandatory.
-	UserNS Namespace `json:"userns,omitempty"`
+	UserNS Namespace `json:"userns"`
 	// IDMappings are UID and GID mappings that will be used by user
 	// namespaces.
 	// Required if UserNS is private.
@@ -456,7 +466,7 @@ type ContainerCgroupConfig struct {
 	// CgroupNS is the container's cgroup namespace.
 	// It defaults to private.
 	// Mandatory.
-	CgroupNS Namespace `json:"cgroupns,omitempty"`
+	CgroupNS Namespace `json:"cgroupns"`
 	// CgroupsMode sets a policy for how cgroups will be created for the
 	// container, including the ability to disable creation entirely.
 	// Optional.
@@ -473,16 +483,16 @@ type ContainerNetworkConfig struct {
 	// NetNS is the configuration to use for the container's network
 	// namespace.
 	// Mandatory.
-	NetNS Namespace `json:"netns,omitempty"`
+	NetNS Namespace `json:"netns"`
 	// PortBindings is a set of ports to map into the container.
-	// Only available if NetNS is set to bridge, slirp, or pasta.
+	// Only available if NetNS is set to bridge or pasta.
 	// Optional.
 	PortMappings []nettypes.PortMapping `json:"portmappings,omitempty"`
 	// PublishExposedPorts will publish ports specified in the image to
 	// random unused ports (guaranteed to be above 1024) on the host.
 	// This is based on ports set in Expose below, and any ports specified
 	// by the Image (if one is given).
-	// Only available if NetNS is set to Bridge or Slirp.
+	// Only available if NetNS is set to Bridge or Pasta.
 	// Optional.
 	PublishExposedPorts *bool `json:"publish_image_ports,omitempty"`
 	// Expose is a number of ports that will be forwarded to the container
@@ -491,7 +501,7 @@ type ContainerNetworkConfig struct {
 	// protocol i.e map[uint16]string. Allowed protocols are "tcp", "udp", and "sctp", or some
 	// combination of the three separated by commas.
 	// If protocol is set to "" we will assume TCP.
-	// Only available if NetNS is set to Bridge or Slirp, and
+	// Only available if NetNS is set to Bridge or Pasta, and
 	// PublishExposedPorts is set.
 	// Optional.
 	Expose map[uint16]string `json:"expose,omitempty"`
@@ -503,14 +513,11 @@ type ContainerNetworkConfig struct {
 	// will be joined to the default network.
 	// Optional.
 	Networks map[string]nettypes.PerNetworkOptions
-	// CNINetworks is a list of CNI networks to join the container to.
-	// If this list is empty, the default CNI network will be joined
-	// instead. If at least one entry is present, we will not join the
-	// default network (unless it is part of this list).
-	// Only available if NetNS is set to bridge.
+	// The order that networks will be configured in.
+	// If not set, alphabetical order based on network name will be used.
+	// If set: Must be the same length as Networks and its contents must be every key in the Networks map.
 	// Optional.
-	// Deprecated: as of podman 4.0 use "Networks" instead.
-	CNINetworks []string `json:"cni_networks,omitempty"`
+	NetworkOrder []string `json:"networkOrder,omitempty"`
 	// UseImageResolvConf indicates that resolv.conf should not be managed
 	// by Podman, but instead sourced from the image.
 	// Conflicts with DNSServer, DNSSearch, DNSOption.
@@ -534,16 +541,19 @@ type ContainerNetworkConfig struct {
 	// Conflicts with UseImageResolvConf.
 	// Optional.
 	DNSOptions []string `json:"dns_option,omitempty"`
+	// UseImageHostname indicates that /etc/hostname should not be managed by
+	// Podman, and instead sourced from the image.
+	// Optional.
+	UseImageHostname *bool `json:"use_image_hostname,omitempty"`
 	// UseImageHosts indicates that /etc/hosts should not be managed by
 	// Podman, and instead sourced from the image.
 	// Conflicts with HostAdd.
 	// Optional.
 	UseImageHosts *bool `json:"use_image_hosts,omitempty"`
-	// BaseHostsFile is the path to a hosts file, the entries from this file
-	// are added to the containers hosts file. As special value "image" is
-	// allowed which uses the /etc/hosts file from within the image and "none"
-	// which uses no base file at all. If it is empty we should default
-	// to the base_hosts_file configuration in containers.conf.
+	// BaseHostsFile is the base file to create the `/etc/hosts` file inside the container.
+	// This must either be an absolute path to a file on the host system, or one of the
+	// special flags `image` or `none`.
+	// If it is empty it defaults to the base_hosts_file configuration in containers.conf.
 	// Optional.
 	BaseHostsFile string `json:"base_hosts_file,omitempty"`
 	// HostAdd is a set of hosts which will be added to the container's
@@ -599,14 +609,17 @@ type ContainerHealthCheckConfig struct {
 	// Requires that HealthConfig be set.
 	// Optional.
 	StartupHealthConfig *define.StartupHealthCheck `json:"startupHealthConfig,omitempty"`
-	// HealthLogDestination defines the destination where the log is stored
-	HealthLogDestination string `json:"healthLogDestination,omitempty"`
+	// HealthLogDestination defines the destination where the log is stored.
+	// TODO (6.0): In next major release convert it to pointer and use omitempty
+	HealthLogDestination string `json:"healthLogDestination"`
 	// HealthMaxLogCount is maximum number of attempts in the HealthCheck log file.
-	// ('0' value means an infinite number of attempts in the log file)
-	HealthMaxLogCount uint `json:"healthMaxLogCount,omitempty"`
+	// ('0' value means an infinite number of attempts in the log file).
+	// TODO (6.0): In next major release convert it to pointer and use omitempty
+	HealthMaxLogCount uint `json:"healthMaxLogCount"`
 	// HealthMaxLogSize is the maximum length in characters of stored HealthCheck log
-	// ("0" value means an infinite log length)
-	HealthMaxLogSize uint `json:"healthMaxLogSize,omitempty"`
+	// ("0" value means an infinite log length).
+	// TODO (6.0): In next major release convert it to pointer and use omitempty
+	HealthMaxLogSize uint `json:"healthMaxLogSize"`
 }
 
 // SpecGenerator creates an OCI spec and Libpod configuration options to create
@@ -621,8 +634,7 @@ type SpecGenerator struct {
 	ContainerResourceConfig
 	ContainerHealthCheckConfig
 
-	//nolint:unused // this is needed for the local client but golangci-lint
-	// does not seems to happy when we test the remote stub
+	//nolint:nolintlint,unused // "unused" complains when remote build tag is used, "nolintlint" complains otherwise.
 	cacheLibImage
 }
 
@@ -637,6 +649,7 @@ func (s *SpecGenerator) IsInitContainer() bool {
 	return len(s.InitContainerType) != 0
 }
 
+// swagger:model SpecgenSecret
 type Secret struct {
 	Source string
 	Target string
@@ -687,7 +700,7 @@ func NewSpecGenerator(arg string, rootfs bool) *SpecGenerator {
 	}
 }
 
-// NewSpecGenerator returns a SpecGenerator struct given one of two mandatory inputs
+// NewSpecGeneratorWithRootfs returns a SpecGenerator configured with the given root filesystem.
 func NewSpecGeneratorWithRootfs(rootfs string) *SpecGenerator {
 	csc := ContainerStorageConfig{Rootfs: rootfs}
 	return &SpecGenerator{

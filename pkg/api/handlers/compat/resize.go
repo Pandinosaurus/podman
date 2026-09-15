@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package compat
 
@@ -8,12 +8,12 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/containers/common/pkg/resize"
-	"github.com/containers/podman/v5/libpod"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/api/handlers/utils"
-	api "github.com/containers/podman/v5/pkg/api/types"
 	"github.com/gorilla/mux"
+	"go.podman.io/common/pkg/resize"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/api/handlers/utils"
+	api "go.podman.io/podman/v6/pkg/api/types"
 )
 
 func ResizeTTY(w http.ResponseWriter, r *http.Request) {

@@ -5,15 +5,15 @@ package integration
 import (
 	"fmt"
 	"path/filepath"
+	"runtime"
 
-	. "github.com/containers/podman/v5/test/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	. "github.com/onsi/gomega/gexec"
+	. "go.podman.io/podman/v6/test/utils"
 )
 
 var _ = Describe("Podman load", func() {
-
 	BeforeEach(func() {
 		podmanTest.AddImageToRWStore(ALPINE)
 	})
@@ -85,7 +85,7 @@ var _ = Describe("Podman load", func() {
 		rmi.WaitWithDefaultTimeout()
 		Expect(rmi).Should(ExitCleanly())
 
-		result := podmanTest.Podman([]string{"load", "-q", "--signature-policy", "/etc/containers/policy.json", "-i", outfile})
+		result := podmanTest.Podman([]string{"load", "-q", "--signature-policy", createPolicyJSONFile(), "-i", outfile})
 		result.WaitWithDefaultTimeout()
 		if IsRemote() {
 			Expect(result).To(ExitWithError(125, "unknown flag: --signature-policy"))
@@ -146,7 +146,7 @@ var _ = Describe("Podman load", func() {
 	})
 
 	It("podman load multiple tags", func() {
-		if podmanTest.Host.Arch == "ppc64le" {
+		if runtime.GOARCH == "ppc64le" {
 			Skip("skip on ppc64le")
 		}
 		outfile := filepath.Join(podmanTest.TempDir, "alpine.tar")

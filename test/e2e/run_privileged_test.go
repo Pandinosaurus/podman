@@ -7,10 +7,10 @@ import (
 	"strconv"
 	"strings"
 
-	. "github.com/containers/podman/v5/test/utils"
+	"github.com/moby/sys/capability"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	"github.com/syndtr/gocapability/capability"
+	. "go.podman.io/podman/v6/test/utils"
 )
 
 // helper function for confirming that container capabilities are equal
@@ -32,12 +32,11 @@ func containerCapMatchesHost(ctrCap string, hostCap string) {
 	// and host caps must always be a superset (inclusive) of container
 	Expect(hostCapN).To(BeNumerically(">", 0), "host cap %q should be nonzero", hostCap)
 	Expect(hostCapN).To(BeNumerically(">=", ctrCapN), "host cap %q should never be less than container cap %q", hostCap, ctrCap)
-	hostCapMasked := hostCapN & (1<<len(capability.List()) - 1)
+	hostCapMasked := hostCapN & (1<<len(capability.ListKnown()) - 1)
 	Expect(ctrCapN).To(Equal(hostCapMasked), "container cap %q is not a subset of host cap %q", ctrCap, hostCap)
 }
 
 var _ = Describe("Podman privileged container tests", func() {
-
 	It("podman privileged make sure sys is mounted rw", func() {
 		session := podmanTest.Podman([]string{"run", "--privileged", BB, "mount"})
 		session.WaitWithDefaultTimeout()
@@ -123,7 +122,7 @@ var _ = Describe("Podman privileged container tests", func() {
 		mknod.WaitWithDefaultTimeout()
 		Expect(mknod).Should(ExitCleanly())
 
-		session := podmanTest.Podman([]string{"run", "--name=" + containerName, "--privileged", fedoraMinimal, "ls", "/dev"})
+		session := podmanTest.Podman([]string{"run", "--name=" + containerName, "--privileged", FEDORA_MINIMAL, "ls", "/dev"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 
@@ -144,17 +143,23 @@ var _ = Describe("Podman privileged container tests", func() {
 			Skip("Can't determine NoNewPrivs")
 		}
 
+		fields := strings.Fields(cap.OutputToString())
+		if fields[1] != "0" {
+			Skip("NoNewPrivs set")
+		}
+
 		session := podmanTest.Podman([]string{"run", BB, "grep", "NoNewPrivs", "/proc/self/status"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 
-		privs := strings.Split(session.OutputToString(), ":")
+		privs := strings.Fields(session.OutputToString())
+		Expect(privs[1]).To(Equal("0"), "NoNewPrivs should be 0 without security-opt")
+
 		session = podmanTest.Podman([]string{"run", "--security-opt", "no-new-privileges", BB, "grep", "NoNewPrivs", "/proc/self/status"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 
-		noprivs := strings.Split(session.OutputToString(), ":")
-		Expect(privs[1]).To(Not(Equal(noprivs[1])))
+		noprivs := strings.Fields(session.OutputToString())
+		Expect(noprivs[1]).To(Equal("1"), "NoNewPrivs should be 1 with security-opt")
 	})
-
 })

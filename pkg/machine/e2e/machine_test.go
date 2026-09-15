@@ -12,13 +12,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/podman/v5/pkg/machine/define"
-	"github.com/containers/podman/v5/pkg/machine/provider"
-	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
-	"github.com/containers/podman/v5/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/podman/v6/pkg/machine/define"
+	"go.podman.io/podman/v6/pkg/machine/provider"
+	"go.podman.io/podman/v6/pkg/machine/vmconfigs"
+	"go.podman.io/podman/v6/utils"
 )
 
 func TestMain(m *testing.M) {
@@ -72,6 +72,9 @@ var _ = BeforeSuite(func() {
 	if pullError != nil {
 		Fail(fmt.Sprintf("failed to pull disk: %q", pullError))
 	}
+
+	fmt.Println("Running platform specific set-up")
+	initPlatform()
 })
 
 type timing struct {
@@ -96,7 +99,22 @@ var _ = SynchronizedAfterSuite(func() {}, func() {
 	for _, t := range timings {
 		GinkgoWriter.Printf("%s\t\t%f seconds\n", t.name, t.length.Seconds())
 	}
+	fmt.Println("Running platform specific cleanup")
+	cleanupPlatform()
 })
+
+// The config does not matter to much for our testing, however we
+// would like to be sure podman machine is not effected by certain
+// settings as we should be using full URLs anywhere.
+// https://github.com/containers/podman/issues/24567
+const sshConfigContent = `
+Host *
+  User NOT_REAL
+  Port 9999
+Host 127.0.0.1
+  User blah
+  IdentityFile ~/.ssh/id_ed25519
+`
 
 func setup() (string, *machineTestBuilder) {
 	// Set TMPDIR if this needs a new directory
@@ -111,14 +129,14 @@ func setup() (string, *machineTestBuilder) {
 	if err != nil {
 		Fail(fmt.Sprintf("failed to create home directory: %q", err))
 	}
-	if err := os.MkdirAll(filepath.Join(homeDir, ".ssh"), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Join(homeDir, ".ssh"), 0o700); err != nil {
 		Fail(fmt.Sprintf("failed to create ssh dir: %q", err))
 	}
 	sshConfig, err := os.Create(filepath.Join(homeDir, ".ssh", "config"))
 	if err != nil {
 		Fail(fmt.Sprintf("failed to create ssh config: %q", err))
 	}
-	if _, err := sshConfig.WriteString("IdentitiesOnly=yes"); err != nil {
+	if _, err := sshConfig.WriteString(sshConfigContent); err != nil {
 		Fail(fmt.Sprintf("failed to write ssh config: %q", err))
 	}
 	if err := sshConfig.Close(); err != nil {
@@ -132,6 +150,9 @@ func setup() (string, *machineTestBuilder) {
 			Fail("unable to set home dir on windows")
 		}
 	}
+	if err := os.Setenv("XDG_CONFIG_HOME", filepath.Join(homeDir, ".config")); err != nil {
+		Fail("failed to set XDG_CONFIG_HOME dir")
+	}
 	if err := os.Setenv("XDG_RUNTIME_DIR", homeDir); err != nil {
 		Fail("failed to set xdg_runtime dir")
 	}
@@ -140,6 +161,22 @@ func setup() (string, *machineTestBuilder) {
 	}
 	if err := os.Setenv("PODMAN_CONNECTIONS_CONF", filepath.Join(homeDir, "connections.json")); err != nil {
 		Fail("failed to set PODMAN_CONNECTIONS_CONF")
+	}
+	if err := os.Setenv("PODMAN_COMPOSE_WARNING_LOGS", "false"); err != nil {
+		Fail("failed to set PODMAN_COMPOSE_WARNING_LOGS")
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		Fail("unable to get working directory")
+	}
+	var fakeComposeBin string
+	if runtime.GOOS != "windows" {
+		fakeComposeBin = "fake_compose"
+	} else {
+		fakeComposeBin = "fake_compose.bat"
+	}
+	if err := os.Setenv("PODMAN_COMPOSE_PROVIDER", filepath.Join(cwd, "scripts", fakeComposeBin)); err != nil {
+		Fail("failed to set PODMAN_COMPOSE_PROVIDER")
 	}
 	mb, err := newMB()
 	if err != nil {

@@ -8,17 +8,17 @@ import (
 	"os"
 	"strings"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/parse"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/hashicorp/go-multierror"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/parse"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 var (
-	importDescription = `Create a container image from the contents of the specified tarball (.tar, .tar.gz, .tgz, .bzip, .tar.xz, .txz).
+	importDescription = `Create a container image from the contents of the specified tarball (.tar, .tar.gz, .tgz, .bzip, .tar.xz, .txz, .tar.zst).
 
   Note remote tar balls can be specified, via web address.
   Optionally tag the image. You can specify the instructions using the --change option.`
@@ -30,8 +30,8 @@ var (
 		Args:              cobra.RangeArgs(1, 2),
 		ValidArgsFunction: common.AutocompleteDefaultOneArg,
 		Example: `podman import https://example.com/ctr.tar url-image
-  cat ctr.tar | podman -q import --message "importing the ctr.tar tarball" - image-imported
-  cat ctr.tar | podman import -`,
+cat ctr.tar | podman -q import --message "importing the ctr.tar tarball" - image-imported
+cat ctr.tar | podman import -`,
 	}
 
 	imageImportCommand = &cobra.Command{
@@ -42,14 +42,12 @@ var (
 		Args:              importCommand.Args,
 		ValidArgsFunction: importCommand.ValidArgsFunction,
 		Example: `podman image import https://example.com/ctr.tar url-image
-  cat ctr.tar | podman -q image import --message "importing the ctr.tar tarball" - image-imported
-  cat ctr.tar | podman image import -`,
+cat ctr.tar | podman -q image import --message "importing the ctr.tar tarball" - image-imported
+cat ctr.tar | podman image import -`,
 	}
 )
 
-var (
-	importOpts entities.ImageImportOptions
-)
+var importOpts entities.ImageImportOptions
 
 func init() {
 	registry.Commands = append(registry.Commands, registry.CliCommand{
@@ -94,7 +92,7 @@ func importFlags(cmd *cobra.Command) {
 	}
 }
 
-func importCon(cmd *cobra.Command, args []string) error {
+func importCon(_ *cobra.Command, args []string) error {
 	var (
 		source    string
 		reference string
@@ -117,20 +115,20 @@ func importCon(cmd *cobra.Command, args []string) error {
 	if source == "-" {
 		outFile, err := os.CreateTemp("", "podman")
 		if err != nil {
-			return fmt.Errorf("creating file %v", err)
+			return fmt.Errorf("creating file %w", err)
 		}
 		defer os.Remove(outFile.Name())
 		defer outFile.Close()
 
 		_, err = io.Copy(outFile, os.Stdin)
 		if err != nil {
-			return fmt.Errorf("copying file %v", err)
+			return fmt.Errorf("copying file %w", err)
 		}
 		source = outFile.Name()
 	}
 
 	errFileName := parse.ValidateFileName(source)
-	errURL := parse.ValidURL(source)
+	errURL := parse.ValidWebURL(source)
 	if errURL == nil {
 		importOpts.SourceIsURL = true
 	}

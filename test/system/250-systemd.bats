@@ -31,6 +31,7 @@ function teardown() {
             echo "# WARNING: systemctl stop failed in teardown: $output" >&3
         fi
 
+        run systemctl reset-failed "$SERVICE_NAME"
         rm -f "$UNIT_FILE"
         systemctl daemon-reload
     fi
@@ -54,6 +55,7 @@ function mv-safely() {
 
 # Helper to start a systemd service running a container
 function service_setup() {
+    local extra_args="$1"
     # January 2024: we can no longer do "run_podman generate systemd" followed
     # by "echo $output >file", because generate-systemd is deprecated and now
     # says so loudly, to stderr, with no way to silence it. Since BATS gloms
@@ -64,6 +66,7 @@ function service_setup() {
         run_podman generate systemd --files --name \
                -e http_proxy -e https_proxy -e no_proxy \
                -e HTTP_PROXY -e HTTPS_PROXY -e NO_PROXY \
+               $extra_args \
                --new $cname
         mv-safely "container-$cname.service" $UNIT_FILE
     )
@@ -96,6 +99,8 @@ function service_cleanup() {
 
     run systemctl disable "$SERVICE_NAME"
     assert $status -eq 0 "Error disabling systemd unit $SERVICE_NAME: $output"
+
+    run systemctl reset-failed "$SERVICE_NAME"
 
     rm -f "$UNIT_FILE"
     systemctl daemon-reload
@@ -272,6 +277,8 @@ LISTEN_FDNAMES=listen_fdnames" | sort)
     run systemctl stop "$INSTANCE"
     assert $status -eq 0 "Error stopping systemd unit $INSTANCE: $output"
 
+    run systemctl reset-failed "$INSTANCE"
+
     rm -f $TEMPLATE_FILE
     systemctl daemon-reload
 }
@@ -311,13 +318,6 @@ LISTEN_FDNAMES=listen_fdnames" | sort)
     run_podman rm $cname
 }
 
-@test "podman --systemd fails on cgroup v1 with a private cgroupns" {
-    skip_if_cgroupsv2
-
-    run_podman 126 run --systemd=always --cgroupns=private $IMAGE true
-    assert "$output" =~ ".*cgroup namespace is not supported with cgroup v1 and systemd mode"
-}
-
 # https://github.com/containers/podman/issues/13153
 @test "podman rootless-netns processes should be in different cgroup" {
     is_rootless || skip "only meaningful for rootless"
@@ -342,7 +342,7 @@ LISTEN_FDNAMES=listen_fdnames" | sort)
     pasta_iface=$(default_ifname 4)
     assert "$pasta_iface" != "" "pasta_iface is set"
 
-    # now check that the rootless netns slirp4netns process is still alive and working
+    # now check that the rootless netns pasta process is still alive and working
     run_podman unshare --rootless-netns ip addr
     is "$output" ".*$pasta_iface.*" "pasta interface exists in the netns"
     run_podman exec $cname2 nslookup google.com
@@ -361,7 +361,7 @@ LISTEN_FDNAMES=listen_fdnames" | sort)
                $IMAGE /home/podman/pause
 
     # run container in systemd unit
-    service_setup
+    service_setup "-e DISABLE_HC_SYSTEMD=true"
 
     run_podman container inspect $cname --format "{{.ID}}"
     oldID="$output"

@@ -6,16 +6,16 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/containers/common/libimage/define"
-	"github.com/containers/image/v5/types"
-	"github.com/containers/podman/v5/pkg/bindings/images"
-	"github.com/containers/podman/v5/pkg/bindings/manifests"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	envLib "github.com/containers/podman/v5/pkg/env"
+	"go.podman.io/common/libimage/define"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/podman/v6/pkg/bindings/images"
+	"go.podman.io/podman/v6/pkg/bindings/manifests"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	envLib "go.podman.io/podman/v6/pkg/env"
 )
 
 // ManifestCreate implements manifest create via ImageEngine
-func (ir *ImageEngine) ManifestCreate(ctx context.Context, name string, images []string, opts entities.ManifestCreateOptions) (string, error) {
+func (ir *ImageEngine) ManifestCreate(_ context.Context, name string, images []string, opts entities.ManifestCreateOptions) (string, error) {
 	options := new(manifests.CreateOptions).WithAll(opts.All).WithAmend(opts.Amend).WithAnnotation(opts.Annotations)
 	imageID, err := manifests.Create(ir.ClientCtx, name, images, options)
 	if err != nil {
@@ -25,7 +25,7 @@ func (ir *ImageEngine) ManifestCreate(ctx context.Context, name string, images [
 }
 
 // ManifestExists checks if a manifest list with the given name exists
-func (ir *ImageEngine) ManifestExists(ctx context.Context, name string) (*entities.BoolReport, error) {
+func (ir *ImageEngine) ManifestExists(_ context.Context, name string) (*entities.BoolReport, error) {
 	exists, err := manifests.Exists(ir.ClientCtx, name, nil)
 	if err != nil {
 		return nil, err
@@ -34,7 +34,7 @@ func (ir *ImageEngine) ManifestExists(ctx context.Context, name string) (*entiti
 }
 
 // ManifestInspect returns contents of manifest list with given name
-func (ir *ImageEngine) ManifestInspect(ctx context.Context, name string, opts entities.ManifestInspectOptions) (*define.ManifestListData, error) {
+func (ir *ImageEngine) ManifestInspect(_ context.Context, name string, opts entities.ManifestInspectOptions) (*define.ManifestListData, error) {
 	options := new(manifests.InspectOptions).WithAuthfile(opts.Authfile)
 	if s := opts.SkipTLSVerify; s != types.OptionalBoolUndefined {
 		if s == types.OptionalBoolTrue {
@@ -117,7 +117,10 @@ func (ir *ImageEngine) ManifestAddArtifact(_ context.Context, name string, files
 	options.WithType(opts.Type).WithConfigType(opts.ConfigType).WithLayerType(opts.LayerType)
 	options.WithConfig(opts.Config)
 	options.WithExcludeTitles(opts.ExcludeTitles).WithSubject(opts.Subject)
-	options.WithAnnotations(opts.Annotations)
+	if opts.IndexSubject != "" {
+		options.WithIndexSubject(opts.IndexSubject)
+	}
+	options.WithAnnotations(opts.ArtifactAnnotations)
 	options.WithFiles(files)
 	id, err := manifests.AddArtifact(ir.ClientCtx, name, options)
 	if err != nil {
@@ -127,22 +130,24 @@ func (ir *ImageEngine) ManifestAddArtifact(_ context.Context, name string, files
 }
 
 // ManifestAnnotate updates an entry of the manifest list
-func (ir *ImageEngine) ManifestAnnotate(ctx context.Context, name, images string, opts entities.ManifestAnnotateOptions) (string, error) {
+func (ir *ImageEngine) ManifestAnnotate(_ context.Context, name, images string, opts entities.ManifestAnnotateOptions) (string, error) {
 	options := new(manifests.ModifyOptions).WithArch(opts.Arch).WithVariant(opts.Variant)
 	options.WithFeatures(opts.Features).WithOS(opts.OS).WithOSVersion(opts.OSVersion)
-
-	if len(opts.Annotation) != 0 {
-		annotations := make(map[string]string)
-		for _, annotationSpec := range opts.Annotation {
-			key, val, hasVal := strings.Cut(annotationSpec, "=")
-			if !hasVal {
-				return "", fmt.Errorf("no value given for annotation %q", key)
-			}
-			annotations[key] = val
-		}
-		opts.Annotations = envLib.Join(opts.Annotations, annotations)
+	if opts.IndexSubject != "" {
+		options.WithIndexSubject(opts.IndexSubject)
 	}
-	options.WithAnnotations(opts.Annotations)
+
+	annotations, err := mergeAnnotations(opts.Annotations, opts.Annotation)
+	if err != nil {
+		return "", err
+	}
+	options.WithAnnotations(annotations)
+
+	indexAnnotations, err := mergeAnnotations(opts.IndexAnnotations, opts.IndexAnnotation)
+	if err != nil {
+		return "", err
+	}
+	options.WithIndexAnnotations(indexAnnotations)
 
 	id, err := manifests.Annotate(ir.ClientCtx, name, []string{images}, options)
 	if err != nil {
@@ -151,8 +156,26 @@ func (ir *ImageEngine) ManifestAnnotate(ctx context.Context, name, images string
 	return id, nil
 }
 
+func mergeAnnotations(preferred map[string]string, aux []string) (map[string]string, error) {
+	if len(aux) != 0 {
+		auxAnnotations := make(map[string]string)
+		for _, annotationSpec := range aux {
+			key, val, hasVal := strings.Cut(annotationSpec, "=")
+			if !hasVal {
+				return nil, fmt.Errorf("no value given for annotation %q", key)
+			}
+			auxAnnotations[key] = val
+		}
+		if preferred == nil {
+			preferred = make(map[string]string)
+		}
+		preferred = envLib.Join(auxAnnotations, preferred)
+	}
+	return preferred, nil
+}
+
 // ManifestRemoveDigest removes the digest from manifest list
-func (ir *ImageEngine) ManifestRemoveDigest(ctx context.Context, name string, image string) (string, error) {
+func (ir *ImageEngine) ManifestRemoveDigest(_ context.Context, name string, image string) (string, error) {
 	updatedListID, err := manifests.Remove(ir.ClientCtx, name, image, nil)
 	if err != nil {
 		return updatedListID, fmt.Errorf("removing from manifest %s: %w", name, err)
@@ -161,8 +184,8 @@ func (ir *ImageEngine) ManifestRemoveDigest(ctx context.Context, name string, im
 }
 
 // ManifestRm removes the specified manifest list from storage
-func (ir *ImageEngine) ManifestRm(ctx context.Context, names []string) (*entities.ImageRemoveReport, []error) {
-	return ir.Remove(ctx, names, entities.ImageRemoveOptions{LookupManifest: true})
+func (ir *ImageEngine) ManifestRm(ctx context.Context, names []string, opts entities.ImageRemoveOptions) (report *entities.ImageRemoveReport, rmErrors []error) {
+	return ir.Remove(ctx, names, entities.ImageRemoveOptions{LookupManifest: true, Ignore: opts.Ignore})
 }
 
 // ManifestPush pushes a manifest list or image index to the destination
@@ -170,10 +193,19 @@ func (ir *ImageEngine) ManifestPush(ctx context.Context, name, destination strin
 	if opts.Signers != nil {
 		return "", fmt.Errorf("forwarding Signers is not supported for remote clients")
 	}
+	if opts.SignBy != "" || opts.SignBySigstorePrivateKeyFile != "" {
+		return "", fmt.Errorf("signing is not supported for remote clients")
+	}
 
 	options := new(images.PushOptions)
 	options.WithUsername(opts.Username).WithPassword(opts.Password).WithAuthfile(opts.Authfile).WithRemoveSignatures(opts.RemoveSignatures).WithAll(opts.All).WithFormat(opts.Format).WithCompressionFormat(opts.CompressionFormat).WithQuiet(opts.Quiet).WithProgressWriter(opts.Writer).WithAddCompression(opts.AddCompression).WithForceCompressionFormat(opts.ForceCompressionFormat)
 
+	if opts.Retry != nil {
+		options.WithRetry(*opts.Retry)
+	}
+	if opts.RetryDelay != "" {
+		options.WithRetryDelay(opts.RetryDelay)
+	}
 	if s := opts.SkipTLSVerify; s != types.OptionalBoolUndefined {
 		if s == types.OptionalBoolTrue {
 			options.WithSkipTLSVerify(true)
@@ -196,7 +228,7 @@ func (ir *ImageEngine) ManifestPush(ctx context.Context, name, destination strin
 }
 
 // ManifestListClear clears out all instances from a manifest list
-func (ir *ImageEngine) ManifestListClear(ctx context.Context, name string) (string, error) {
+func (ir *ImageEngine) ManifestListClear(_ context.Context, name string) (string, error) {
 	listContents, err := manifests.InspectListData(ir.ClientCtx, name, &manifests.InspectOptions{})
 	if err != nil {
 		return "", err

@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package kube
 
@@ -6,13 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 
-	"github.com/containers/common/pkg/parse"
-	"github.com/containers/common/pkg/secrets"
-	"github.com/containers/podman/v5/libpod"
-	v1 "github.com/containers/podman/v5/pkg/k8s.io/api/core/v1"
-	"github.com/containers/storage/pkg/fileutils"
+	"go.podman.io/common/pkg/parse"
+	"go.podman.io/common/pkg/secrets"
+	"go.podman.io/podman/v6/libpod"
+	v1 "go.podman.io/podman/v6/pkg/k8s.io/api/core/v1"
+	"go.podman.io/storage/pkg/fileutils"
 
 	"github.com/sirupsen/logrus"
 	"sigs.k8s.io/yaml"
@@ -20,12 +21,11 @@ import (
 
 const (
 	// https://kubernetes.io/docs/concepts/storage/volumes/#hostpath
-	kubeDirectoryPermission = 0755
+	kubeDirectoryPermission = 0o755
 	// https://kubernetes.io/docs/concepts/storage/volumes/#hostpath
-	kubeFilePermission = 0644
+	kubeFilePermission = 0o644
 )
 
-//nolint:revive
 type KubeVolumeType int
 
 const (
@@ -40,7 +40,6 @@ const (
 	KubeVolumeTypeImage
 )
 
-//nolint:revive
 type KubeVolume struct {
 	// Type of volume to create
 	Type KubeVolumeType
@@ -59,6 +58,8 @@ type KubeVolume struct {
 	DefaultMode int32
 	// Used for volumes of type Image. Ignored for other volumes types.
 	ImagePullPolicy v1.PullPolicy
+	// Size limit in bytes, 0 when unset. Only used for EmptyDirTmpfs.
+	SizeLimit int64
 }
 
 // Create a KubeVolume from an HostPathVolumeSource
@@ -169,9 +170,8 @@ func VolumeFromSecret(secretSource *v1.SecretVolumeSource, secretsManager *secre
 
 	secret := &v1.Secret{}
 
-	err = yaml.Unmarshal(secretByte, secret)
-	if err != nil {
-		return nil, err
+	if err := yaml.Unmarshal(secretByte, secret); err != nil {
+		return nil, fmt.Errorf("only secrets created via the kube yaml file are supported: %w", err)
 	}
 
 	// If there are Items specified in the volumeSource, that overwrites the Data from the Secret
@@ -185,9 +185,7 @@ func VolumeFromSecret(secretSource *v1.SecretVolumeSource, secretsManager *secre
 		}
 	} else {
 		// add key: value pairs to the items array
-		for key, entry := range secret.Data {
-			kv.Items[key] = entry
-		}
+		maps.Copy(kv.Items, secret.Data)
 
 		for key, entry := range secret.StringData {
 			kv.Items[key] = []byte(entry)
@@ -260,9 +258,7 @@ func VolumeFromConfigMap(configMapVolumeSource *v1.ConfigMapVolumeSource, config
 		for k, v := range configMap.Data {
 			kv.Items[k] = []byte(v)
 		}
-		for k, v := range configMap.BinaryData {
-			kv.Items[k] = v
-		}
+		maps.Copy(kv.Items, configMap.BinaryData)
 	}
 	return kv, nil
 }
@@ -270,10 +266,14 @@ func VolumeFromConfigMap(configMapVolumeSource *v1.ConfigMapVolumeSource, config
 // Create a kubeVolume for an emptyDir volume
 func VolumeFromEmptyDir(emptyDirVolumeSource *v1.EmptyDirVolumeSource, name string) (*KubeVolume, error) {
 	if emptyDirVolumeSource.Medium == v1.StorageMediumMemory {
-		return &KubeVolume{
+		kv := &KubeVolume{
 			Type:   KubeVolumeTypeEmptyDirTmpfs,
 			Source: name,
-		}, nil
+		}
+		if emptyDirVolumeSource.SizeLimit != nil {
+			kv.SizeLimit = emptyDirVolumeSource.SizeLimit.Value()
+		}
+		return kv, nil
 	} else {
 		return &KubeVolume{
 			Type:   KubeVolumeTypeEmptyDir,
@@ -282,7 +282,7 @@ func VolumeFromEmptyDir(emptyDirVolumeSource *v1.EmptyDirVolumeSource, name stri
 	}
 }
 
-func VolumeFromImage(imageVolumeSource *v1.ImageVolumeSource, name string) (*KubeVolume, error) {
+func VolumeFromImage(imageVolumeSource *v1.ImageVolumeSource, _ string) (*KubeVolume, error) {
 	return &KubeVolume{
 		Type:            KubeVolumeTypeImage,
 		Source:          imageVolumeSource.Reference,

@@ -3,17 +3,18 @@
 package libpod
 
 import (
+	"errors"
 	"fmt"
 	"path"
 	"path/filepath"
 	"strings"
 
-	"github.com/containers/common/pkg/cgroups"
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/rootless"
 	spec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/pkg/cgroups"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/rootless"
 )
 
 func (r *Runtime) platformMakePod(pod *Pod, resourceLimits *spec.LinuxResources) (string, error) {
@@ -122,7 +123,7 @@ func (p *Pod) removePodCgroup() error {
 		// hard - instead, just log errors.
 		conmonCgroupPath := filepath.Join(p.state.CgroupPath, "conmon")
 		conmonCgroup, err := cgroups.Load(conmonCgroupPath)
-		if err != nil && err != cgroups.ErrCgroupDeleted && err != cgroups.ErrCgroupV1Rootless {
+		if err != nil && !errors.Is(err, cgroups.ErrCgroupDeleted) {
 			return fmt.Errorf("retrieving pod %s conmon cgroup: %w", p.ID(), err)
 		}
 		if err == nil {
@@ -131,7 +132,7 @@ func (p *Pod) removePodCgroup() error {
 			}
 		}
 		cgroup, err := cgroups.Load(p.state.CgroupPath)
-		if err != nil && err != cgroups.ErrCgroupDeleted && err != cgroups.ErrCgroupV1Rootless {
+		if err != nil && !errors.Is(err, cgroups.ErrCgroupDeleted) {
 			return fmt.Errorf("retrieving pod %s cgroup: %w", p.ID(), err)
 		}
 		if err == nil {

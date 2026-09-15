@@ -8,8 +8,9 @@ type setMachine struct {
 	cpus               *uint
 	diskSize           *uint
 	memory             *uint
-	rootful            bool
+	rootful            *bool
 	userModeNetworking bool
+	importNativeCA     bool
 
 	cmd []string
 }
@@ -25,11 +26,18 @@ func (i *setMachine) buildCmd(m *machineTestBuilder) []string {
 	if i.memory != nil {
 		cmd = append(cmd, "--memory", strconv.Itoa(int(*i.memory)))
 	}
-	if i.rootful {
-		cmd = append(cmd, "--rootful")
+	if i.rootful != nil {
+		if *i.rootful {
+			cmd = append(cmd, "--rootful")
+		} else {
+			cmd = append(cmd, "--rootful=false")
+		}
 	}
 	if i.userModeNetworking {
 		cmd = append(cmd, "--user-mode-networking")
+	}
+	if i.importNativeCA {
+		cmd = append(cmd, "--import-native-ca")
 	}
 	cmd = append(cmd, m.name)
 	i.cmd = cmd
@@ -40,6 +48,7 @@ func (i *setMachine) withCPUs(num uint) *setMachine {
 	i.cpus = &num
 	return i
 }
+
 func (i *setMachine) withDiskSize(size uint) *setMachine {
 	i.diskSize = &size
 	return i
@@ -51,7 +60,7 @@ func (i *setMachine) withMemory(num uint) *setMachine {
 }
 
 func (i *setMachine) withRootful(r bool) *setMachine {
-	i.rootful = r
+	i.rootful = new(r)
 	return i
 }
 

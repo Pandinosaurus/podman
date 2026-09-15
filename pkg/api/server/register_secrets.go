@@ -1,13 +1,13 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package server
 
 import (
 	"net/http"
 
-	"github.com/containers/podman/v5/pkg/api/handlers/compat"
-	"github.com/containers/podman/v5/pkg/api/handlers/libpod"
 	"github.com/gorilla/mux"
+	"go.podman.io/podman/v6/pkg/api/handlers/compat"
+	"go.podman.io/podman/v6/pkg/api/handlers/libpod"
 )
 
 func (s *APIServer) registerSecretHandlers(r *mux.Router) error {
@@ -30,11 +30,21 @@ func (s *APIServer) registerSecretHandlers(r *mux.Router) error {
 	//   - in: query
 	//     name: driveropts
 	//     type: string
-	//     description: Secret driver options
+	//     description: JSON-encoded string containing secret driver options as a `map[string]string`.
 	//   - in: query
 	//     name: labels
 	//     type: string
-	//     description: Labels on the secret
+	//     description: JSON-encoded string containing labels as a `map[string]string`.
+	//   - in: query
+	//     name: replace
+	//     type: boolean
+	//     default: false
+	//     description: Replace an existing secret with the same name.
+	//   - in: query
+	//     name: ignore
+	//     type: boolean
+	//     default: false
+	//     description: Ignore the request if a secret with the same name already exists.
 	//   - in: body
 	//     name: request
 	//     description: Secret
@@ -236,7 +246,7 @@ func (s *APIServer) registerSecretHandlers(r *mux.Router) error {
 	//   '500':
 	//     "$ref": "#/responses/internalError"
 	r.Handle(VersionedPath("/secrets/{name}"), s.APIHandler(compat.RemoveSecret)).Methods(http.MethodDelete)
-	r.Handle("/secret/{name}", s.APIHandler(compat.RemoveSecret)).Methods(http.MethodDelete)
+	r.Handle("/secrets/{name}", s.APIHandler(compat.RemoveSecret)).Methods(http.MethodDelete)
 
 	r.Handle(VersionedPath("/secrets/{name}/update"), s.APIHandler(compat.UpdateSecret)).Methods(http.MethodPost)
 	r.Handle("/secrets/{name}/update", s.APIHandler(compat.UpdateSecret)).Methods(http.MethodPost)

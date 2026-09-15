@@ -5,13 +5,12 @@ package integration
 import (
 	"slices"
 
-	. "github.com/containers/podman/v5/test/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	. "go.podman.io/podman/v6/test/utils"
 )
 
 var _ = Describe("Podman mount", func() {
-
 	BeforeEach(func() {
 		SkipIfNotRootless("This function is not enabled for rootful podman")
 		SkipIfRemote("Podman mount not supported for remote connections")
@@ -36,15 +35,15 @@ var _ = Describe("Podman mount", func() {
 
 		// command: podman <options> unshare podman <options> mount cid
 		args := []string{"unshare", podmanTest.PodmanBinary}
-		opts := podmanTest.PodmanMakeOptions([]string{"mount", cid}, false, false)
+		opts := podmanTest.PodmanMakeOptions([]string{"mount", cid}, PodmanExecOptions{})
 		args = append(args, opts...)
 
-		// container root file system location is podmanTest.TempDir/...
-		// because "--root podmanTest.TempDir/..."
+		// container root file system location is podmanTest.Root/...
+		// because "--root podmanTest.Root/..."
 		session := podmanTest.Podman(args)
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
-		Expect(session.OutputToString()).To(ContainSubstring(podmanTest.TempDir))
+		Expect(session.OutputToString()).To(ContainSubstring(podmanTest.Root))
 	})
 
 	It("podman image mount", func() {
@@ -59,14 +58,14 @@ var _ = Describe("Podman mount", func() {
 
 		// command: podman <options> unshare podman <options> image mount IMAGE
 		args := []string{"unshare", podmanTest.PodmanBinary}
-		opts := podmanTest.PodmanMakeOptions([]string{"image", "mount", CITEST_IMAGE}, false, false)
+		opts := podmanTest.PodmanMakeOptions([]string{"image", "mount", CITEST_IMAGE}, PodmanExecOptions{})
 		args = append(args, opts...)
 
-		// image location is podmanTest.TempDir/... because "--root podmanTest.TempDir/..."
+		// image location is podmanTest.Root/... because "--root podmanTest.Root/..."
 		session := podmanTest.Podman(args)
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
-		Expect(session.OutputToString()).To(ContainSubstring(podmanTest.TempDir))
+		Expect(session.OutputToString()).To(ContainSubstring(podmanTest.Root))
 
 		// We have to unmount the image again otherwise we leak the tmpdir
 		// as active mount points cannot be removed.

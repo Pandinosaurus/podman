@@ -1,10 +1,8 @@
-//go:build tempoff
+//go:build windows && amd64
 
 package qemu
 
-var (
-	QemuCommand = "qemu-system-x86_64w"
-)
+var QemuCommand = "qemu-system-x86_64w"
 
 func (q *QEMUStubber) addArchOptions(_ *setNewMachineCMDOpts) []string {
 	// "qemu64" level is used, because "host" is not supported with "whpx" acceleration.

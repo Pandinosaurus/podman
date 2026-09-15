@@ -1,8 +1,8 @@
-//go:build !linux && !remote
+//go:build freebsd && !remote
 
 package system
 
-// Currently, we only need servicereaper on Linux to support slirp4netns.
+// Currently, we only need servicereaper on Linux for rootless networking.
 func maybeStartServiceReaper() {
 }
 

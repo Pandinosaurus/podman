@@ -6,9 +6,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/containers/image/v5/signature"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.podman.io/image/v5/signature"
 )
 
 func TestAddPolicyEntries(t *testing.T) {
@@ -22,7 +22,7 @@ func TestAddPolicyEntries(t *testing.T) {
 	}
 	minimalPolicyJSON, err := json.Marshal(minimalPolicy)
 	require.NoError(t, err)
-	err = os.WriteFile(policyPath, minimalPolicyJSON, 0600)
+	err = os.WriteFile(policyPath, minimalPolicyJSON, 0o600)
 	require.NoError(t, err)
 
 	// Invalid input:
@@ -128,7 +128,7 @@ func TestAddPolicyEntries(t *testing.T) {
                 }
         }
 }`
-	err = os.WriteFile(policyPath, []byte(jsonWithUnknownData), 0600)
+	err = os.WriteFile(policyPath, []byte(jsonWithUnknownData), 0o600)
 	require.NoError(t, err)
 	err = AddPolicyEntries(policyPath, AddPolicyEntriesInput{
 		Scope:       "quay.io/innocuous",
@@ -140,8 +140,8 @@ func TestAddPolicyEntries(t *testing.T) {
 	require.NoError(t, err)
 	// Decode updatedJSONWithUnknownData so that this test does not depend on details of the encoding.
 	// To reduce noise in the constants below:
-	type a = []interface{}
-	type m = map[string]interface{}
+	type a = []any
+	type m = map[string]any
 	var parsedUpdatedJSON m
 	err = json.Unmarshal(updatedJSONWithUnknownData, &parsedUpdatedJSON)
 	require.NoError(t, err)
@@ -193,4 +193,15 @@ func xNewPRSigstoreSignedKeyPath(t *testing.T, keyPath string, signedIdentity si
 	pr, err := signature.NewPRSigstoreSignedKeyPath(keyPath, signedIdentity)
 	require.NoError(t, err)
 	return pr
+}
+
+func TestParseUids(t *testing.T) {
+	// Malformed uid/pub records with fewer than 10 colon-separated fields
+	// must be skipped rather than panicking on an out-of-range index.
+	assert.Empty(t, parseUids([]byte("uid:u:1:2:3\n")))
+	assert.Empty(t, parseUids([]byte("pub:\n")))
+
+	// A well-formed uid record still yields the parsed email address.
+	valid := []byte("uid:u:1:2:3:4:5:6:7:Test User <test@example.com>\n")
+	assert.Equal(t, []string{"test@example.com"}, parseUids(valid))
 }

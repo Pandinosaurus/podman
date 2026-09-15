@@ -1,13 +1,13 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package server
 
 import (
 	"net/http"
 
-	"github.com/containers/podman/v5/pkg/api/handlers/compat"
-	"github.com/containers/podman/v5/pkg/api/handlers/libpod"
 	"github.com/gorilla/mux"
+	"go.podman.io/podman/v6/pkg/api/handlers/compat"
+	"go.podman.io/podman/v6/pkg/api/handlers/libpod"
 )
 
 func (s *APIServer) registerNetworkHandlers(r *mux.Router) error {
@@ -23,6 +23,15 @@ func (s *APIServer) registerNetworkHandlers(r *mux.Router) error {
 	//    type: string
 	//    required: true
 	//    description: the name of the network
+	//  - in: query
+	//    name: force
+	//    type: boolean
+	//    default: false
+	//    description: Remove containers associated with the network.
+	//  - in: query
+	//    name: timeout
+	//    type: integer
+	//    description: Seconds to wait for container removal when force is set.
 	// produces:
 	// - application/json
 	// responses:
@@ -228,6 +237,10 @@ func (s *APIServer) registerNetworkHandlers(r *mux.Router) error {
 	//    name: force
 	//    type: boolean
 	//    description: remove containers associated with network
+	//  - in: query
+	//    name: ignore
+	//    type: boolean
+	//    description: ignore if a specified network does not exist
 	// produces:
 	// - application/json
 	// responses:
@@ -352,6 +365,11 @@ func (s *APIServer) registerNetworkHandlers(r *mux.Router) error {
 	//    description: attributes for creating a network
 	//    schema:
 	//      $ref: "#/definitions/networkCreateLibpod"
+	//  - in: query
+	//    name: ignoreIfExists
+	//    type: boolean
+	//    default: false
+	//    description: Ignore the request if a network with the same name already exists.
 	// responses:
 	//   200:
 	//     $ref: "#/responses/networkCreateResponse"

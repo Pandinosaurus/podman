@@ -19,7 +19,7 @@ Remove dangling images and images that have no associated containers.
 
 #### **--build-cache**
 
-Remove persistent build cache create for `--mount=type=cache`.
+Remove persistent build cache created for `--mount=type=cache`.
 
 #### **--external**
 
@@ -29,7 +29,7 @@ Remove images even when they are used by external containers (e.g., build contai
 
 Provide filter values.
 
-The *filters* argument format is of `key=value`. If there is more than one *filter*, then pass multiple OPTIONS: **--filter** *foo=bar* **--filter** *bif=baz*.
+If there is more than one filter, the `--filter` option should be passed multiple times: **--filter** *label=test* **--filter** *until=10m*.
 
 Supported filters:
 

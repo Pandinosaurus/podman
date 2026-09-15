@@ -5,9 +5,9 @@ package integration
 import (
 	"path/filepath"
 
-	. "github.com/containers/podman/v5/test/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	. "go.podman.io/podman/v6/test/utils"
 )
 
 var _ = Describe("Podman run with volumes", func() {
@@ -22,7 +22,7 @@ var _ = Describe("Podman run with volumes", func() {
 		containerStorageDir = filepath.Join(podmanTest.Root, podmanTest.ImageCacheFS+"-containers")
 		dbDir = filepath.Join(podmanTest.Root, "libpod")
 		runContainerStorageDir = filepath.Join(podmanTest.RunRoot, podmanTest.ImageCacheFS+"-containers")
-		runDBDir = tempdir
+		runDBDir = podmanTest.TempDir
 	})
 
 	It("podman run with no transient-store", func() {
@@ -87,5 +87,4 @@ var _ = Describe("Podman run with volumes", func() {
 			Expect(filepath.Join(runDBDir, "bolt_state.db")).Should(BeARegularFile())
 		}
 	})
-
 })

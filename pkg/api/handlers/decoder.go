@@ -4,21 +4,22 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"reflect"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/util"
 	"github.com/gorilla/schema"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/util"
 )
 
 // NewAPIDecoder returns a configured schema.Decoder
 func NewAPIDecoder() *schema.Decoder {
-	_ = ParseDateTime
-
 	d := schema.NewDecoder()
 	d.IgnoreUnknownKeys(true)
 	d.RegisterConverter(map[string][]string{}, convertURLValuesString)
@@ -28,6 +29,9 @@ func NewAPIDecoder() *schema.Decoder {
 
 	var Signal syscall.Signal
 	d.RegisterConverter(Signal, convertSignal)
+
+	d.RegisterConverter(types.OptionalBoolUndefined, convertOptionalBool)
+
 	return d
 }
 
@@ -37,7 +41,17 @@ func NewCompatAPIDecoder() *schema.Decoder {
 	// mimic behaviour of github.com/docker/docker/api/server/httputils.BoolValue()
 	dec.RegisterConverter(true, func(s string) reflect.Value {
 		s = strings.ToLower(strings.TrimSpace(s))
-		return reflect.ValueOf(!(s == "" || s == "0" || s == "no" || s == "false" || s == "none"))
+		return reflect.ValueOf(s != "" && s != "0" && s != "no" && s != "false" && s != "none")
+	})
+	dec.RegisterConverter(types.OptionalBoolUndefined, func(s string) reflect.Value {
+		if len(s) == 0 {
+			return reflect.ValueOf(types.OptionalBoolUndefined)
+		}
+		s = strings.ToLower(strings.TrimSpace(s))
+		if s != "0" && s != "no" && s != "false" && s != "none" {
+			return reflect.ValueOf(types.OptionalBoolTrue)
+		}
+		return reflect.ValueOf(types.OptionalBoolFalse)
 	})
 
 	return dec
@@ -115,7 +129,7 @@ func convertTimeString(query string) reflect.Value {
 			return reflect.ValueOf(t)
 		}
 
-		if _, isParseError := err.(*time.ParseError); isParseError {
+		if _, ok := errors.AsType[*time.ParseError](err); ok {
 			// Try next format
 			continue
 		} else {
@@ -130,16 +144,21 @@ func convertTimeString(query string) reflect.Value {
 	return reflect.ValueOf(time.Time{})
 }
 
-// ParseDateTime is a helper function to aid in parsing different Time/Date formats
-// isZero() can be used to determine if parsing failed.
-func ParseDateTime(query string) time.Time {
-	return convertTimeString(query).Interface().(time.Time)
-}
-
 func convertSignal(query string) reflect.Value {
 	signal, err := util.ParseSignal(query)
 	if err != nil {
 		logrus.Infof("convertSignal: Failed to parse %s: %s", query, err.Error())
 	}
 	return reflect.ValueOf(signal)
+}
+
+func convertOptionalBool(s string) reflect.Value {
+	if len(s) == 0 {
+		return reflect.ValueOf(types.OptionalBoolUndefined)
+	}
+	val, _ := strconv.ParseBool(s)
+	if val {
+		return reflect.ValueOf(types.OptionalBoolTrue)
+	}
+	return reflect.ValueOf(types.OptionalBoolFalse)
 }

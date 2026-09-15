@@ -3,7 +3,7 @@ package entities
 import (
 	"net"
 
-	entitiesTypes "github.com/containers/podman/v5/pkg/domain/entities/types"
+	entitiesTypes "go.podman.io/podman/v6/pkg/domain/entities/types"
 )
 
 // NetworkListOptions describes options for listing networks in cli
@@ -26,6 +26,7 @@ type NetworkReloadReport = entitiesTypes.NetworkReloadReport
 // NetworkRmOptions describes options for removing networks
 type NetworkRmOptions struct {
 	Force   bool
+	Ignore  bool
 	Timeout *uint
 }
 
@@ -39,7 +40,6 @@ type NetworkCreateOptions struct {
 	Gateways          []net.IP
 	Internal          bool
 	Labels            map[string]string
-	MacVLAN           string
 	NetworkDNSServers []string
 	Ranges            []string
 	Subnets           []string
@@ -82,5 +82,7 @@ type NetworkPruneOptions struct {
 	Filters map[string][]string
 }
 
-type NetworkInspectReport = entitiesTypes.NetworkInspectReport
-type NetworkContainerInfo = entitiesTypes.NetworkContainerInfo
+type (
+	NetworkInspectReport = entitiesTypes.NetworkInspectReport
+	NetworkContainerInfo = entitiesTypes.NetworkContainerInfo
+)

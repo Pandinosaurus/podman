@@ -7,11 +7,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/containers/common/pkg/machine"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/specgen"
 	"github.com/stretchr/testify/assert"
+	"go.podman.io/common/pkg/machine"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/specgen"
 )
 
 func TestWinPath(t *testing.T) {
@@ -46,7 +46,8 @@ func TestWinPath(t *testing.T) {
 		sg := specgen.NewSpecGenerator("nothing", false)
 		err := FillOutSpecGen(sg, &entities.ContainerCreateOptions{
 			ImageVolume: "ignore",
-			Volume:      []string{vol}}, []string{},
+			Volume:      []string{vol},
+		}, []string{},
 		)
 		machine.Enabled, machine.Type = oldEnable, oldType
 		return sg, err
@@ -59,7 +60,7 @@ func TestWinPath(t *testing.T) {
 			assert.NotNil(t, err, msg)
 			continue
 		}
-		if !assert.Nil(t, err, msg) {
+		if !assert.NoError(t, err, msg) {
 			continue
 		}
 		if test.isN {
@@ -80,14 +81,14 @@ func TestWinPath(t *testing.T) {
 
 func TestParseLinuxResourcesDeviceAccess(t *testing.T) {
 	d, err := parseLinuxResourcesDeviceAccess("a *:* rwm")
-	assert.Nil(t, err, "err is nil")
+	assert.NoError(t, err, "err is nil")
 	assert.True(t, d.Allow, "allow is true")
 	assert.Equal(t, d.Type, "a", "type is 'a'")
 	assert.Nil(t, d.Minor, "minor is nil")
 	assert.Nil(t, d.Major, "major is nil")
 
 	d, err = parseLinuxResourcesDeviceAccess("b 3:* rwm")
-	assert.Nil(t, err, "err is nil")
+	assert.NoError(t, err, "err is nil")
 	assert.True(t, d.Allow, "allow is true")
 	assert.Equal(t, d.Type, "b", "type is 'b'")
 	assert.Nil(t, d.Minor, "minor is nil")
@@ -95,7 +96,7 @@ func TestParseLinuxResourcesDeviceAccess(t *testing.T) {
 	assert.Equal(t, *d.Major, int64(3), "major is 3")
 
 	d, err = parseLinuxResourcesDeviceAccess("a *:3 rwm")
-	assert.Nil(t, err, "err is nil")
+	assert.NoError(t, err, "err is nil")
 	assert.True(t, d.Allow, "allow is true")
 	assert.Equal(t, d.Type, "a", "type is 'a'")
 	assert.Nil(t, d.Major, "major is nil")
@@ -103,7 +104,7 @@ func TestParseLinuxResourcesDeviceAccess(t *testing.T) {
 	assert.Equal(t, *d.Minor, int64(3), "minor is 3")
 
 	d, err = parseLinuxResourcesDeviceAccess("c 1:2 rwm")
-	assert.Nil(t, err, "err is nil")
+	assert.NoError(t, err, "err is nil")
 	assert.True(t, d.Allow, "allow is true")
 	assert.Equal(t, d.Type, "c", "type is 'c'")
 	assert.NotNil(t, d.Major, "minor is not nil")

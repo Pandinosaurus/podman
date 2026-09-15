@@ -6,14 +6,14 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/common/pkg/report"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/parse"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/validate"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/common/pkg/report"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/parse"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/validate"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 var (
@@ -62,7 +62,7 @@ func init() {
 	flags.BoolVarP(&cliOpts.Quiet, "quiet", "q", false, "Print volume output in quiet mode")
 }
 
-func list(cmd *cobra.Command, args []string) error {
+func list(cmd *cobra.Command, _ []string) error {
 	var err error
 	if cliOpts.Quiet && cmd.Flag("format").Changed {
 		return errors.New("quiet and format flags cannot be used together")
@@ -80,11 +80,8 @@ func list(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	switch {
-	case report.IsJSON(cliOpts.Format):
+	if report.IsJSON(cliOpts.Format) {
 		return outputJSON(responses)
-	case len(responses) < 1:
-		return nil
 	}
 	return outputTemplate(cmd, responses)
 }
@@ -111,12 +108,26 @@ func outputTemplate(cmd *cobra.Command, responses []*entities.VolumeListReport) 
 		return err
 	}
 
-	if (rpt.RenderHeaders) && !noHeading {
+	if rpt.RenderHeaders && !noHeading {
 		if err := rpt.Execute(headers); err != nil {
 			return fmt.Errorf("failed to write report column headers: %w", err)
 		}
 	}
-	return rpt.Execute(responses)
+	reporters := make([]volumeReporter, 0, len(responses))
+	for _, r := range responses {
+		reporters = append(reporters, volumeReporter{r})
+	}
+	return rpt.Execute(reporters)
+}
+
+type volumeReporter struct {
+	*entities.VolumeListReport
+}
+
+// Labels returns the volume's labels as a sorted, comma-separated list of
+// key=value pairs, matching Docker CLI output format.
+func (v volumeReporter) Labels() string {
+	return common.FormatLabels(v.VolumeListReport.Labels)
 }
 
 func outputJSON(vols []*entities.VolumeListReport) error {

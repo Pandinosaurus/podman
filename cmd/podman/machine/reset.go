@@ -9,31 +9,27 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/validate"
-	"github.com/containers/podman/v5/pkg/machine"
-	provider2 "github.com/containers/podman/v5/pkg/machine/provider"
-	"github.com/containers/podman/v5/pkg/machine/shim"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/validate"
+	"go.podman.io/podman/v6/pkg/machine"
+	provider2 "go.podman.io/podman/v6/pkg/machine/provider"
+	"go.podman.io/podman/v6/pkg/machine/shim"
 )
 
-var (
-	resetCmd = &cobra.Command{
-		Use:               "reset [options]",
-		Short:             "Remove all machines",
-		Long:              "Remove all machines, configurations, data, and cached images",
-		RunE:              reset,
-		Args:              validate.NoArgs,
-		Example:           `podman machine reset`,
-		ValidArgsFunction: completion.AutocompleteNone,
-	}
-)
+var resetCmd = &cobra.Command{
+	Use:               "reset [options]",
+	Short:             "Remove all machines",
+	Long:              "Remove all machines, configurations, data, and cached images",
+	RunE:              reset,
+	Args:              validate.NoArgs,
+	Example:           `podman machine reset`,
+	ValidArgsFunction: completion.AutocompleteNone,
+}
 
-var (
-	resetOptions machine.ResetOptions
-)
+var resetOptions machine.ResetOptions
 
 func init() {
 	registry.Commands = append(registry.Commands, registry.CliCommand{
@@ -47,15 +43,8 @@ func init() {
 }
 
 func reset(_ *cobra.Command, _ []string) error {
-	var (
-		err error
-	)
-
-	providers := provider2.GetAll()
-	if err != nil {
-		return err
-	}
-	for _, p := range providers {
+	allProviders := provider2.GetAll()
+	for _, p := range allProviders {
 		hasPerms := provider2.HasPermsForProvider(p.VMType())
 		isInstalled, err := provider2.IsInstalled(p.VMType())
 		if !hasPerms && (isInstalled || err != nil) && !resetOptions.Force {
@@ -65,7 +54,7 @@ func reset(_ *cobra.Command, _ []string) error {
 	}
 
 	if !resetOptions.Force {
-		listResponse, err := shim.List(providers, machine.ListOptions{})
+		listResponse, err := shim.List(allProviders, machine.ListOptions{})
 		if err != nil {
 			return err
 		}
@@ -82,7 +71,7 @@ func reset(_ *cobra.Command, _ []string) error {
 			return nil
 		}
 	}
-	return shim.Reset(providers, resetOptions)
+	return shim.Reset(allProviders, resetOptions)
 }
 
 func resetConfirmationMessage(listResponse []*machine.ListResponse) {

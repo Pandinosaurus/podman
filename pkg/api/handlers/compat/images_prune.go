@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package compat
 
@@ -8,14 +8,14 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/containers/podman/v5/libpod"
-	"github.com/containers/podman/v5/pkg/api/handlers"
-	"github.com/containers/podman/v5/pkg/api/handlers/utils"
-	api "github.com/containers/podman/v5/pkg/api/types"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/domain/infra/abi"
-	"github.com/containers/podman/v5/pkg/util"
-	dockerImage "github.com/docker/docker/api/types/image"
+	dockerImage "github.com/moby/moby/api/types/image"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/pkg/api/handlers"
+	"go.podman.io/podman/v6/pkg/api/handlers/utils"
+	api "go.podman.io/podman/v6/pkg/api/types"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/domain/infra/abi"
+	"go.podman.io/podman/v6/pkg/util"
 )
 
 func PruneImages(w http.ResponseWriter, r *http.Request) {
@@ -66,7 +66,7 @@ func PruneImages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	payload := handlers.ImagesPruneReport{
-		ImagesPruneReport: dockerImage.PruneReport{
+		PruneReport: dockerImage.PruneReport{
 			ImagesDeleted:  idr,
 			SpaceReclaimed: reclaimedSpace,
 		},

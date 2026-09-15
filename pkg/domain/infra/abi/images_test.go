@@ -1,12 +1,12 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package abi
 
 import (
 	"testing"
 
-	"github.com/containers/common/libimage"
 	"github.com/stretchr/testify/assert"
+	"go.podman.io/common/libimage"
 )
 
 // This is really intended to verify what happens with a

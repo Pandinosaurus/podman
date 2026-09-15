@@ -3,14 +3,12 @@ package volumes
 // CreateOptions are optional options for creating volumes
 //
 //go:generate go run ../generator/generator.go CreateOptions
-type CreateOptions struct {
-}
+type CreateOptions struct{}
 
 // InspectOptions are optional options for inspecting volumes
 //
 //go:generate go run ../generator/generator.go InspectOptions
-type InspectOptions struct {
-}
+type InspectOptions struct{}
 
 // ListOptions are optional options for listing volumes
 //
@@ -26,6 +24,8 @@ type ListOptions struct {
 type PruneOptions struct {
 	// Filters applied to the pruning of volumes
 	Filters map[string][]string
+	// DryRun lists volumes that would be pruned without removing them.
+	DryRun *bool
 }
 
 // RemoveOptions are optional options for removing volumes
@@ -41,5 +41,12 @@ type RemoveOptions struct {
 // if a volume exists
 //
 //go:generate go run ../generator/generator.go ExistsOptions
-type ExistsOptions struct {
+type ExistsOptions struct{}
+
+// RenameOptions are optional options for renaming volumes
+//
+//go:generate go run ../generator/generator.go RenameOptions
+type RenameOptions struct {
+	// New name for the volume
+	NewName *string
 }

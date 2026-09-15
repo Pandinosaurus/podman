@@ -2,6 +2,7 @@ package e2e_test
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -9,14 +10,17 @@ import (
 	"strings"
 	"time"
 
-	"github.com/containers/common/pkg/strongunits"
-	"github.com/containers/podman/v5/pkg/machine/define"
-	"github.com/containers/podman/v5/utils"
+	jsoniter "github.com/json-iterator/go"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	. "github.com/onsi/gomega/gexec"
 	"github.com/shirou/gopsutil/v4/mem"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/pkg/strongunits"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/machine/define"
+	"go.podman.io/podman/v6/pkg/machine/provider"
+	"go.podman.io/podman/v6/utils"
 )
 
 var _ = Describe("podman machine init", func() {
@@ -51,7 +55,7 @@ var _ = Describe("podman machine init", func() {
 
 		bi := new(initMachine)
 		want := fmt.Sprintf("system connection \"%s\" already exists", badName)
-		badInit, berr := mb.setName(badName).setCmd(bi.withImage(mb.imagePath)).run()
+		badInit, berr := mb.setName(badName).setCmd(bi.withFakeImage(mb)).run()
 		Expect(berr).ToNot(HaveOccurred())
 		Expect(badInit).To(Exit(125))
 		Expect(badInit.errorToString()).To(ContainSubstring(want))
@@ -71,21 +75,45 @@ var _ = Describe("podman machine init", func() {
 		// this comes in bytes
 		memStat, err := mem.VirtualMemory()
 		Expect(err).ToNot(HaveOccurred())
-		total := strongunits.ToMib(strongunits.B(memStat.Total)) + 1024
+		systemMem := strongunits.ToMib(strongunits.B(memStat.Total))
 
 		badMem := initMachine{}
-		badMemSession, err := mb.setCmd(badMem.withMemory(uint(total))).run()
+		badMemSession, err := mb.setCmd(badMem.withMemory(uint(systemMem + 1024))).run()
 		Expect(err).ToNot(HaveOccurred())
+		Expect(badMemSession.errorToString()).To(ContainSubstring(fmt.Sprintf("greater than total system memory (%d MB)", systemMem)))
 		Expect(badMemSession).To(Exit(125))
+
+		badCPU := initMachine{}
+		badCPUSession, err := mb.setCmd(badCPU.withCPUs(9999999)).run()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(badCPUSession).To(Exit(125))
+		Expect(badCPUSession.errorToString()).To(ContainSubstring("greater than number of host CPUs"))
+	})
+
+	It("init volume check", func() {
+		skipIfWSL("WSL does not use volume mounts")
+		// Check that mounting to certain target directories like /tmp at the / level is NOT ok
+		tmpVol := initMachine{}
+		targetMount := "/tmp"
+		tmpVolSession, err := mb.setCmd(tmpVol.withFakeImage(mb).withVolume(fmt.Sprintf("/whatever:%s", targetMount))).run()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(tmpVolSession).To(Exit(125))
+		Expect(tmpVolSession.errorToString()).To(ContainSubstring(fmt.Sprintf("Error: machine mount destination cannot be %q: consider another location or a subdirectory of an existing location", targetMount)))
+
+		// Mounting to /tmp/foo (subdirectory) is OK
+		tmpSubdir := initMachine{}
+		tmpSubDirSession, err := mb.setCmd(tmpSubdir.withImage(mb.imagePath).withVolume("/whatever:/tmp/foo")).run()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(tmpSubDirSession).To(Exit(0))
 	})
 
 	It("simple init", func() {
 		i := new(initMachine)
-		session, err := mb.setCmd(i.withImage(mb.imagePath)).run()
+		session, err := mb.setCmd(i.withFakeImage(mb)).run()
 		Expect(err).ToNot(HaveOccurred())
 		Expect(session).To(Exit(0))
 
-		inspectBefore, ec, err := mb.toQemuInspectInfo()
+		inspectBefore, ec, err := mb.toInspectInfo()
 		Expect(err).ToNot(HaveOccurred())
 		Expect(ec).To(BeZero())
 		Expect(inspectBefore).ToNot(BeEmpty())
@@ -96,42 +124,78 @@ var _ = Describe("podman machine init", func() {
 			Expect(testMachine.Resources.CPUs).To(Equal(uint64(cpus)))
 			Expect(testMachine.Resources.Memory).To(BeEquivalentTo(uint64(2048)))
 		}
+		// creating a new VM with the same name must fail
+		repeatSession, err := mb.setCmd(i.withFakeImage(mb)).run()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(repeatSession).To(Exit(125))
+		Expect(repeatSession.errorToString()).To(ContainSubstring(fmt.Sprintf("Error: machine %q already exists", mb.names[0])))
 	})
 
-	It("simple init with start", func() {
-		i := initMachine{}
-		session, err := mb.setCmd(i.withImage(mb.imagePath)).run()
+	It("run playbook", func() {
+		str := randomString()
+
+		// ansible playbook file to create a text file containing a random string
+		playbookContents := fmt.Sprintf(`- name: Simple podman machine example
+  hosts: localhost
+  tasks:
+    - name: create a file
+      ansible.builtin.copy:
+        dest: ~/foobar.txt
+        content: "%s\n"`, str)
+
+		playbookPath := filepath.Join(GinkgoT().TempDir(), "playbook.yaml")
+
+		// create the playbook file
+		playbookFile, err := os.Create(playbookPath)
+		Expect(err).ToNot(HaveOccurred())
+		defer playbookFile.Close()
+
+		// write the desired contents into the file
+		_, err = playbookFile.WriteString(playbookContents)
+		Expect(err).To(Not(HaveOccurred()))
+
+		name := randomString()
+		i := new(initMachine)
+		session, err := mb.setName(name).setCmd(i.withImage(mb.imagePath).withRunPlaybook(playbookPath).withNow()).run()
 		Expect(err).ToNot(HaveOccurred())
 		Expect(session).To(Exit(0))
 
-		inspectBefore, ec, err := mb.toQemuInspectInfo()
-		Expect(ec).To(BeZero())
-		Expect(inspectBefore).ToNot(BeEmpty())
+		// ensure the contents of the playbook file didn't change when getting copied
+		ssh := new(sshMachine)
+		sshSession, err := mb.setName(name).setCmd(ssh.withSSHCommand([]string{"cat", "playbook.yaml"})).run()
 		Expect(err).ToNot(HaveOccurred())
-		Expect(inspectBefore).ToNot(BeEmpty())
-		Expect(inspectBefore[0].Name).To(Equal(mb.names[0]))
+		Expect(sshSession).To(Exit(0))
+		Expect(sshSession.outputToStringSlice()).To(Equal(strings.Split(playbookContents, "\n")))
 
-		s := startMachine{}
-		ssession, err := mb.setCmd(s).setTimeout(time.Minute * 10).run()
-		Expect(err).ToNot(HaveOccurred())
-		Expect(ssession).Should(Exit(0))
+		// wait until the playbook.service is done before checking to make sure the playbook was a success
+		playbookFinished := false
+		for range 900 {
+			sshSession, err = mb.setName(name).setCmd(ssh.withSSHCommand([]string{"systemctl", "is-active", "playbook.service"})).run()
+			Expect(err).ToNot(HaveOccurred())
 
-		inspectAfter, ec, err := mb.toQemuInspectInfo()
-		Expect(err).ToNot(HaveOccurred())
-		Expect(ec).To(BeZero())
-		Expect(inspectBefore).ToNot(BeEmpty())
-		Expect(inspectAfter).ToNot(BeEmpty())
-		Expect(inspectAfter[0].State).To(Equal(define.Running))
+			if sshSession.outputToString() == "inactive" {
+				playbookFinished = true
+				break
+			}
 
-		if isWSL() { // WSL does not use FCOS
-			return
+			time.Sleep(10 * time.Millisecond)
 		}
 
-		// check to see that zincati is masked
-		sshDisk := sshMachine{}
-		zincati, err := mb.setCmd(sshDisk.withSSHCommand([]string{"sudo", "systemctl", "is-enabled", "zincati"})).run()
+		if !playbookFinished {
+			Fail("playbook.service did not finish")
+		}
+
+		// output the contents of the file generated by the playbook
+		guestUser := "core"
+		if isWSL() {
+			guestUser = "user"
+		}
+		sshSession, err = mb.setName(name).setCmd(ssh.withSSHCommand([]string{"cat", fmt.Sprintf("/home/%s/foobar.txt", guestUser)})).run()
 		Expect(err).ToNot(HaveOccurred())
-		Expect(zincati.outputToString()).To(ContainSubstring("disabled"))
+		Expect(sshSession).To(Exit(0))
+
+		// check its the same as the random number or string that we generated
+		Expect(sshSession.outputToString()).To(Equal(str))
 	})
 
 	It("simple init with username", func() {
@@ -141,7 +205,7 @@ var _ = Describe("podman machine init", func() {
 		Expect(err).ToNot(HaveOccurred())
 		Expect(session).To(Exit(0))
 
-		inspectBefore, ec, err := mb.toQemuInspectInfo()
+		inspectBefore, ec, err := mb.toInspectInfo()
 		Expect(err).ToNot(HaveOccurred())
 		Expect(ec).To(BeZero())
 
@@ -154,6 +218,50 @@ var _ = Describe("podman machine init", func() {
 		}
 		Expect(testMachine.SSHConfig.RemoteUsername).To(Equal(remoteUsername))
 
+		s := new(startMachine)
+		session, err = mb.setCmd(s).run()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(session).To(Exit(0))
+
+		ssh := sshMachine{}
+		sshSession, err := mb.setName(mb.name).setCmd(ssh.withSSHCommand([]string{"loginctl -P Linger show-user " + remoteUsername})).run()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(sshSession).To(Exit(0))
+		Expect(sshSession.outputToString()).To(ContainSubstring("yes"))
+
+		/* Validate that subid count is sufficiently large.
+		 * The subid and subgid files contain a line for each user with subid start and count,
+		 * separated by a double colon, for example: 'user:100000:65536'. Only the count is of
+		 * interest here, it should be sufficiently large to accommodate nested namespaces which is
+		 * required to run rootless Podman in Podman. The check assumes there is only 1 user.
+		 */
+		count_min := 1000000
+		for _, file := range []string{"/etc/subuid", "/etc/subgid"} {
+			cmd := fmt.Sprintf(`awk -F: 'NR==1 {print $NF}' %s`, file)
+			sshSession, err := mb.setName(mb.name).setCmd(ssh.withSSHCommand([]string{cmd})).run()
+			Expect(err).ToNot(HaveOccurred())
+			Expect(sshSession).To(Exit(0))
+
+			subid_count_str := sshSession.outputToString()
+			Expect(subid_count_str).ToNot(BeEmpty(), "No subid count found in %s", file)
+
+			subid_count, err := strconv.Atoi(subid_count_str)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(subid_count).To(BeNumerically(">=", count_min),
+				"Expected subid count %d to be >= %d in %s",
+				subid_count, count_min, file,
+			)
+		}
+
+		if isWSL() { // WSL does not use FCOS
+			return
+		}
+
+		// check to see that zincati is masked
+		sshDisk := sshMachine{}
+		zincati, err := mb.setCmd(sshDisk.withSSHCommand([]string{"sudo", "systemctl", "is-enabled", "zincati"})).run()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(zincati.outputToString()).To(ContainSubstring("disabled"))
 	})
 
 	It("machine init with cpus, disk size, memory, timezone", func() {
@@ -195,12 +303,32 @@ var _ = Describe("podman machine init", func() {
 		Expect(err).ToNot(HaveOccurred())
 		Expect(timezoneSession).To(Exit(0))
 		Expect(timezoneSession.outputToString()).To(ContainSubstring("HST"))
+
+		sshTimezone = sshMachine{}
+		timezoneSession, err = mb.setName(name).setCmd(sshTimezone.withSSHCommand([]string{"timedatectl show --property Timezone"})).run()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(timezoneSession).To(Exit(0))
+		Expect(timezoneSession.outputToString()).To(ContainSubstring("Pacific/Honolulu"))
+	})
+
+	It("machine init with swap", func() {
+		skipIfWSL("Configuring swap is not supported on WSL")
+		name := randomString()
+		i := new(initMachine)
+		session, err := mb.setName(name).setCmd(i.withImage(mb.imagePath).withSwap(2048).withNow()).run()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(session).To(Exit(0))
+
+		ssh := &sshMachine{}
+		sshSession, err := mb.setName(name).setCmd(ssh.withSSHCommand([]string{"zramctl -bo DISKSIZE"})).run()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(sshSession).To(Exit(0))
+
+		// 2147483648 bytes = 2048MiB
+		Expect(sshSession.outputToString()).To(ContainSubstring("2147483648"))
 	})
 
 	It("machine init with volume", func() {
-		if testProvider.VMType() == define.HyperVVirt {
-			Skip("volumes are not supported on hyperv yet")
-		}
 		skipIfWSL("WSL volumes are much different.  This test will not pass as is")
 
 		tmpDir, err := os.MkdirTemp("", "")
@@ -211,17 +339,73 @@ var _ = Describe("podman machine init", func() {
 		mount := tmpDir + ":/very-long-test-mount-dir-path-more-than-thirty-six-bytes"
 		defer func() { _ = utils.GuardedRemoveAll(tmpDir) }()
 
+		tmpDirWithSpaces, err := os.MkdirTemp("", "with spaces")
+		Expect(err).ToNot(HaveOccurred())
+		_, err = os.CreateTemp(tmpDirWithSpaces, "example")
+		Expect(err).ToNot(HaveOccurred())
+		mountWithSpaces := tmpDirWithSpaces + ":/host folder"
+		defer func() { _ = utils.GuardedRemoveAll(tmpDirWithSpaces) }()
+
 		name := randomString()
 		i := new(initMachine)
-		session, err := mb.setName(name).setCmd(i.withImage(mb.imagePath).withVolume(mount).withNow()).run()
+		session, err := mb.setName(name).setCmd(i.withImage(mb.imagePath).withVolume(mount).withVolume(mountWithSpaces).withNow()).run()
 		Expect(err).ToNot(HaveOccurred())
 		Expect(session).To(Exit(0))
 
-		ssh := sshMachine{}
+		ssh := &sshMachine{}
 		sshSession, err := mb.setName(name).setCmd(ssh.withSSHCommand([]string{"ls /very-long-test-mount-dir-path-more-than-thirty-six-bytes"})).run()
 		Expect(err).ToNot(HaveOccurred())
 		Expect(sshSession).To(Exit(0))
 		Expect(sshSession.outputToString()).To(ContainSubstring("example"))
+
+		sshSession, err = mb.setName(name).setCmd(ssh.withSSHCommand([]string{"ls \"/host folder\""})).run()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(sshSession).To(Exit(0))
+		Expect(sshSession.outputToString()).To(ContainSubstring("example"))
+	})
+
+	It("machine init with ignition path", func() {
+		skipIfWSL("Ignition is not compatible with WSL machines since they are not based on Fedora CoreOS")
+
+		tmpDir, err := os.MkdirTemp("", "")
+		defer func() { _ = utils.GuardedRemoveAll(tmpDir) }()
+		Expect(err).ToNot(HaveOccurred())
+
+		tmpFile, err := os.CreateTemp(tmpDir, "test-ignition-*.ign")
+		Expect(err).ToNot(HaveOccurred())
+
+		mockIgnitionContent := `{"ignition":{"version":"3.4.0"},"passwd":{"users":[{"name":"core"}]}}`
+
+		_, err = tmpFile.WriteString(mockIgnitionContent)
+		Expect(err).ToNot(HaveOccurred())
+
+		err = tmpFile.Close()
+		Expect(err).ToNot(HaveOccurred())
+
+		name := randomString()
+		i := new(initMachine)
+		session, err := mb.setName(name).setCmd(i.withFakeImage(mb).withIgnitionPath(tmpFile.Name())).run()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(session).To(Exit(0))
+
+		configDir := filepath.Join(testDir, ".config", "containers", "podman", "machine", testProvider.VMType().String())
+
+		// test that all required machine files are created
+		fileExtensions := []string{".lock", ".json", ".ign"}
+		for _, ext := range fileExtensions {
+			filename := filepath.Join(configDir, fmt.Sprintf("%s%s", name, ext))
+
+			_, err := os.Stat(filename)
+			Expect(err).ToNot(HaveOccurred(), fmt.Sprintf("file %v does not exist", filename))
+		}
+
+		// enforce that the raw ignition is copied over verbatim
+		createdIgn := filepath.Join(configDir, fmt.Sprintf("%s%s", name, ".ign"))
+		contentWanted, err := os.ReadFile(tmpFile.Name())
+		Expect(err).ToNot(HaveOccurred())
+		contentGot, err := os.ReadFile(createdIgn)
+		Expect(err).ToNot(HaveOccurred())
+		Expect(contentWanted).To(Equal(contentGot), "The ignition file provided and the ignition file created do not match")
 	})
 
 	It("machine init rootless docker.sock check", func() {
@@ -231,8 +415,8 @@ var _ = Describe("podman machine init", func() {
 		Expect(err).ToNot(HaveOccurred())
 		Expect(session).To(Exit(0))
 
-		s := startMachine{}
-		ssession, err := mb.setCmd(s).setTimeout(time.Minute * 10).run()
+		s := &startMachine{}
+		ssession, err := mb.setCmd(s).run()
 		Expect(err).ToNot(HaveOccurred())
 		Expect(ssession).Should(Exit(0))
 
@@ -244,7 +428,6 @@ var _ = Describe("podman machine init", func() {
 		output := strings.TrimSpace(sshSession2.outputToString())
 		Expect(output).To(HavePrefix("/run/user"))
 		Expect(output).To(HaveSuffix("/podman/podman.sock"))
-
 	})
 
 	It("machine init rootful with docker.sock check", func() {
@@ -254,8 +437,8 @@ var _ = Describe("podman machine init", func() {
 		Expect(err).ToNot(HaveOccurred())
 		Expect(session).To(Exit(0))
 
-		s := startMachine{}
-		ssession, err := mb.setCmd(s).setTimeout(time.Minute * 10).run()
+		s := &startMachine{}
+		ssession, err := mb.setCmd(s).run()
 		Expect(err).ToNot(HaveOccurred())
 		Expect(ssession).Should(Exit(0))
 
@@ -272,12 +455,21 @@ var _ = Describe("podman machine init", func() {
 		Expect(sshSession2).To(Exit(0))
 		output := strings.TrimSpace(sshSession2.outputToString())
 		Expect(output).To(Equal("/run/podman/podman.sock"))
+
+		// Ensure we can at least connect to the rootful podman socket and that it is actually a rootful one by checking the paths
+		bm := basicMachine{}
+		info, err := mb.setCmd(bm.withPodmanCommand([]string{"info"})).run()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(info).To(Exit(0))
+		Expect(info.outputToString()).To(ContainSubstring("/run/podman/podman.sock"))
+		Expect(info.outputToString()).To(ContainSubstring("serviceIsRemote: true"))
+		Expect(info.outputToString()).To(ContainSubstring("/var/lib/containers"))
 	})
 
 	It("init should cleanup on failure", func() {
 		i := new(initMachine)
 		name := randomString()
-		session, err := mb.setName(name).setCmd(i.withImage(mb.imagePath)).run()
+		session, err := mb.setName(name).setCmd(i.withFakeImage(mb)).run()
 
 		Expect(err).ToNot(HaveOccurred())
 		Expect(session).To(Exit(0))
@@ -295,7 +487,7 @@ var _ = Describe("podman machine init", func() {
 
 		// Inspecting a non-existent machine should fail
 		// which means it is gone
-		_, ec, err := mb.toQemuInspectInfo()
+		_, ec, err := mb.toInspectInfo()
 		Expect(err).ToNot(HaveOccurred())
 		Expect(ec).To(Equal(125))
 
@@ -304,7 +496,7 @@ var _ = Describe("podman machine init", func() {
 			// Bad ignition path - init fails
 			i = new(initMachine)
 			i.ignitionPath = "/bad/path"
-			session, err = mb.setName(name).setCmd(i.withImage(mb.imagePath)).run()
+			session, err = mb.setName(name).setCmd(i.withFakeImage(mb)).run()
 			Expect(err).ToNot(HaveOccurred())
 			Expect(session).To(Exit(125))
 
@@ -326,7 +518,7 @@ var _ = Describe("podman machine init", func() {
 	It("verify a podman 4 config does not break podman 5", func() {
 		vmName := "foobar-machine"
 		configDir := filepath.Join(testDir, ".config", "containers", "podman", "machine", testProvider.VMType().String())
-		if err := os.MkdirAll(configDir, 0755); err != nil {
+		if err := os.MkdirAll(configDir, 0o755); err != nil {
 			Expect(err).ToNot(HaveOccurred())
 		}
 		f, err := os.Create(filepath.Join(configDir, fmt.Sprintf("%s.json", vmName)))
@@ -356,7 +548,7 @@ var _ = Describe("podman machine init", func() {
 		// We should be able to init with a bad config present
 		i := new(initMachine)
 		name := randomString()
-		session, err := mb.setName(name).setCmd(i.withImage(mb.imagePath)).run()
+		session, err := mb.setName(name).setCmd(i.withFakeImage(mb)).run()
 		Expect(err).ToNot(HaveOccurred())
 		Expect(session).To(Exit(0))
 
@@ -372,6 +564,7 @@ var _ = Describe("podman machine init", func() {
 	})
 
 	It("machine init with rosetta=true", func() {
+		Skip("rosetta currently hard disabled https://github.com/containers/podman-machine-os/pull/134")
 		skipIfVmtype(define.QemuVirt, "Test is only for AppleHv")
 		skipIfVmtype(define.WSLVirt, "Test is only for AppleHv")
 		skipIfVmtype(define.HyperVVirt, "Test is only for AppleHv")
@@ -386,8 +579,8 @@ var _ = Describe("podman machine init", func() {
 		Expect(err).ToNot(HaveOccurred())
 		Expect(session).To(Exit(0))
 
-		s := startMachine{}
-		ssession, err := mb.setCmd(s).setTimeout(time.Minute * 10).run()
+		s := &startMachine{}
+		ssession, err := mb.setCmd(s).run()
 		Expect(err).ToNot(HaveOccurred())
 		Expect(ssession).Should(Exit(0))
 
@@ -425,10 +618,10 @@ var _ = Describe("podman machine init", func() {
 			Skip("Test is only for AppleHv with arm64 architecture")
 		}
 		configDir := filepath.Join(testDir, ".config", "containers")
-		err := os.MkdirAll(configDir, 0755)
+		err := os.MkdirAll(configDir, 0o755)
 		Expect(err).ToNot(HaveOccurred())
 
-		err = os.WriteFile(filepath.Join(configDir, "containers.conf"), rosettaConfig, 0644)
+		err = os.WriteFile(filepath.Join(configDir, "containers.conf"), rosettaConfig, 0o644)
 		Expect(err).ToNot(HaveOccurred())
 
 		i := initMachine{}
@@ -437,8 +630,8 @@ var _ = Describe("podman machine init", func() {
 		Expect(err).ToNot(HaveOccurred())
 		Expect(session).To(Exit(0))
 
-		s := startMachine{}
-		ssession, err := mb.setCmd(s).setTimeout(time.Minute * 10).run()
+		s := &startMachine{}
+		ssession, err := mb.setCmd(s).run()
 		Expect(err).ToNot(HaveOccurred())
 		Expect(ssession).Should(Exit(0))
 
@@ -463,6 +656,97 @@ var _ = Describe("podman machine init", func() {
 		proc2Session, err := mb.setName(name).setCmd(proc2.withSSHCommand([]string{"ls -d /proc/sys/fs/binfmt_misc/qemu-x86_64"})).run()
 		Expect(err).ToNot(HaveOccurred())
 		Expect(proc2Session.outputToString()).To(ContainSubstring("/proc/sys/fs/binfmt_misc/qemu-x86_64"))
+	})
+
+	It("init machine with invalid --provider for platform", func() {
+		var providerOverride string
+		switch testProvider.VMType() {
+		case define.QemuVirt, define.AppleHvVirt, define.LibKrun:
+			providerOverride = "wsl"
+		case define.WSLVirt, define.HyperVVirt:
+			providerOverride = "applehv"
+		default:
+			Fail("unsupported provider in tests")
+		}
+
+		i := initMachine{}
+		machineName := randomString()
+		session, err := mb.setName(machineName).setCmd(i.withFakeImage(mb).withProvider(providerOverride)).run()
+		Expect(err).ToNot(HaveOccurred())
+		Expect(session.errorToString()).To(ContainSubstring(fmt.Sprintf("unsupported provider %q", providerOverride)))
+	})
+
+	It("machine init --provider", func() {
+		skipIfVmtype(define.WSLVirt, "Skip to avoid long tests or image pulls on Windows")
+		skipIfVmtype(define.HyperVVirt, "Skip to avoid long tests or image pulls Windows")
+		verify := make(map[string]string)
+
+		// Loop all providers and create a map with
+		// machine_name -> provider
+		for _, p := range provider.GetAll() {
+			machineName := randomString()
+			verify[machineName] = p.VMType().String()
+		}
+
+		// Loop verify and create a podman machine with the name and
+		// --provider
+		for name, p := range verify {
+			i := initMachine{}
+			session, err := mb.setName(name).setCmd(i.withFakeImage(mb).withProvider(p)).run()
+			Expect(err).ToNot(HaveOccurred())
+			Expect(session.ExitCode()).To(Equal(0))
+		}
+
+		// List machines and marshall them
+		list := new(listMachine)
+		list = list.withFormat("json")
+		listSession, err := mb.setCmd(list).run()
+		Expect(err).NotTo(HaveOccurred())
+		var listResponse []*entities.ListReporter
+		err = jsoniter.Unmarshal(listSession.Bytes(), &listResponse)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(listResponse).To(HaveLen(len(verify)))
+
+		// Loop our machine list and make sure we have a name -> provider
+		// match
+		for _, l := range listResponse {
+			p, ok := verify[l.Name]
+			if !ok {
+				Fail(fmt.Sprintf("%s not found in list", l.Name))
+			}
+			Expect(p).To(Equal(l.VMType))
+		}
+	})
+
+	It("init with read-only image should succeed", func() {
+		// Step 1: create temp image
+		img := filepath.Join(GinkgoT().TempDir(), "test.qcow2")
+
+		// Step 2: copy existing image and make it read-only
+		src, err := os.Open(mb.imagePath)
+		Expect(err).ToNot(HaveOccurred())
+
+		dst, err := os.Create(img)
+		Expect(err).ToNot(HaveOccurred())
+
+		_, err = io.Copy(dst, src)
+		Expect(err).ToNot(HaveOccurred())
+
+		err = dst.Close()
+		Expect(err).ToNot(HaveOccurred())
+
+		err = src.Close()
+		Expect(err).ToNot(HaveOccurred())
+
+		err = os.Chmod(img, 0o444)
+		Expect(err).ToNot(HaveOccurred())
+
+		// Step 3: run podman machine init
+		i := new(initMachine)
+		session, err := mb.setCmd(i.withImage(img)).run()
+
+		Expect(err).ToNot(HaveOccurred())
+		Expect(session).To(Exit(0))
 	})
 })
 

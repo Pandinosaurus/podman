@@ -11,11 +11,11 @@ import (
 	"path"
 	"path/filepath"
 
-	"github.com/containers/podman/v5/pkg/machine/compression"
-	"github.com/containers/podman/v5/pkg/machine/define"
-	"github.com/containers/podman/v5/utils"
-	"github.com/containers/storage/pkg/fileutils"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/podman/v6/pkg/machine/compression"
+	"go.podman.io/podman/v6/pkg/machine/define"
+	"go.podman.io/podman/v6/utils"
+	"go.podman.io/storage/pkg/fileutils"
 )
 
 type DiskFromURL struct {
@@ -26,9 +26,7 @@ type DiskFromURL struct {
 }
 
 func NewDiskFromURL(inputPath string, finalPath *define.VMFile, tempDir *define.VMFile, optionalTempFileName *string, cache bool) (*DiskFromURL, error) {
-	var (
-		err error
-	)
+	var err error
 	u, err := url2.Parse(inputPath)
 	if err != nil {
 		return nil, err
@@ -111,7 +109,11 @@ func (d *DiskFromURL) pull() error {
 
 	p, bar := utils.ProgressBar(prefix, size, onComplete)
 
-	proxyReader := bar.ProxyReader(resp.Body)
+	proxyReader, err := bar.ProxyReader(resp.Body)
+	if err != nil {
+		logrus.Errorf("Error creating progress bar %q", err)
+		return err
+	}
 	defer func() {
 		if err := proxyReader.Close(); err != nil {
 			logrus.Error(err)

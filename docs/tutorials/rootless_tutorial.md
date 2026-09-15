@@ -14,9 +14,18 @@ For installing Podman, see the [installation instructions](https://podman.io/get
 
 For building Podman, see the [build instructions](https://podman.io/getting-started/installation#building-from-scratch).
 
-### Install `slirp4netns`
+### Networking configuration
 
-The [slirp4netns](https://github.com/rootless-containers/slirp4netns) package provides user-mode networking for unprivileged network namespaces and must be installed on the machine in order for Podman to run in a rootless environment.  The package is available on most Linux distributions via their package distribution software such as `yum`, `dnf`, `apt`, `zypper`, etc.  If the package is not available, you can build and install `slirp4netns` from [GitHub](https://github.com/rootless-containers/slirp4netns).
+A user-mode networking tool for unprivileged network namespaces must be installed on the machine in order for Podman to run in a rootless environment.
+
+Podman uses [pasta](https://passt.top/passt/about/#pasta) (provided by [passt](https://passt.top/passt/about/)) for rootless networking. Pasta fully supports IPv6 and is architecturally secure (runs in a separate process, uses modern Linux mechanisms for isolation etc).
+
+Passt is [available on most Linux distributions](https://passt.top/passt/about/#availability) via their package distribution software such as `yum`, `dnf`, `apt`, `zypper`, etc. under the name `passt`.  If the package is not available, you can build and install `passt` from [its upstream](https://passt.top/passt/about/#try-it).
+
+More details about pasta can be found in [this blog post](https://blog.podman.io/2024/03/podman-5-0-breaking-changes-in-detail/) and in **[podman-network(1)](https://github.com/containers/podman/blob/main/docs/source/markdown/podman-network.1.md#pasta)**.
+
+> [!note]
+> pasta's default situation of not being able to communicate between the container and the host has been fixed in Podman 5.3: see [Podman 5.3 changes for improved networking experience with pasta](https://blog.podman.io/2024/10/podman-5-3-changes-for-improved-networking-experience-with-pasta/).
 
 ### `/etc/subuid` and `/etc/subgid` configuration
 
@@ -36,7 +45,7 @@ The format of this file is `USERNAME:UID:RANGE`
 * The initial UID allocated for the user.
 * The size of the range of UIDs allocated for the user.
 
-This means the user `johndoe` is allocated UIDs 100000-165535 as well as their standard UID in the `/etc/passwd` file.  NOTE: this is not currently supported with network installs; these files must be available locally to the host machine.  It is not possible to configure this with LDAP or Active Directory.
+This means the user `johndoe` is allocated UIDs 100000-165535 as well as their standard UID in the `/etc/passwd` file.
 
 Rather than updating the files directly, the `usermod` program can be used to assign UIDs and GIDs to a user.
 
@@ -48,6 +57,8 @@ grep johndoe /etc/subuid /etc/subgid
 ```
 
 If you update either `/etc/subuid` or `/etc/subgid`, you need to stop all the running containers owned by the user and kill the pause process that is running on the system for that user.  This can be done automatically by running [`podman system migrate`](https://github.com/containers/podman/blob/main/docs/source/markdown/podman-system-migrate.1.md) as that user.
+
+NOTE: Starting with shadow-utils 4.9, pluggable data sources for subid ranges can be configured via `/etc/nsswitch.conf`. SSSD provides a plugin (`libsubid_sss.so`) that can retrieve subordinate ID ranges from a central identity server. Instead of managing local `/etc/subuid` and `/etc/subgid` files. To enable this, configure `/etc/nsswitch.conf` with `subid: sss`. SSSD 2.6.0 added support for the IPA provider, and SSSD 2.12.0 extended this to the generic LDAP provider. For more details on centrally managed subordinate IDs with FreeIPA, see the [FreeIPA subordinate IDs documentation](https://freeipa.readthedocs.io/en/latest/designs/subordinate-ids.html).
 
 #### Giving access to additional groups
 
@@ -108,7 +119,7 @@ Note: in environments without `XDG` environment variables, Podman internally set
   - `/run/user/$UID` on `systemd` environments
   - `$TMPDIR/podman-run-$UID` otherwise
 
-The three main configuration files are [containers.conf](https://github.com/containers/common/blob/main/docs/containers.conf.5.md), [storage.conf](https://github.com/containers/storage/blob/main/docs/containers-storage.conf.5.md) and [registries.conf](https://github.com/containers/image/blob/main/docs/containers-registries.conf.5.md). The user can modify these files as they wish.
+The three main configuration files are [containers.conf](https://github.com/containers/container-libs/blob/main/common/docs/containers.conf.5.md), [storage.conf](https://github.com/containers/storage/blob/main/docs/containers-storage.conf.5.md) and [registries.conf](https://github.com/containers/image/blob/main/docs/containers-registries.conf.5.md). The user can modify these files as they wish.
 
 #### containers.conf
 Podman reads
@@ -193,6 +204,30 @@ Another consideration in regards to volumes:
 
 - When providing the path of a directory you'd like to bind-mount, the path needs to be provided as an absolute path
   or a relative path that starts with `.` (a dot), otherwise the string will be interpreted as the name of a named volume.
+
+#### Permission denied on a bind-mount source
+
+Inside the user namespace the process setting up the mount is `root`, but `CAP_DAC_OVERRIDE` only bypasses a file's mode when that file's user ID and group ID both have valid mappings in the namespace. That is the rule under "Operation of file-related capabilities" in **[user_namespaces(7)](https://man7.org/linux/man-pages/man7/user_namespaces.7.html)**. A directory owned by an unmapped ID is reported with the overflow ID, 65534 by default, and nothing overrides its mode.
+
+World permissions are checked first, so this only comes up when the mode alone does not let you through. In each case below the parent is owned as shown, the bind mount source is the child inside it, and `/etc/subuid` has `johndoe:100000:65536`:
+
+```
+# parent mode 755, owned by root: the mode already allows it, mapping never comes up
+host$ podman run --rm -v /tmp/open/child:/mnt alpine echo ok
+ok
+
+# parent mode 700, owned by root: root is not mapped, so nothing overrides the mode
+host$ podman run --rm -v /tmp/private/child:/mnt alpine echo ok
+Error: statfs /tmp/private/child: permission denied
+
+# parent mode 700, owned by 100999, which the range maps to UID 1000 in the namespace
+host$ podman run --rm -v /tmp/mapped/child:/mnt alpine echo ok
+ok
+```
+
+`podman unshare ls -ldn` on the parent shows which case you are in: an owner of 65534 there means the ID is not mapped. `--userns=keep-id` does not change this, it changes which UID you are inside the container rather than which host IDs the namespace maps.
+
+This is the file side of the warning above about subordinating active user ids: a range that covers UIDs real accounts use gives that user the override on their files in any namespace they create, which is why default ranges start at 100000.
 
 ## More information
 

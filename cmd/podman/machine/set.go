@@ -3,28 +3,24 @@
 package machine
 
 import (
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/common/pkg/strongunits"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/pkg/machine/define"
-	"github.com/containers/podman/v5/pkg/machine/env"
-	"github.com/containers/podman/v5/pkg/machine/shim"
-	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/common/pkg/strongunits"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/pkg/machine/define"
+	"go.podman.io/podman/v6/pkg/machine/shim"
 )
 
-var (
-	setCmd = &cobra.Command{
-		Use:               "set [options] [NAME]",
-		Short:             "Set a virtual machine setting",
-		Long:              "Set an updatable virtual machine setting",
-		PersistentPreRunE: machinePreRunE,
-		RunE:              setMachine,
-		Args:              cobra.MaximumNArgs(1),
-		Example:           `podman machine set --rootful=false`,
-		ValidArgsFunction: completion.AutocompleteNone,
-	}
-)
+var setCmd = &cobra.Command{
+	Use:               "set [options] [NAME]",
+	Short:             "Set a virtual machine setting",
+	Long:              "Set an updatable virtual machine setting",
+	PersistentPreRunE: machinePreRunE,
+	RunE:              setMachine,
+	Args:              cobra.MaximumNArgs(1),
+	Example:           `podman machine set --rootful=false`,
+	ValidArgsFunction: completion.AutocompleteNone,
+}
 
 var (
 	setFlags = SetFlags{}
@@ -38,6 +34,7 @@ type SetFlags struct {
 	Rootful            bool
 	UserModeNetworking bool
 	USBs               []string
+	ImportNativeCA     bool
 }
 
 func init() {
@@ -85,6 +82,10 @@ func init() {
 	userModeNetFlagName := "user-mode-networking"
 	flags.BoolVar(&setFlags.UserModeNetworking, userModeNetFlagName, false, // defaults not-relevant due to use of Changed()
 		"Whether this machine should use user-mode networking, routing traffic through a host user-space process")
+
+	importNativeCaFlagName := "import-native-ca"
+	flags.BoolVar(&setFlags.ImportNativeCA, importNativeCaFlagName, false, // defaults not-relevant due to use of Changed()
+		"Import the host trusted CA certificates into the machine")
 }
 
 func setMachine(cmd *cobra.Command, args []string) error {
@@ -93,12 +94,7 @@ func setMachine(cmd *cobra.Command, args []string) error {
 		vmName = args[0]
 	}
 
-	dirs, err := env.GetMachineDirs(provider.VMType())
-	if err != nil {
-		return err
-	}
-
-	mc, err := vmconfigs.LoadMachineByName(vmName, dirs)
+	mc, vmProvider, err := shim.VMExists(vmName)
 	if err != nil {
 		return err
 	}
@@ -107,6 +103,9 @@ func setMachine(cmd *cobra.Command, args []string) error {
 		setOpts.Rootful = &setFlags.Rootful
 	}
 	if cmd.Flags().Changed("cpus") {
+		if err := checkMaxCPUs(setFlags.CPUs); err != nil {
+			return err
+		}
 		setOpts.CPUs = &setFlags.CPUs
 	}
 	if cmd.Flags().Changed("memory") {
@@ -126,8 +125,11 @@ func setMachine(cmd *cobra.Command, args []string) error {
 	if cmd.Flags().Changed("usb") {
 		setOpts.USBs = &setFlags.USBs
 	}
+	if cmd.Flags().Changed("import-native-ca") {
+		setOpts.ImportNativeCA = &setFlags.ImportNativeCA
+	}
 
 	// At this point, we have the known changed information, etc
 	// Walk through changes to the providers if they need them
-	return shim.Set(mc, provider, setOpts)
+	return shim.Set(mc, vmProvider, setOpts)
 }

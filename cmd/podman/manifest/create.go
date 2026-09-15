@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/image/v5/types"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 // manifestCreateOptsWrapper wraps entities.ManifestCreateOptions and prevents leaking
@@ -30,9 +30,9 @@ var (
 		RunE:              create,
 		ValidArgsFunction: common.AutocompleteImages,
 		Example: `podman manifest create mylist:v1.11
-  podman manifest create mylist:v1.11 arch-specific-image-to-add
-  podman manifest create mylist:v1.11 arch-specific-image-to-add another-arch-specific-image-to-add
-  podman manifest create --all mylist:v1.11 transport:tagged-image-to-add`,
+podman manifest create mylist:v1.11 arch-specific-image-to-add
+podman manifest create mylist:v1.11 arch-specific-image-to-add another-arch-specific-image-to-add
+podman manifest create --all mylist:v1.11 transport:tagged-image-to-add`,
 		Args: cobra.MinimumNArgs(1),
 	}
 )

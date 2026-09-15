@@ -1,4 +1,4 @@
-//go:build linux || freebsd
+//go:build !remote_testing && (linux || freebsd)
 
 package integration
 
@@ -6,14 +6,13 @@ import (
 	"os"
 	"path/filepath"
 
-	. "github.com/containers/podman/v5/test/utils"
-	"github.com/containers/storage/pkg/homedir"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	. "go.podman.io/podman/v6/test/utils"
+	"go.podman.io/storage/pkg/homedir"
 )
 
 var _ = Describe("podman image scp", func() {
-
 	BeforeEach(setupConnectionsConf)
 
 	It("podman image scp bogus image", func() {
@@ -26,7 +25,13 @@ var _ = Describe("podman image scp", func() {
 		if _, err := os.Stat(filepath.Join(homedir.Get(), ".ssh", "known_hosts")); err != nil {
 			Skip("known_hosts does not exist or is not accessible")
 		}
-		cmd := []string{"system", "connection", "add",
+
+		ensureImage := podmanTest.Podman([]string{"pull", "-q", ALPINE})
+		ensureImage.WaitWithDefaultTimeout()
+		Expect(ensureImage).Should(ExitCleanly())
+
+		cmd := []string{
+			"system", "connection", "add",
 			"--default",
 			"QA",
 			"ssh://root@podman.test:2222/run/podman/podman.sock",
@@ -43,4 +48,19 @@ var _ = Describe("podman image scp", func() {
 		Expect(scp).Should(ExitWithError(125, "failed to connect: dial tcp: lookup "))
 	})
 
+	It("podman image scp preserves a username containing an @", func() {
+		// The user-to-user transfer path that looks up the local username
+		// only runs rootful.
+		SkipIfRootless("the local user lookup only happens during a rootful transfer")
+
+		// Regression test for https://github.com/containers/podman/issues/27655:
+		// a username that itself contains an "@" (e.g. an Active Directory
+		// "user@domain") must be parsed as a whole. Before the fix it was
+		// truncated at the first "@", so the lookup failed for "user" instead
+		// of "user@domain". The lookup happens before any image is touched, so
+		// the bogus user is enough to exercise the parsing.
+		scp := podmanTest.Podman([]string{"image", "scp", "user@domain@localhost::" + ALPINE})
+		scp.WaitWithDefaultTimeout()
+		Expect(scp).Should(ExitWithError(125, "unknown user user@domain"))
+	})
 })

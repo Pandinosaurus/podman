@@ -6,17 +6,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 
-	. "github.com/containers/podman/v5/test/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	. "github.com/onsi/gomega/gexec"
+	. "go.podman.io/podman/v6/test/utils"
 )
 
 var _ = Describe("Podman pull", func() {
-
 	It("podman pull multiple images with/without tag/digest", func() {
+		SkipIfNotAMD64() // https://github.com/containers/podman/issues/28273
 		session := podmanTest.Podman([]string{"pull", "-q", "busybox:musl", "alpine", "alpine:latest", "quay.io/libpod/cirros", "quay.io/libpod/testdigest_v2s2@sha256:755f4d90b3716e2bf57060d249e2cd61c9ac089b1233465c5c2cb2d7ee550fdb"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
@@ -39,6 +40,7 @@ var _ = Describe("Podman pull", func() {
 	})
 
 	It("podman pull with tag --quiet", func() {
+		SkipIfNotAMD64() // https://github.com/containers/podman/issues/28273
 		session := podmanTest.Podman([]string{"pull", "-q", "quay.io/libpod/testdigest_v2s2:20200210"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
@@ -55,6 +57,7 @@ var _ = Describe("Podman pull", func() {
 	})
 
 	It("podman pull without tag", func() {
+		SkipIfNotAMD64() // https://github.com/containers/podman/issues/28273
 		session := podmanTest.Podman([]string{"pull", "-q", "quay.io/libpod/testdigest_v2s2"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
@@ -113,27 +116,26 @@ var _ = Describe("Podman pull", func() {
 
 		// Set `imagestore` in `storage.conf` and container should run.
 		configPath := filepath.Join(podmanTest.TempDir, ".config", "containers", "storage.conf")
-		os.Setenv("CONTAINERS_STORAGE_CONF", configPath)
+		os.Setenv("CONTAINERS_STORAGE_CONF_OVERRIDE", configPath)
 		defer func() {
-			os.Unsetenv("CONTAINERS_STORAGE_CONF")
+			os.Unsetenv("CONTAINERS_STORAGE_CONF_OVERRIDE")
 		}()
 
 		err = os.MkdirAll(filepath.Dir(configPath), os.ModePerm)
 		Expect(err).ToNot(HaveOccurred())
-		storageConf := []byte(fmt.Sprintf("[storage]\nimagestore=\"%s\"", tmpDir))
+		storageConf := fmt.Appendf(nil, "[storage]\nimagestore=\"%s\"", tmpDir)
 		err = os.WriteFile(configPath, storageConf, os.ModePerm)
 		Expect(err).ToNot(HaveOccurred())
 
-		session = podmanTest.Podman([]string{"run", "--name", "test", "--rm",
-			imgName, "echo", "helloworld"})
-		session.WaitWithDefaultTimeout()
-		Expect(session).Should(Exit(0))
+		session = podmanTest.PodmanExitCleanly(
+			"run", "--name", "test", "--rm",
+			imgName, "echo", "helloworld",
+		)
 		Expect(session.OutputToString()).To(ContainSubstring("helloworld"))
-		Expect(session.ErrorToString()).To(ContainSubstring("The storage 'driver' option should be set in "))
-		Expect(session.ErrorToString()).To(ContainSubstring("A driver was picked automatically."))
 	})
 
 	It("podman pull by digest", func() {
+		SkipIfNotAMD64() // https://github.com/containers/podman/issues/28273
 		session := podmanTest.Podman([]string{"pull", "-q", "quay.io/libpod/testdigest_v2s2@sha256:755f4d90b3716e2bf57060d249e2cd61c9ac089b1233465c5c2cb2d7ee550fdb"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
@@ -149,6 +151,7 @@ var _ = Describe("Podman pull", func() {
 	})
 
 	It("podman pull check all tags", func() {
+		SkipIfNotAMD64() // https://github.com/containers/podman/issues/28273
 		session := podmanTest.Podman([]string{"pull", "-q", "--all-tags", "quay.io/libpod/testdigest_v2s2"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
@@ -175,6 +178,7 @@ var _ = Describe("Podman pull", func() {
 	})
 
 	It("podman pull by digest (image list)", func() {
+		SkipIfNotAMD64() // https://github.com/containers/podman/issues/28273
 		session := podmanTest.Podman([]string{"pull", "-q", "--arch=arm64", ALPINELISTDIGEST})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
@@ -218,6 +222,7 @@ var _ = Describe("Podman pull", func() {
 	})
 
 	It("podman pull by instance digest (image list)", func() {
+		SkipIfNotAMD64() // https://github.com/containers/podman/issues/28273
 		SkipIfRemote("podman-remote does not support disabling external imagestore")
 
 		session := podmanTest.Podman([]string{"pull", "-q", "--arch=arm64", ALPINEARM64DIGEST})
@@ -262,6 +267,7 @@ var _ = Describe("Podman pull", func() {
 	})
 
 	It("podman pull by tag (image list)", func() {
+		SkipIfNotAMD64() // https://github.com/containers/podman/issues/28273
 		SkipIfRemote("podman-remote does not support disabling external imagestore")
 
 		session := podmanTest.Podman([]string{"pull", "-q", "--arch=arm64", ALPINELISTTAG})
@@ -317,7 +323,12 @@ var _ = Describe("Podman pull", func() {
 		Expect(session).Should(ExitCleanly())
 	})
 
+	pullChunkedTests()
+
+	pullMirrorFallbackTests()
+
 	It("podman pull from docker-archive", func() {
+		SkipIfNotAMD64() // https://github.com/containers/podman/issues/28273
 		SkipIfRemote("podman-remote does not support pulling from docker-archive")
 
 		podmanTest.AddImageToRWStore(CIRROS_IMAGE)
@@ -600,7 +611,6 @@ var _ = Describe("Podman pull", func() {
 	})
 
 	Describe("podman pull and decrypt", func() {
-
 		decryptionTestHelper := func(imgPath string) *PodmanSessionIntegration {
 			bitSize := 1024
 			keyFileName := filepath.Join(podmanTest.TempDir, "key,withcomma")
@@ -623,7 +633,8 @@ var _ = Describe("Podman pull", func() {
 			// Pulling encrypted image without key should fail
 			session = podmanTest.Podman([]string{"pull", "--tls-verify=false", imgPath})
 			session.WaitWithDefaultTimeout()
-			Expect(session).Should(ExitWithError(125, "invalid tar header"))
+			Expect(session).Should(ExitWithError(125, " ")) // " ", not "" - stderr can be not empty, and we will match actual contents below.
+			Expect(session.ErrorToString()).To(Or(ContainSubstring("invalid tar header"), ContainSubstring("does not match config's DiffID")))
 
 			// Pulling encrypted image with wrong key should fail
 			session = podmanTest.Podman([]string{"pull", "-q", "--decryption-key", wrongPrivateKeyFileName, "--tls-verify=false", imgPath})
@@ -652,13 +663,13 @@ var _ = Describe("Podman pull", func() {
 
 			session := decryptionTestHelper(imgPath)
 
-			Expect(session.LineInOutputContainsTag("localhost/name", "tag")).To(BeTrue())
+			Expect(session.OutputToStringArray()).To(ContainElement(MatchRegexp(`^localhost/name\s+tag\s`)))
 		})
 
 		It("From local registry", func() {
 			SkipIfRemote("Remote pull does not support decryption")
 
-			if podmanTest.Host.Arch == "ppc64le" {
+			if runtime.GOARCH == "ppc64le" {
 				Skip("No registry image for ppc64le")
 			}
 
@@ -682,8 +693,7 @@ var _ = Describe("Podman pull", func() {
 
 			session = decryptionTestHelper(imgPath)
 
-			Expect(session.LineInOutputContainsTag(imgPath, "latest")).To(BeTrue())
+			Expect(session.OutputToStringArray()).To(ContainElement(MatchRegexp("^" + regexp.QuoteMeta(imgPath) + `\s+latest\s`)))
 		})
 	})
-
 })

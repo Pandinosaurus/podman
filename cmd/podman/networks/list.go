@@ -1,21 +1,21 @@
 package network
 
 import (
+	"cmp"
 	"fmt"
 	"os"
-	"sort"
-	"strings"
+	"slices"
 
-	"github.com/containers/common/libnetwork/types"
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/common/pkg/report"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/parse"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/validate"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"go.podman.io/common/libnetwork/types"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/common/pkg/report"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/parse"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/validate"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 var (
@@ -61,7 +61,7 @@ func init() {
 	networkListFlags(flags)
 }
 
-func networkList(cmd *cobra.Command, args []string) error {
+func networkList(cmd *cobra.Command, _ []string) error {
 	var err error
 	networkListOptions.Filters, err = parse.FilterArgumentsIntoFilters(filters)
 	if err != nil {
@@ -73,8 +73,8 @@ func networkList(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	// sort the networks to make sure the order is deterministic
-	sort.Slice(responses, func(i, j int) bool {
-		return responses[i].Name < responses[j].Name
+	slices.SortFunc(responses, func(a, b types.Network) int {
+		return cmp.Compare(a.Name, b.Name)
 	})
 
 	switch {
@@ -151,13 +151,10 @@ type ListPrintReports struct {
 	types.Network
 }
 
-// Labels returns any labels added to a Network
+// Labels returns the network's labels as a sorted, comma-separated list of
+// key=value pairs, matching Docker CLI output format.
 func (n ListPrintReports) Labels() string {
-	list := make([]string, 0, len(n.Network.Labels))
-	for k, v := range n.Network.Labels {
-		list = append(list, k+"="+v)
-	}
-	return strings.Join(list, ",")
+	return common.FormatLabels(n.Network.Labels)
 }
 
 // ID returns the Podman Network ID

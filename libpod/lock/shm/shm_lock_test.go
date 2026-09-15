@@ -1,4 +1,4 @@
-//go:build linux || freebsd
+//go:build (linux || freebsd) && cgo
 
 package shm
 
@@ -20,10 +20,8 @@ import (
 // to test without actually having multiple processes...
 // We can at least verify that the locks work within the local process.
 
-var (
-	// 4 * BITMAP_SIZE to ensure we have to traverse bitmaps
-	numLocks = 4 * BitmapSize
-)
+// 4 * BITMAP_SIZE to ensure we have to traverse bitmaps
+var numLocks = 4 * BitmapSize
 
 const lockPath = "/libpod_test"
 
@@ -166,8 +164,7 @@ func TestAllocateTwoLocksGetsDifferentLocks(t *testing.T) {
 func TestAllocateAllLocksSucceeds(t *testing.T) {
 	runLockTest(t, func(t *testing.T, locks *SHMLocks) {
 		sems := make(map[uint32]bool)
-		var i uint32
-		for i = 0; i < numLocks; i++ {
+		for range numLocks {
 			sem, err := locks.AllocateSemaphore()
 			assert.NoError(t, err)
 
@@ -184,8 +181,7 @@ func TestAllocateAllLocksSucceeds(t *testing.T) {
 func TestAllocateTooManyLocksFails(t *testing.T) {
 	runLockTest(t, func(t *testing.T, locks *SHMLocks) {
 		// Allocate all locks
-		var i uint32
-		for i = 0; i < numLocks; i++ {
+		for range numLocks {
 			_, err := locks.AllocateSemaphore()
 			assert.NoError(t, err)
 		}
@@ -200,8 +196,7 @@ func TestAllocateTooManyLocksFails(t *testing.T) {
 func TestAllocateDeallocateCycle(t *testing.T) {
 	runLockTest(t, func(t *testing.T, locks *SHMLocks) {
 		// Allocate all locks
-		var i uint32
-		for i = 0; i < numLocks; i++ {
+		for range numLocks {
 			_, err := locks.AllocateSemaphore()
 			assert.NoError(t, err)
 		}
@@ -209,8 +204,7 @@ func TestAllocateDeallocateCycle(t *testing.T) {
 		// Now loop through again, deallocating and reallocating.
 		// Each time we free 1 semaphore, allocate again, and make sure
 		// we get the same semaphore back.
-		var j uint32
-		for j = 0; j < numLocks; j++ {
+		for j := range numLocks {
 			err := locks.DeallocateSemaphore(j)
 			assert.NoError(t, err)
 
@@ -251,11 +245,14 @@ func TestLockSemaphoreActuallyLocks(t *testing.T) {
 		// Get the current time
 		startTime := time.Now()
 
+		lockAcquired := make(chan struct{})
+
 		// Start a goroutine to take the lock and then release it after
 		// a second.
 		go func() {
 			err := locks.LockSemaphore(0)
 			assert.NoError(t, err)
+			close(lockAcquired)
 
 			time.Sleep(1 * time.Second)
 
@@ -263,9 +260,8 @@ func TestLockSemaphoreActuallyLocks(t *testing.T) {
 			assert.NoError(t, err)
 		}()
 
-		// Sleep for a quarter of a second to give the goroutine time
-		// to kick off and grab the lock
-		time.Sleep(250 * time.Millisecond)
+		// Wait until the goroutine has acquired the lock.
+		<-lockAcquired
 
 		// Take the lock
 		err := locks.LockSemaphore(0)

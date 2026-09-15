@@ -3,20 +3,20 @@ package types
 import (
 	"time"
 
-	"github.com/containers/podman/v5/pkg/inspect"
-	"github.com/containers/podman/v5/pkg/trust"
+	"go.podman.io/podman/v6/pkg/inspect"
+	"go.podman.io/podman/v6/pkg/trust"
 )
 
 // swagger:model LibpodImageSummary
 type ImageSummary struct {
 	ID          string `json:"Id"`
-	ParentId    string //nolint:revive,stylecheck
+	ParentId    string
 	RepoTags    []string
 	RepoDigests []string
 	Created     int64
 	Size        int64
 	SharedSize  int
-	VirtualSize int64
+	VirtualSize int64 `json:",omitempty"`
 	Labels      map[string]string
 	Containers  int
 	ReadOnly    bool `json:",omitempty"`
@@ -34,7 +34,7 @@ type ImageSummary struct {
 	Os             string   `json:",omitempty"`
 }
 
-func (i *ImageSummary) Id() string { //nolint:revive,stylecheck
+func (i *ImageSummary) Id() string {
 	return i.ID
 }
 
@@ -59,8 +59,12 @@ type ImageLoadReport struct {
 }
 
 type ImageImportReport struct {
-	Id string //nolint:revive,stylecheck
+	Id string
 }
+
+// ImageSearchTrue is the string representation of true for
+// the Official and Automated fields in ImageSearchReport.
+const ImageSearchTrue = "[OK]"
 
 // ImageSearchReport is the response from searching images.
 type ImageSearchReport struct {
@@ -73,8 +77,10 @@ type ImageSearchReport struct {
 	// Stars is the number of stars of the image.
 	Stars int
 	// Official indicates if it's an official image.
+	// ImageSearchTrue represents true and "" is false.
 	Official string
 	// Automated indicates if the image was created by an automated build.
+	// ImageSearchTrue represents true and "" is false.
 	Automated string
 	// Tag is the repository tag
 	Tag string
@@ -90,7 +96,7 @@ type ShowTrustReport struct {
 
 // ImageMountReport describes the response from image mount
 type ImageMountReport struct {
-	Id           string //nolint:revive,stylecheck
+	Id           string
 	Name         string
 	Repositories []string
 	Path         string
@@ -99,7 +105,7 @@ type ImageMountReport struct {
 // ImageUnmountReport describes the response from umounting an image
 type ImageUnmountReport struct {
 	Err error
-	Id  string //nolint:revive,stylecheck
+	Id  string
 }
 
 // FarmInspectReport describes the response from farm inspect
@@ -125,7 +131,7 @@ type ImageRemoveReport struct {
 
 type ImageHistoryLayer struct {
 	ID        string    `json:"id"`
-	Created   time.Time `json:"created,omitempty"`
+	Created   time.Time `json:"created"`
 	CreatedBy string    `json:",omitempty"`
 	Tags      []string  `json:"tags,omitempty"`
 	Size      int64     `json:"size"`
@@ -136,15 +142,77 @@ type ImageHistoryReport struct {
 	Layers []ImageHistoryLayer
 }
 
+// swagger:model ImagePullStatus
+type ImagePullStatus string
+
+const (
+	ImagePullStatusPulling ImagePullStatus = "pulling"
+	ImagePullStatusSuccess ImagePullStatus = "success"
+	ImagePullStatusError   ImagePullStatus = "error"
+)
+
 type ImagePullReport struct {
-	// Stream used to provide output from c/image
+	// Status contains the status of the image pull.
+	// Populated when streaming is enabled.
+	//
+	// Possible values:
+	//
+	// "pulling": image pull is in progress
+	//
+	// "success": image pull has completed successfully
+	//
+	// "error": image pull has encountered an error
+	Status ImagePullStatus `json:"status,omitempty"`
+	// Stream used to provide output from c/image.
+	// Populated when streaming is enabled and image status is "pulling".
 	Stream string `json:"stream,omitempty"`
-	// Error contains text of errors from c/image
+	// Error contains text of errors from c/image.
+	// Populated when streaming is enabled and image status is "error".
 	Error string `json:"error,omitempty"`
 	// Images contains the ID's of the images pulled
 	Images []string `json:"images,omitempty"`
 	// ID contains image id (retained for backwards compatibility)
 	ID string `json:"id,omitempty"`
+	// Progress contains the information about the progress of the artifact pull.
+	// Populated when streaming is enabled, image status is "pulling",
+	// and there is pull progress to report.
+	Progress *ArtifactPullProgress `json:"pullProgress,omitempty"`
+}
+
+// swagger:model ArtifactPullStatus
+type ArtifactPullStatus string
+
+const (
+	ArtifactPullStatusPulling ArtifactPullStatus = "pulling"
+	ArtifactPullStatusSuccess ArtifactPullStatus = "success"
+	ArtifactPullStatusSkipped ArtifactPullStatus = "skipped"
+)
+
+// Information about the progress of the artifact pull.
+// Populated when streaming is enabled, image status is "pulling",
+// and there is pull progress to report.
+type ArtifactPullProgress struct {
+	// Status contains the status of the artifact pull.
+	//
+	// Possible values:
+	//
+	// "pulling": artifact pull is in progress
+	//
+	// "success": artifact pull has completed successfully
+	//
+	// "skipped": artifact pull has been skipped because the artifact is already available at the destination
+	Status ArtifactPullStatus `json:"status,omitempty"`
+	// Current is the number of bytes of the current artifact that have been
+	// transferred so far.
+	// Populated when artifact status is "pulling" or "success".
+	Current uint64 `json:"current,omitempty"`
+	// Total is the total size of the artifact in bytes. A value of -1
+	// indicates that the total size is unknown.
+	// Populated when artifact status is "pulling" or "success".
+	Total int64 `json:"total,omitempty"`
+	// ProgressComponentID is the unique identifier for the artifact being pulled.
+	// A value of "" indicates that the progress component ID is unknown.
+	ProgressComponentID string `json:"progressComponentID,omitempty"`
 }
 
 type ImagePushStream struct {

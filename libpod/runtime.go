@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package libpod
 
@@ -10,41 +10,41 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 
-	"github.com/containers/buildah/pkg/parse"
-	"github.com/containers/common/libimage"
-	"github.com/containers/common/libnetwork/network"
-	nettypes "github.com/containers/common/libnetwork/types"
-	"github.com/containers/common/pkg/cgroups"
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/common/pkg/secrets"
-	systemdCommon "github.com/containers/common/pkg/systemd"
-	"github.com/containers/image/v5/pkg/sysregistriesv2"
-	is "github.com/containers/image/v5/storage"
-	"github.com/containers/image/v5/types"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/libpod/events"
-	"github.com/containers/podman/v5/libpod/lock"
-	"github.com/containers/podman/v5/libpod/plugin"
-	"github.com/containers/podman/v5/libpod/shutdown"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/rootless"
-	"github.com/containers/podman/v5/pkg/systemd"
-	"github.com/containers/podman/v5/pkg/util"
-	"github.com/containers/storage"
-	"github.com/containers/storage/pkg/fileutils"
-	"github.com/containers/storage/pkg/lockfile"
-	"github.com/containers/storage/pkg/unshare"
-	"github.com/docker/docker/pkg/namesgenerator"
 	"github.com/hashicorp/go-multierror"
 	jsoniter "github.com/json-iterator/go"
 	spec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
-	"golang.org/x/exp/slices"
+	"go.podman.io/buildah/pkg/parse"
+	"go.podman.io/common/libimage"
+	"go.podman.io/common/libnetwork/network"
+	nettypes "go.podman.io/common/libnetwork/types"
+	"go.podman.io/common/pkg/config"
+	artStore "go.podman.io/common/pkg/libartifact"
+	"go.podman.io/common/pkg/secrets"
+	systemdCommon "go.podman.io/common/pkg/systemd"
+	is "go.podman.io/image/v5/storage"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/libpod/events"
+	"go.podman.io/podman/v6/libpod/lock"
+	"go.podman.io/podman/v6/libpod/namesgenerator"
+	"go.podman.io/podman/v6/libpod/plugin"
+	"go.podman.io/podman/v6/libpod/shutdown"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/domain/entities/reports"
+	"go.podman.io/podman/v6/pkg/rootless"
+	"go.podman.io/podman/v6/pkg/systemd"
+	"go.podman.io/podman/v6/pkg/util"
+	"go.podman.io/storage"
+	"go.podman.io/storage/pkg/fileutils"
+	"go.podman.io/storage/pkg/lockfile"
+	"go.podman.io/storage/pkg/unshare"
+	stypes "go.podman.io/storage/types"
 )
 
 // Set up the JSON library for all of Libpod
@@ -69,18 +69,23 @@ type Runtime struct {
 	storageConfig storage.StoreOptions
 	storageSet    storageSet
 
-	state                  State
-	store                  storage.Store
-	storageService         *storageService
-	imageContext           *types.SystemContext
-	defaultOCIRuntime      OCIRuntime
-	ociRuntimes            map[string]OCIRuntime
-	runtimeFlags           []string
-	network                nettypes.ContainerNetwork
-	conmonPath             string
-	libimageRuntime        *libimage.Runtime
-	libimageEventsShutdown chan bool
-	lockManager            lock.Manager
+	state                     State
+	store                     storage.Store
+	storageService            *storageService
+	imageContext              types.SystemContext
+	defaultOCIRuntime         OCIRuntime
+	ociRuntimes               map[string]OCIRuntime
+	runtimeFlags              []string
+	network                   nettypes.ContainerNetwork
+	conmonPath                string
+	libimageRuntime           *libimage.Runtime
+	libimageEventsShutdown    chan bool
+	libartifactEventsShutdown chan bool
+	lockManager               lock.Manager
+
+	// ArtifactStore returns the artifact store created from the runtime.
+	ArtifactStore         func() (*artStore.ArtifactStore, error)
+	shutdownArtifactStore func()
 
 	// Worker
 	workerChannel chan func()
@@ -105,6 +110,10 @@ type Runtime struct {
 	// errors related to lock initialization so a renumber can be performed
 	// if something has gone wrong.
 	doRenumber bool
+	// Do not error on a BoltDB database existing. Useful for commanding
+	// a database migration, as we can't actually get to the migration code
+	// with an existing Bolt database otherwise.
+	noBoltError bool
 
 	// valid indicates whether the runtime is ready to use.
 	// valid is set to true when a runtime is returned from GetRuntime(),
@@ -171,24 +180,11 @@ func NewRuntime(ctx context.Context, options ...RuntimeOption) (*Runtime, error)
 	return newRuntimeFromConfig(ctx, conf, options...)
 }
 
-// NewRuntimeFromConfig creates a new container runtime using the given
-// configuration file for its default configuration. Passed RuntimeOption
-// functions can be used to mutate this configuration further.
-// An error will be returned if the configuration file at the given path does
-// not exist or cannot be loaded
-func NewRuntimeFromConfig(ctx context.Context, userConfig *config.Config, options ...RuntimeOption) (*Runtime, error) {
-	return newRuntimeFromConfig(ctx, userConfig, options...)
-}
-
 func newRuntimeFromConfig(ctx context.Context, conf *config.Config, options ...RuntimeOption) (*Runtime, error) {
 	runtime := new(Runtime)
 
 	if conf.Engine.OCIRuntime == "" {
-		conf.Engine.OCIRuntime = "runc"
-		// If we're running on cgroups v2, default to using crun.
-		if onCgroupsv2, _ := cgroups.IsCgroup2UnifiedMode(); onCgroupsv2 {
-			conf.Engine.OCIRuntime = "crun"
-		}
+		conf.Engine.OCIRuntime = "crun"
 	}
 
 	runtime.config = conf
@@ -214,15 +210,10 @@ func newRuntimeFromConfig(ctx context.Context, conf *config.Config, options ...R
 		return nil, err
 	}
 
-	if err := shutdown.Register("libpod", func(sig os.Signal) error {
+	if err := shutdown.Register("libpod", func(_ os.Signal) error {
 		if runtime.store != nil {
 			_, _ = runtime.store.Shutdown(false)
 		}
-		// For `systemctl stop podman.service` support, exit code should be 0
-		if sig == syscall.SIGTERM {
-			os.Exit(0)
-		}
-		os.Exit(1)
 		return nil
 	}); err != nil && !errors.Is(err, shutdown.ErrHandlerExists) {
 		logrus.Errorf("Registering shutdown handler for libpod: %v", err)
@@ -262,12 +253,12 @@ func getLockManager(runtime *Runtime) (lock.Manager, error) {
 			lockPath = fmt.Sprintf("%s_%d", define.DefaultRootlessSHMLockPath, rootless.GetRootlessUID())
 		}
 		// Set up the lock manager
-		manager, err = lock.OpenSHMLockManager(lockPath, runtime.config.Engine.NumLocks)
-		if err != nil {
+		manager, err = lock.OpenSHMLockManager(lockPath, runtime.config.Engine.NumLocks) //nolint:staticcheck,nolintlint // false-positives on freebsd because this always errors there
+		if err != nil {                                                                  //nolint:staticcheck,nolintlint
 			switch {
 			case errors.Is(err, os.ErrNotExist):
-				manager, err = lock.NewSHMLockManager(lockPath, runtime.config.Engine.NumLocks)
-				if err != nil {
+				manager, err = lock.NewSHMLockManager(lockPath, runtime.config.Engine.NumLocks) //nolint:staticcheck,nolintlint // false-positives on freebsd because this always errors there
+				if err != nil {                                                                 //nolint:staticcheck,nolintlint
 					return nil, fmt.Errorf("failed to get new shm lock manager: %w", err)
 				}
 			case errors.Is(err, syscall.ERANGE) && runtime.doRenumber:
@@ -280,8 +271,8 @@ func getLockManager(runtime *Runtime) (lock.Manager, error) {
 					return nil, fmt.Errorf("removing libpod locks file %s: %w", lockPath, err)
 				}
 
-				manager, err = lock.NewSHMLockManager(lockPath, runtime.config.Engine.NumLocks)
-				if err != nil {
+				manager, err = lock.NewSHMLockManager(lockPath, runtime.config.Engine.NumLocks) //nolint:staticcheck,nolintlint // false-positives on freebsd because this always errors there
+				if err != nil {                                                                 //nolint:staticcheck,nolintlint
 					return nil, err
 				}
 			default:
@@ -294,6 +285,8 @@ func getLockManager(runtime *Runtime) (lock.Manager, error) {
 	return manager, nil
 }
 
+var errBoltExists = errors.New("legacy database exists")
+
 func getDBState(runtime *Runtime) (State, error) {
 	// TODO - if we further break out the state implementation into
 	// libpod/state, the config could take care of the code below.  It
@@ -304,31 +297,27 @@ func getDBState(runtime *Runtime) (State, error) {
 		return nil, err
 	}
 
-	// get default boltdb path
-	baseDir := runtime.config.Engine.StaticDir
-	if runtime.storageConfig.TransientStore {
-		baseDir = runtime.config.Engine.TmpDir
-	}
-	boltDBPath := filepath.Join(baseDir, "bolt_state.db")
-
 	switch backend {
-	case config.DBBackendDefault:
-		// for backwards compatibility check if boltdb exists, if it does not we use sqlite
-		if err := fileutils.Exists(boltDBPath); err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				// need to set DBBackend string so podman info will show the backend name correctly
-				runtime.config.Engine.DBBackend = config.DBBackendSQLite.String()
-				return NewSqliteState(runtime)
-			}
-			// Return error here some other problem with the boltdb file, rather than silently
-			// switch to sqlite which would be hard to debug for the user return the error back
-			// as this likely a real bug.
-			return nil, err
-		}
-		runtime.config.Engine.DBBackend = config.DBBackendBoltDB.String()
-		fallthrough
 	case config.DBBackendBoltDB:
-		return NewBoltState(boltDBPath, runtime)
+		return nil, fmt.Errorf("the BoltDB database backend was removed in Podman 6.0 - please comment out the `database_backend` line in containers.conf and migrate to SQLite by rebooting the system or using the `podman system migrate --migrate-db` command")
+	case config.DBBackendDefault:
+		if !runtime.noBoltError {
+			boltDBPath := getBoltDBPath(runtime)
+			if err := fileutils.Exists(boltDBPath); err == nil {
+				// We need to return a valid state.
+				// The error below can be discarded if we are performing a state refresh - in which case we migrate the BoltDB database.
+				// Problem: We cannot know if a refresh is happening until almost the end of runtime init.
+				// And we can't really change that - it has to be after the database is set up.
+				// (We need paths from the state to know where to check for the alive file).
+				// Solution is to return a valid state, and defer handling the errBoltExists error until we are sure we are/are not refreshing.
+				sqliteState, err := NewSqliteState(runtime)
+				if err != nil {
+					return nil, err
+				}
+				return sqliteState, fmt.Errorf("a BoltDB database exists but is no longer being used. BoltDB support was removed in the Podman 6.0 release. The legacy database can be migrated to SQLite by rebooting and running Podman again or using the `podman system migrate --migrate-db` command. IMPORTANT: Only use the `system migrate` command when you can ensure there are no other Podman processes running. If you are not absolutely sure of this, it is strongly recommended that you reboot. If you do not care about the contents of the legacy database, you can rename or remove the legacy database at %q to suppress this error: %w", boltDBPath, errBoltExists)
+			}
+		}
+		fallthrough
 	case config.DBBackendSQLite:
 		return NewSqliteState(runtime)
 	default:
@@ -357,7 +346,7 @@ func makeRuntime(ctx context.Context, runtime *Runtime) (retErr error) {
 	}
 
 	// Make the static files directory if it does not exist
-	if err := os.MkdirAll(runtime.config.Engine.StaticDir, 0700); err != nil {
+	if err := os.MkdirAll(runtime.config.Engine.StaticDir, 0o700); err != nil {
 		// The directory is allowed to exist
 		if !errors.Is(err, os.ErrExist) {
 			return fmt.Errorf("creating runtime static files directory %q: %w", runtime.config.Engine.StaticDir, err)
@@ -365,7 +354,7 @@ func makeRuntime(ctx context.Context, runtime *Runtime) (retErr error) {
 	}
 
 	// Create the TmpDir if needed
-	if err := os.MkdirAll(runtime.config.Engine.TmpDir, 0751); err != nil {
+	if err := os.MkdirAll(runtime.config.Engine.TmpDir, 0o751); err != nil {
 		return fmt.Errorf("creating runtime temporary files directory: %w", err)
 	}
 
@@ -373,14 +362,48 @@ func makeRuntime(ctx context.Context, runtime *Runtime) (retErr error) {
 	// This is not strictly necessary at this point, but the path not
 	// existing can cause troubles with DB path validation on OSTree based
 	// systems. Ref: https://github.com/containers/podman/issues/23515
-	if err := os.MkdirAll(runtime.config.Engine.VolumePath, 0700); err != nil {
+	if err := os.MkdirAll(runtime.config.Engine.VolumePath, 0o700); err != nil {
 		return fmt.Errorf("creating runtime volume path directory: %w", err)
 	}
 
+	// Check if a SQLite DB exists prior to getting a DB.
+	// If it does not, and we have a Bolt database, we may need to remove the SQLite DB
+	// that is created below if we are not performing a database migration.
+	// This ensures that reverting to Podman 5.8.2 will not default to SQLite and break things.
+	sqliteDBExists := checkSQLiteDBExists(runtime)
+
 	// Set up the state.
+	boltExists := false
+	var boltError error
 	runtime.state, err = getDBState(runtime)
 	if err != nil {
-		return err
+		if errors.Is(err, errBoltExists) {
+			boltExists = true
+			boltError = err
+		} else {
+			return err
+		}
+	}
+
+	// We did not have a SQLite DB before Podman ran.
+	// Remove the one that was created (if one was created) so we don't break reverting to 5.8
+	removeSQLite := false
+	if !sqliteDBExists && boltExists {
+		removeSQLite = true
+		defer func() {
+			if removeSQLite {
+				// Do a final check that the BoltDB state still exists.
+				// If it doesn't, someone else probably performed a migration to SQLite before we got here.
+				// In that case, it'd be bad to remove the now in use database.
+				if err := fileutils.Exists(getBoltDBPath(runtime)); err != nil {
+					return
+				}
+				sqlitePath := sqliteStatePath(runtime)
+				if err := os.Remove(sqlitePath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+					logrus.Errorf("Error removing SQLite DB %s created during Podman init: %v", sqlitePath, err)
+				}
+			}
+		}()
 	}
 
 	// Grab config from the database so we can reset some defaults
@@ -431,6 +454,16 @@ func makeRuntime(ctx context.Context, runtime *Runtime) (retErr error) {
 		return fmt.Errorf("namespaces are not supported by this version of Libpod, please unset the `namespace` field in containers.conf: %w", define.ErrNotImplemented)
 	}
 
+	// Set up the eventer
+	// WARN: This must be done synchronously before spawning any event listeners
+	// (e.g., libimageEvents, libartifactEvents) to prevent race conditions.
+	// TODO: Remove this temporal coupling.
+	eventer, err := runtime.newEventer()
+	if err != nil {
+		return err
+	}
+	runtime.eventer = eventer
+
 	needsUserns := os.Geteuid() != 0
 	if !needsUserns {
 		hasCapSysAdmin, err := unshare.HasCapSysAdmin()
@@ -464,20 +497,10 @@ func makeRuntime(ctx context.Context, runtime *Runtime) (retErr error) {
 		}
 	}()
 
-	// Set up the eventer
-	eventer, err := runtime.newEventer()
-	if err != nil {
-		return err
-	}
-	runtime.eventer = eventer
-
 	// Set up containers/image
-	if runtime.imageContext == nil {
-		runtime.imageContext = &types.SystemContext{
-			BigFilesTemporaryDir: parse.GetTempDir(),
-		}
+	if runtime.imageContext.BigFilesTemporaryDir == "" {
+		runtime.imageContext.BigFilesTemporaryDir = parse.GetTempDir()
 	}
-	runtime.imageContext.SignaturePolicyPath = runtime.config.Engine.SignaturePolicyPath
 
 	// Get us at least one working OCI runtime.
 	runtime.ociRuntimes = make(map[string]OCIRuntime)
@@ -537,6 +560,19 @@ func makeRuntime(ctx context.Context, runtime *Runtime) (retErr error) {
 		}
 		runtime.config.Network.NetworkBackend = string(netBackend)
 		runtime.network = netInterface
+
+		// Using sync once value to only init the store exactly once and only when it will be actually be used.
+		runtime.ArtifactStore = sync.OnceValues(func() (*artStore.ArtifactStore, error) {
+			artifactStore, err := artStore.NewArtifactStore(filepath.Join(runtime.storageConfig.GraphRoot, "artifacts"), runtime.SystemContext())
+			if err != nil {
+				return nil, err
+			}
+			runtime.libartifactEvents(artifactStore)
+			runtime.shutdownArtifactStore = func() {
+				artifactStore.CloseEventChannel()
+			}
+			return artifactStore, nil
+		})
 	}
 
 	// We now need to see if the system has restarted
@@ -568,32 +604,31 @@ func makeRuntime(ctx context.Context, runtime *Runtime) (retErr error) {
 			// and no valid systemd session is present
 			// warn only whenever new namespace is created
 			if runtime.config.Engine.CgroupManager == config.SystemdCgroupsManager {
-				unified, _ := cgroups.IsCgroup2UnifiedMode()
-				if unified && rootless.IsRootless() && !systemd.IsSystemdSessionValid(rootless.GetRootlessUID()) {
+				if rootless.IsRootless() && !systemd.IsSystemdSessionValid(rootless.GetRootlessUID()) {
 					logrus.Debug("Invalid systemd user session for current user")
 				}
 			}
 			unLockFunc()
 			unLockFunc = nil
-			pausePid, err := util.GetRootlessPauseProcessPidPath()
+			stateDir, err := util.GetRootlessStateDir()
 			if err != nil {
-				return fmt.Errorf("could not get pause process pid file path: %w", err)
+				return fmt.Errorf("could not get rootless state directory: %w", err)
 			}
 
 			// create the path in case it does not already exists
 			// https://github.com/containers/podman/issues/8539
-			if err := os.MkdirAll(filepath.Dir(pausePid), 0o700); err != nil {
-				return fmt.Errorf("could not create pause process pid file directory: %w", err)
+			if err := os.MkdirAll(stateDir, 0o700); err != nil {
+				return fmt.Errorf("could not create rootless state directory: %w", err)
 			}
 
-			became, ret, err := rootless.BecomeRootInUserNS(pausePid)
+			became, ret, err := rootless.BecomeRootInUserNS(stateDir)
 			if err != nil {
 				return err
 			}
 			if became {
 				// Check if the pause process was created.  If it was created, then
 				// move it to its own systemd scope.
-				systemdCommon.MovePauseProcessToScope(pausePid)
+				systemdCommon.MovePauseProcessToScope(rootless.GetPausePidPath(stateDir))
 
 				// gocritic complains because defer is not run on os.Exit()
 				// However this is fine because the lock is released anyway when the process exits
@@ -607,8 +642,18 @@ func makeRuntime(ctx context.Context, runtime *Runtime) (retErr error) {
 		// As such, it's not really a performance concern
 		if errors.Is(err, os.ErrNotExist) {
 			doRefresh = true
+			removeSQLite = false
 		} else {
 			return fmt.Errorf("reading runtime status file %s: %w", runtimeAliveFile, err)
+		}
+	}
+
+	if !doRefresh && boltExists {
+		// If the BoltDB database still exists, throw an error.
+		// If it doesn't: assume that migration happened in the background.
+		// In that case, safe to proceed.
+		if err := fileutils.Exists(getBoltDBPath(runtime)); err == nil || !errors.Is(err, fs.ErrNotExist) {
+			return boltError
 		}
 	}
 
@@ -711,50 +756,59 @@ var libimageEventsMap = map[libimage.EventType]events.Status{
 // when the main() exists.
 func (r *Runtime) libimageEvents() {
 	r.libimageEventsShutdown = make(chan bool)
-
-	toLibpodEventStatus := func(e *libimage.Event) events.Status {
-		status, found := libimageEventsMap[e.Type]
-		if !found {
-			return "Unknown"
-		}
-		return status
-	}
-
 	eventChannel := r.libimageRuntime.EventChannel()
-	go func() {
-		sawShutdown := false
-		for {
-			// Make sure to read and write all events before
-			// shutting down.
-			for len(eventChannel) > 0 {
-				libimageEvent := <-eventChannel
-				e := events.Event{
-					ID:     libimageEvent.ID,
-					Name:   libimageEvent.Name,
-					Status: toLibpodEventStatus(libimageEvent),
-					Time:   libimageEvent.Time,
-					Type:   events.Image,
-				}
-				if libimageEvent.Error != nil {
-					e.Error = libimageEvent.Error.Error()
-				}
-				if err := r.eventer.Write(e); err != nil {
-					logrus.Errorf("Unable to write image event: %q", err)
-				}
-			}
-
-			if sawShutdown {
-				close(r.libimageEventsShutdown)
-				return
-			}
-
-			select {
-			case <-r.libimageEventsShutdown:
-				sawShutdown = true
-			case <-time.After(100 * time.Millisecond):
-			}
+	toLibpodEventFunc := func(libimageEvent *libimage.Event) events.Event {
+		status, found := libimageEventsMap[libimageEvent.Type]
+		if !found {
+			status = "Unknown"
 		}
-	}()
+		event := events.Event{
+			ID:     libimageEvent.ID,
+			Name:   libimageEvent.Name,
+			Status: status,
+			Time:   libimageEvent.Time,
+			Type:   events.Image,
+		}
+		if libimageEvent.Error != nil {
+			event.Error = libimageEvent.Error.Error()
+		}
+		return event
+	}
+	spawnEventForwarder(r.eventer, toLibpodEventFunc, eventChannel, r.libimageEventsShutdown)
+}
+
+// libartifactEventsMap translates a libartifact event type to a libpod event status.
+var libartifactEventsMap = map[artStore.EventType]events.Status{
+	artStore.EventTypeArtifactPull:   events.Pull,
+	artStore.EventTypeArtifactPush:   events.Push,
+	artStore.EventTypeArtifactRemove: events.Remove,
+	artStore.EventTypeArtifactAdd:    events.Create,
+}
+
+// libartifactEvents spawns a goroutine which will listen for events on
+// the artStore.ArtifactStore.  The goroutine will be cleaned up implicitly
+// when the main() exists.
+func (r *Runtime) libartifactEvents(store *artStore.ArtifactStore) {
+	r.libartifactEventsShutdown = make(chan bool)
+	eventChannel := store.EventChannel()
+	toLibpodEventFunc := func(artStoreEvent *artStore.Event) events.Event {
+		status, found := libartifactEventsMap[artStoreEvent.Type]
+		if !found {
+			status = "Unknown"
+		}
+		event := events.Event{
+			ID:     artStoreEvent.ID,
+			Name:   artStoreEvent.Name,
+			Status: status,
+			Time:   artStoreEvent.Time,
+			Type:   events.Artifact,
+		}
+		if artStoreEvent.Error != nil {
+			event.Error = artStoreEvent.Error.Error()
+		}
+		return event
+	}
+	spawnEventForwarder(r.eventer, toLibpodEventFunc, eventChannel, r.libartifactEventsShutdown)
 }
 
 // DeferredShutdown shuts down the runtime without exposing any
@@ -811,6 +865,18 @@ func (r *Runtime) Shutdown(force bool) error {
 			lastError = fmt.Errorf("shutting down container storage: %w", err)
 		}
 	}
+
+	// Shutdown the artifact store if it exists
+	if r.libartifactEventsShutdown != nil {
+		// Tell loop to shutdown
+		r.libartifactEventsShutdown <- true
+		// Wait for close to signal shutdown
+		<-r.libartifactEventsShutdown
+	}
+	if r.shutdownArtifactStore != nil {
+		r.shutdownArtifactStore()
+	}
+
 	if err := r.state.Close(); err != nil {
 		if lastError != nil {
 			logrus.Error(lastError)
@@ -826,6 +892,14 @@ func (r *Runtime) Shutdown(force bool) error {
 // Does not check validity as the runtime is not valid until after this has run
 func (r *Runtime) refresh(ctx context.Context, alivePath string) error {
 	logrus.Debugf("Podman detected system restart - performing state refresh")
+
+	// Only error that can be returned is no BoltDB present.
+	// In that case, no need to do anything.
+	if err := r.checkCanMigrate(); err == nil {
+		if err := r.migrateDB(); err != nil {
+			logrus.Errorf("Automatic migration from BoltDB to SQLite failed: %v", err)
+		}
+	}
 
 	// Clear state of database if not running in container
 	if !graphRootMounted() {
@@ -890,7 +964,7 @@ func (r *Runtime) refresh(ctx context.Context, alivePath string) error {
 	}
 
 	// Create a file indicating the runtime is alive and ready
-	file, err := os.OpenFile(alivePath, os.O_RDONLY|os.O_CREATE, 0644)
+	file, err := os.OpenFile(alivePath, os.O_RDONLY|os.O_CREATE, 0o644)
 	if err != nil {
 		return fmt.Errorf("creating runtime status file: %w", err)
 	}
@@ -942,7 +1016,7 @@ func (r *Runtime) configureStore() error {
 	r.storageService = getStorageService(r.store)
 
 	runtimeOptions := &libimage.RuntimeOptions{
-		SystemContext: r.imageContext,
+		SystemContext: &r.imageContext,
 	}
 	libimageRuntime, err := libimage.RuntimeFromStore(store, runtimeOptions)
 	if err != nil {
@@ -975,6 +1049,17 @@ func (r *Runtime) GetOCIRuntimePath() string {
 // DefaultOCIRuntime return copy of Default OCI Runtime
 func (r *Runtime) DefaultOCIRuntime() OCIRuntime {
 	return r.defaultOCIRuntime
+}
+
+// RuntimeFeatures returns the raw output of an OCI runtime's
+// "features" command by its name.
+// It returns an empty string if the runtime doesn't exist or
+// does not support the command.
+func (r *Runtime) RuntimeFeatures(name string) string {
+	if ociRuntime, ok := r.ociRuntimes[name]; ok {
+		return ociRuntime.RuntimeFeatures()
+	}
+	return ""
 }
 
 // StorageConfig retrieves the storage options for the container runtime
@@ -1080,42 +1165,6 @@ func (r *Runtime) EnableLabeling() bool {
 	return r.config.Containers.EnableLabeling
 }
 
-// Reload reloads the configurations files
-func (r *Runtime) Reload() error {
-	if err := r.reloadContainersConf(); err != nil {
-		return err
-	}
-	if err := r.reloadStorageConf(); err != nil {
-		return err
-	}
-	// Invalidate the registries.conf cache. The next invocation will
-	// reload all data.
-	sysregistriesv2.InvalidateCache()
-	return nil
-}
-
-// reloadContainersConf reloads the containers.conf
-func (r *Runtime) reloadContainersConf() error {
-	config, err := config.Reload()
-	if err != nil {
-		return err
-	}
-	r.config = config
-	logrus.Infof("Applied new containers configuration: %v", config)
-	return nil
-}
-
-// reloadStorageConf reloads the storage.conf
-func (r *Runtime) reloadStorageConf() error {
-	configFile, err := storage.DefaultConfigFile()
-	if err != nil {
-		return err
-	}
-	storage.ReloadConfigurationFile(configFile, &r.storageConfig)
-	logrus.Infof("Applied new storage configuration: %v", r.storageConfig)
-	return nil
-}
-
 // getVolumePlugin gets a specific volume plugin.
 func (r *Runtime) getVolumePlugin(volConfig *VolumeConfig) (*plugin.VolumePlugin, error) {
 	// There is no plugin for local.
@@ -1165,6 +1214,10 @@ func graphRootMounted() bool {
 		if scanner.Text() == "graphRootMounted=1" {
 			return true
 		}
+	}
+	if err := scanner.Err(); err != nil {
+		logrus.Errorf("Failed to read /run/.containerenv: %v", err)
+		return false
 	}
 	return false
 }
@@ -1269,12 +1322,82 @@ func (r *Runtime) LockConflicts() (map[uint32][]string, []uint32, error) {
 	return toReturn, locksHeld, nil
 }
 
+// containerGoneErr reports whether err means the container no longer exists in
+// the store. Callers that only care about the container being absent can treat
+// this as success.
+func containerGoneErr(err error) bool {
+	return errors.Is(err, stypes.ErrContainerUnknown) || errors.Is(err, stypes.ErrNotAContainer)
+}
+
+// PruneBuildContainers removes any build containers that were created during the build,
+// but were not removed because the build was unexpectedly terminated.
+//
+// Note: This is not safe operation and should be executed only when no builds are in progress. It can interfere with builds in progress.
+func (r *Runtime) PruneBuildContainers() ([]*reports.PruneReport, error) {
+	stageContainersPruneReports := []*reports.PruneReport{}
+
+	containers, err := r.store.Containers()
+	if err != nil {
+		return stageContainersPruneReports, err
+	}
+	for _, container := range containers {
+		path, err := r.store.ContainerDirectory(container.ID)
+		if err != nil {
+			// The container list is a snapshot, so a container can be removed
+			// while we are still working through it. A build that was killed
+			// cleans up its own stage containers in the background, which is
+			// exactly the case this function is meant to run after. Skip it.
+			if containerGoneErr(err) {
+				continue
+			}
+			return stageContainersPruneReports, err
+		}
+		if err := fileutils.Exists(filepath.Join(path, "buildah.json")); err != nil {
+			continue
+		}
+
+		report := &reports.PruneReport{
+			Id: container.ID,
+		}
+		size, err := r.store.ContainerSize(container.ID)
+		if err != nil {
+			if containerGoneErr(err) {
+				continue
+			}
+			report.Err = err
+		}
+		report.Size = uint64(size)
+
+		if err := r.store.DeleteContainer(container.ID); err != nil {
+			// Pruning wants the container gone. If something else removed it
+			// first that is the result we wanted, so do not report it.
+			if containerGoneErr(err) {
+				continue
+			}
+			report.Err = errors.Join(report.Err, err)
+		}
+		stageContainersPruneReports = append(stageContainersPruneReports, report)
+	}
+	return stageContainersPruneReports, nil
+}
+
 // SystemCheck checks our storage for consistency, and depending on the options
 // specified, will attempt to remove anything which fails consistency checks.
-func (r *Runtime) SystemCheck(ctx context.Context, options entities.SystemCheckOptions) (entities.SystemCheckReport, error) {
+func (r *Runtime) SystemCheck(_ context.Context, options entities.SystemCheckOptions) (entities.SystemCheckReport, error) {
 	what := storage.CheckEverything()
 	if options.Quick {
-		what = storage.CheckMost()
+		// Turn off checking layer digests and layer contents to do quick check.
+		// This is not a complete check like storage.CheckEverything(), and may fail detecting
+		// whether a file is missing from the image or its content has changed.
+		// In some cases it's desirable to trade check thoroughness for speed.
+		what = &storage.CheckOptions{
+			LayerDigests:   false,
+			LayerMountable: true,
+			LayerContents:  false,
+			LayerData:      true,
+			ImageData:      true,
+			ContainerData:  true,
+		}
 	}
 	if options.UnreferencedLayerMaximumAge != nil {
 		tmp := *options.UnreferencedLayerMaximumAge
@@ -1397,4 +1520,8 @@ func (r *Runtime) SystemCheck(ctx context.Context, options entities.SystemCheckO
 	}
 
 	return report, err
+}
+
+func (r *Runtime) GetContainerExitCode(id string) (int32, error) {
+	return r.state.GetContainerExitCode(id)
 }

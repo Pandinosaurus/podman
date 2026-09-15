@@ -1,8 +1,8 @@
 package entities
 
 import (
-	"github.com/containers/image/v5/types"
-	entitiesTypes "github.com/containers/podman/v5/pkg/domain/entities/types"
+	"go.podman.io/image/v5/types"
+	entitiesTypes "go.podman.io/podman/v6/pkg/domain/entities/types"
 )
 
 // ManifestCreateOptions provides model for creating manifest list or image index
@@ -53,14 +53,14 @@ type ManifestAddOptions struct {
 type ManifestAddArtifactOptions struct {
 	ManifestAnnotateOptions
 	// Note to future maintainers: keep these fields synchronized with ManifestModifyOptions!
-	Type          *string           `json:"artifact_type" schema:"artifact_type"`
-	LayerType     string            `json:"artifact_layer_type" schema:"artifact_layer_type"`
-	ConfigType    string            `json:"artifact_config_type" schema:"artifact_config_type"`
-	Config        string            `json:"artifact_config" schema:"artifact_config"`
-	ExcludeTitles bool              `json:"artifact_exclude_titles" schema:"artifact_exclude_titles"`
-	Annotations   map[string]string `json:"artifact_annotations" schema:"artifact_annotations"`
-	Subject       string            `json:"artifact_subject" schema:"artifact_subject"`
-	Files         []string          `json:"artifact_files" schema:"-"`
+	Type                *string           `json:"artifact_type" schema:"artifact_type"`
+	LayerType           string            `json:"artifact_layer_type" schema:"artifact_layer_type"`
+	ConfigType          string            `json:"artifact_config_type" schema:"artifact_config_type"`
+	Config              string            `json:"artifact_config" schema:"artifact_config"`
+	ExcludeTitles       bool              `json:"artifact_exclude_titles" schema:"artifact_exclude_titles"`
+	ArtifactAnnotations map[string]string `json:"artifact_annotations" schema:"artifact_annotations"`
+	Subject             string            `json:"artifact_subject" schema:"artifact_subject"`
+	Files               []string          `json:"artifact_files" schema:"-"`
 }
 
 // ManifestAnnotateOptions provides model for annotating manifest list
@@ -82,9 +82,9 @@ type ManifestAnnotateOptions struct {
 	// Variant for the item in the manifest list
 	Variant string `json:"variant" schema:"variant"`
 	// IndexAnnotation is a slice of key=value annotations to add to the manifest list itself
-	IndexAnnotation []string `json:"index_annotation" schema:"annotation"`
+	IndexAnnotation []string `json:"index_annotation" schema:"index_annotation"`
 	// IndexAnnotations is a map of key:value annotations to add to the manifest list itself, by a map which is preferred over IndexAnnotation
-	IndexAnnotations map[string]string `json:"index_annotations" schema:"annotations"`
+	IndexAnnotations map[string]string `json:"index_annotations" schema:"index_annotations"`
 	// IndexSubject is a subject value to set in the manifest list itself
 	IndexSubject string `json:"subject" schema:"subject"`
 }
@@ -122,8 +122,7 @@ type ManifestPushReport = entitiesTypes.ManifestPushReport
 // ManifestRemoveOptions provides the model for removing digests from a manifest
 //
 // swagger:model
-type ManifestRemoveOptions struct {
-}
+type ManifestRemoveOptions struct{}
 
 // ManifestRemoveReport provides the model for the removed manifest
 type ManifestRemoveReport = entitiesTypes.ManifestRemoveReport

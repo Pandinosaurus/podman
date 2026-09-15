@@ -1,4 +1,4 @@
-//go:build remote
+//go:build remote || !(linux || freebsd)
 
 package infra
 
@@ -7,9 +7,8 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/containers/podman/v5/pkg/bindings"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/domain/infra/tunnel"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/domain/infra/tunnel"
 )
 
 var (
@@ -17,14 +16,16 @@ var (
 	connection      *context.Context
 )
 
-func newConnection(uri string, identity, farmNodeName string, machine bool) (context.Context, error) {
+func newConnection(facts *entities.PodmanConfig, farmNodeName string) (context.Context, error) {
 	connectionMutex.Lock()
 	defer connectionMutex.Unlock()
 
 	// if farmNodeName given, then create a connection with the node so that we can send builds there
 	if connection == nil || farmNodeName != "" {
-		ctx, err := bindings.NewConnectionWithIdentity(context.Background(), uri, identity, machine)
+		ctx, err := newConnectionWithoutLock(context.Background(), facts)
 		if err != nil {
+			// Clear stale connection so the next call retries.
+			connection = nil
 			return ctx, err
 		}
 		connection = &ctx
@@ -37,7 +38,7 @@ func NewContainerEngine(facts *entities.PodmanConfig) (entities.ContainerEngine,
 	case entities.ABIMode:
 		return nil, fmt.Errorf("direct runtime not supported")
 	case entities.TunnelMode:
-		ctx, err := newConnection(facts.URI, facts.Identity, "", facts.MachineMode)
+		ctx, err := newConnection(facts, "")
 		return &tunnel.ContainerEngine{ClientCtx: ctx}, err
 	}
 	return nil, fmt.Errorf("runtime mode '%v' is not supported", facts.EngineMode)
@@ -49,7 +50,7 @@ func NewImageEngine(facts *entities.PodmanConfig) (entities.ImageEngine, error) 
 	case entities.ABIMode:
 		return nil, fmt.Errorf("direct image runtime not supported")
 	case entities.TunnelMode:
-		ctx, err := newConnection(facts.URI, facts.Identity, facts.FarmNodeName, facts.MachineMode)
+		ctx, err := newConnection(facts, facts.FarmNodeName)
 		return &tunnel.ImageEngine{ClientCtx: ctx, FarmNode: tunnel.FarmNode{NodeName: facts.FarmNodeName}}, err
 	}
 	return nil, fmt.Errorf("runtime mode '%v' is not supported", facts.EngineMode)

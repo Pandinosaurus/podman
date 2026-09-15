@@ -5,15 +5,15 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/containers/common/pkg/auth"
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/image/v5/types"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/utils"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/util"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/auth"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/utils"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/util"
 )
 
 // manifestPushOptsWrapper wraps entities.ManifestPushOptions and prevents leaking
@@ -21,11 +21,10 @@ import (
 type manifestPushOptsWrapper struct {
 	entities.ImagePushOptions
 
-	TLSVerifyCLI, Insecure     bool // CLI only
-	CredentialsCLI             string
-	SignBySigstoreParamFileCLI string
-	SignPassphraseFileCLI      string
-	DigestFile                 string
+	TLSVerifyCLI, Insecure bool // CLI only
+	CredentialsCLI         string
+	signing                common.SigningCLIOnlyOptions
+	DigestFile             string
 }
 
 var (
@@ -81,27 +80,20 @@ func init() {
 
 	flags.BoolVarP(&manifestPushOpts.RemoveSignatures, "remove-signatures", "", false, "don't copy signatures when pushing images")
 
-	signByFlagName := "sign-by"
-	flags.StringVar(&manifestPushOpts.SignBy, signByFlagName, "", "sign the image using a GPG key with the specified `FINGERPRINT`")
-	_ = pushCmd.RegisterFlagCompletionFunc(signByFlagName, completion.AutocompleteNone)
-
-	signBySigstoreFlagName := "sign-by-sigstore"
-	flags.StringVar(&manifestPushOpts.SignBySigstoreParamFileCLI, signBySigstoreFlagName, "", "Sign the image using a sigstore parameter file at `PATH`")
-	_ = pushCmd.RegisterFlagCompletionFunc(signBySigstoreFlagName, completion.AutocompleteDefault)
-
-	signBySigstorePrivateKeyFlagName := "sign-by-sigstore-private-key"
-	flags.StringVar(&manifestPushOpts.SignBySigstorePrivateKeyFile, signBySigstorePrivateKeyFlagName, "", "Sign the image using a sigstore private key at `PATH`")
-	_ = pushCmd.RegisterFlagCompletionFunc(signBySigstorePrivateKeyFlagName, completion.AutocompleteDefault)
-
-	signPassphraseFileFlagName := "sign-passphrase-file"
-	flags.StringVar(&manifestPushOpts.SignPassphraseFileCLI, signPassphraseFileFlagName, "", "Read a passphrase for signing an image from `PATH`")
-	_ = pushCmd.RegisterFlagCompletionFunc(signPassphraseFileFlagName, completion.AutocompleteDefault)
+	common.DefineSigningFlags(pushCmd, &manifestPushOpts.signing, &manifestPushOpts.ImagePushOptions)
 
 	flags.BoolVar(&manifestPushOpts.TLSVerifyCLI, "tls-verify", true, "require HTTPS and verify certificates when accessing the registry")
 	flags.BoolVar(&manifestPushOpts.Insecure, "insecure", false, "neither require HTTPS nor verify certificates when accessing the registry")
 	_ = flags.MarkHidden("insecure")
 	flags.BoolVarP(&manifestPushOpts.Quiet, "quiet", "q", false, "don't output progress information when pushing lists")
 	flags.SetNormalizeFunc(utils.AliasFlags)
+
+	retryFlagName := "retry"
+	flags.Uint(retryFlagName, registry.RetryDefault(), "number of times to retry in case of failure when performing push")
+	_ = pushCmd.RegisterFlagCompletionFunc(retryFlagName, completion.AutocompleteNone)
+	retryDelayFlagName := "retry-delay"
+	flags.String(retryDelayFlagName, registry.RetryDelayDefault(), "delay between retries in case of push failures")
+	_ = pushCmd.RegisterFlagCompletionFunc(retryDelayFlagName, completion.AutocompleteNone)
 
 	compressionFormat := "compression-format"
 	flags.StringVar(&manifestPushOpts.CompressionFormat, compressionFormat, "", "compression format to use")
@@ -113,10 +105,6 @@ func init() {
 
 	if registry.IsRemote() {
 		_ = flags.MarkHidden("cert-dir")
-		_ = flags.MarkHidden(signByFlagName)
-		_ = flags.MarkHidden(signBySigstoreFlagName)
-		_ = flags.MarkHidden(signBySigstorePrivateKeyFlagName)
-		_ = flags.MarkHidden(signPassphraseFileFlagName)
 	}
 }
 
@@ -148,12 +136,29 @@ func push(cmd *cobra.Command, args []string) error {
 		manifestPushOpts.Writer = os.Stderr
 	}
 
-	signingCleanup, err := common.PrepareSigning(&manifestPushOpts.ImagePushOptions,
-		manifestPushOpts.SignPassphraseFileCLI, manifestPushOpts.SignBySigstoreParamFileCLI)
+	signingCleanup, err := common.PrepareSigning(&manifestPushOpts.ImagePushOptions, &manifestPushOpts.signing)
 	if err != nil {
 		return err
 	}
 	defer signingCleanup()
+
+	if cmd.Flags().Changed("retry") {
+		retry, err := cmd.Flags().GetUint("retry")
+		if err != nil {
+			return err
+		}
+
+		manifestPushOpts.Retry = &retry
+	}
+
+	if cmd.Flags().Changed("retry-delay") {
+		val, err := cmd.Flags().GetString("retry-delay")
+		if err != nil {
+			return err
+		}
+
+		manifestPushOpts.RetryDelay = val
+	}
 
 	// TLS verification in c/image is controlled via a `types.OptionalBool`
 	// which allows for distinguishing among set-true, set-false, unspecified
@@ -190,7 +195,7 @@ func push(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	if manifestPushOpts.DigestFile != "" {
-		if err := os.WriteFile(manifestPushOpts.DigestFile, []byte(digest), 0644); err != nil {
+		if err := os.WriteFile(manifestPushOpts.DigestFile, []byte(digest), 0o644); err != nil {
 			return err
 		}
 	}

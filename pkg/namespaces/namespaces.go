@@ -16,75 +16,17 @@ const (
 	podType       = "pod"
 	privateType   = "private"
 	shareableType = "shareable"
-	slirpType     = "slirp4netns"
 	pastaType     = "pasta"
 )
 
-// KeepIDUserNsOptions defines how to keepIDmatically create a user namespace.
+// KeepIDUserNsOptions defines how to create a user namespace using keep-id.
 type KeepIDUserNsOptions struct {
 	// UID is the target uid in the user namespace.
 	UID *uint32
 	// GID is the target uid in the user namespace.
 	GID *uint32
-}
-
-// CgroupMode represents cgroup mode in the container.
-type CgroupMode string
-
-// IsHost indicates whether the container uses the host's cgroup.
-func (n CgroupMode) IsHost() bool {
-	return n == hostType
-}
-
-// IsDefaultValue indicates whether the cgroup namespace has the default value.
-func (n CgroupMode) IsDefaultValue() bool {
-	return n == "" || n == defaultType
-}
-
-// IsNS indicates a cgroup namespace passed in by path (ns:<path>)
-func (n CgroupMode) IsNS() bool {
-	return strings.HasPrefix(string(n), nsType)
-}
-
-// NS gets the path associated with a ns:<path> cgroup ns
-func (n CgroupMode) NS() string {
-	_, path, _ := strings.Cut(string(n), ":")
-	return path
-}
-
-// IsContainer indicates whether the container uses a new cgroup namespace.
-func (n CgroupMode) IsContainer() bool {
-	typ, _, hasColon := strings.Cut(string(n), ":")
-	return hasColon && typ == containerType
-}
-
-// Container returns the name of the container whose cgroup namespace is going to be used.
-func (n CgroupMode) Container() string {
-	typ, name, hasName := strings.Cut(string(n), ":")
-	if hasName && typ == containerType {
-		return name
-	}
-	return ""
-}
-
-// IsPrivate indicates whether the container uses the a private cgroup.
-func (n CgroupMode) IsPrivate() bool {
-	return n == privateType
-}
-
-// Valid indicates whether the Cgroup namespace is valid.
-func (n CgroupMode) Valid() bool {
-	parts := strings.Split(string(n), ":")
-	switch mode := parts[0]; mode {
-	case "", hostType, privateType, nsType:
-	case containerType:
-		if len(parts) != 2 || parts[1] == "" {
-			return false
-		}
-	default:
-		return false
-	}
-	return true
+	// MaxSize is the maximum size of the user namespace.
+	MaxSize *uint32
 }
 
 // UsernsMode represents userns mode in the container.
@@ -128,7 +70,7 @@ func (n UsernsMode) GetKeepIDOptions() (*KeepIDUserNsOptions, error) {
 	if !hasOpts {
 		return &options, nil
 	}
-	for _, o := range strings.Split(nsopts, ",") {
+	for o := range strings.SplitSeq(nsopts, ",") {
 		opt, val, hasVal := strings.Cut(o, "=")
 		if !hasVal {
 			return nil, fmt.Errorf("invalid option specified: %q", o)
@@ -148,6 +90,13 @@ func (n UsernsMode) GetKeepIDOptions() (*KeepIDUserNsOptions, error) {
 			}
 			v := uint32(s)
 			options.GID = &v
+		case "size":
+			s, err := strconv.ParseUint(val, 10, 32)
+			if err != nil {
+				return nil, err
+			}
+			v := uint32(s)
+			options.MaxSize = &v
 		default:
 			return nil, fmt.Errorf("unknown option specified: %q", opt)
 		}
@@ -157,7 +106,7 @@ func (n UsernsMode) GetKeepIDOptions() (*KeepIDUserNsOptions, error) {
 
 // IsPrivate indicates whether the container uses the a private userns.
 func (n UsernsMode) IsPrivate() bool {
-	return !(n.IsHost() || n.IsContainer())
+	return !n.IsHost() && !n.IsContainer()
 }
 
 // Valid indicates whether the userns is valid.
@@ -201,140 +150,6 @@ func (n UsernsMode) Container() string {
 	return ""
 }
 
-// UTSMode represents the UTS namespace of the container.
-type UTSMode string
-
-// IsPrivate indicates whether the container uses its private UTS namespace.
-func (n UTSMode) IsPrivate() bool {
-	return !(n.IsHost())
-}
-
-// IsHost indicates whether the container uses the host's UTS namespace.
-func (n UTSMode) IsHost() bool {
-	return n == hostType
-}
-
-// IsContainer indicates whether the container uses a container's UTS namespace.
-func (n UTSMode) IsContainer() bool {
-	typ, _, hasName := strings.Cut(string(n), ":")
-	return hasName && typ == containerType
-}
-
-// Container returns the name of the container whose uts namespace is going to be used.
-func (n UTSMode) Container() string {
-	typ, name, hasName := strings.Cut(string(n), ":")
-	if hasName && typ == containerType {
-		return name
-	}
-	return ""
-}
-
-// Valid indicates whether the UTS namespace is valid.
-func (n UTSMode) Valid() bool {
-	parts := strings.Split(string(n), ":")
-	switch mode := parts[0]; mode {
-	case "", privateType, hostType:
-	case containerType:
-		if len(parts) != 2 || parts[1] == "" {
-			return false
-		}
-	default:
-		return false
-	}
-	return true
-}
-
-// IpcMode represents the container ipc stack.
-type IpcMode string
-
-// IsPrivate indicates whether the container uses its own private ipc namespace which cannot be shared.
-func (n IpcMode) IsPrivate() bool {
-	return n == privateType
-}
-
-// IsHost indicates whether the container shares the host's ipc namespace.
-func (n IpcMode) IsHost() bool {
-	return n == hostType
-}
-
-// IsShareable indicates whether the container uses its own shareable ipc namespace which can be shared.
-func (n IpcMode) IsShareable() bool {
-	return n == shareableType
-}
-
-// IsContainer indicates whether the container uses another container's ipc namespace.
-func (n IpcMode) IsContainer() bool {
-	typ, _, hasName := strings.Cut(string(n), ":")
-	return hasName && typ == containerType
-}
-
-// IsNone indicates whether container IpcMode is set to "none".
-func (n IpcMode) IsNone() bool {
-	return n == noneType
-}
-
-// IsEmpty indicates whether container IpcMode is empty
-func (n IpcMode) IsEmpty() bool {
-	return n == ""
-}
-
-// Valid indicates whether the ipc mode is valid.
-func (n IpcMode) Valid() bool {
-	return n.IsEmpty() || n.IsNone() || n.IsPrivate() || n.IsHost() || n.IsShareable() || n.IsContainer()
-}
-
-// Container returns the name of the container ipc stack is going to be used.
-func (n IpcMode) Container() string {
-	typ, name, hasName := strings.Cut(string(n), ":")
-	if hasName && typ == containerType {
-		return name
-	}
-	return ""
-}
-
-// PidMode represents the pid namespace of the container.
-type PidMode string
-
-// IsPrivate indicates whether the container uses its own new pid namespace.
-func (n PidMode) IsPrivate() bool {
-	return !(n.IsHost() || n.IsContainer())
-}
-
-// IsHost indicates whether the container uses the host's pid namespace.
-func (n PidMode) IsHost() bool {
-	return n == hostType
-}
-
-// IsContainer indicates whether the container uses a container's pid namespace.
-func (n PidMode) IsContainer() bool {
-	typ, _, hasName := strings.Cut(string(n), ":")
-	return hasName && typ == containerType
-}
-
-// Valid indicates whether the pid namespace is valid.
-func (n PidMode) Valid() bool {
-	parts := strings.Split(string(n), ":")
-	switch mode := parts[0]; mode {
-	case "", privateType, hostType:
-	case containerType:
-		if len(parts) != 2 || parts[1] == "" {
-			return false
-		}
-	default:
-		return false
-	}
-	return true
-}
-
-// Container returns the name of the container whose pid namespace is going to be used.
-func (n PidMode) Container() string {
-	typ, name, hasName := strings.Cut(string(n), ":")
-	if hasName && typ == containerType {
-		return name
-	}
-	return ""
-}
-
 // NetworkMode represents the container network stack.
 type NetworkMode string
 
@@ -355,7 +170,7 @@ func (n NetworkMode) IsDefault() bool {
 
 // IsPrivate indicates whether container uses its private network stack.
 func (n NetworkMode) IsPrivate() bool {
-	return !(n.IsHost() || n.IsContainer())
+	return !n.IsHost() && !n.IsContainer()
 }
 
 // IsContainer indicates whether container uses a container network stack.
@@ -386,11 +201,6 @@ func (n NetworkMode) IsBridge() bool {
 	return n == bridgeType
 }
 
-// IsSlirp4netns indicates if we are running a rootless network stack
-func (n NetworkMode) IsSlirp4netns() bool {
-	return n == slirpType || strings.HasPrefix(string(n), slirpType+":")
-}
-
 // IsPasta indicates if we are running a rootless network stack using pasta
 func (n NetworkMode) IsPasta() bool {
 	return n == pastaType || strings.HasPrefix(string(n), pastaType+":")
@@ -398,7 +208,7 @@ func (n NetworkMode) IsPasta() bool {
 
 // IsNS indicates a network namespace passed in by path (ns:<path>)
 func (n NetworkMode) IsNS() bool {
-	return strings.HasPrefix(string(n), nsType)
+	return strings.HasPrefix(string(n), nsType+":")
 }
 
 // NS gets the path associated with a ns:<path> network ns
@@ -414,5 +224,5 @@ func (n NetworkMode) IsPod() bool {
 
 // IsUserDefined indicates user-created network
 func (n NetworkMode) IsUserDefined() bool {
-	return !n.IsDefault() && !n.IsBridge() && !n.IsHost() && !n.IsNone() && !n.IsContainer() && !n.IsSlirp4netns() && !n.IsPasta() && !n.IsNS()
+	return !n.IsDefault() && !n.IsBridge() && !n.IsHost() && !n.IsNone() && !n.IsContainer() && !n.IsPasta() && !n.IsNS() && !n.IsPod()
 }

@@ -4,28 +4,27 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/containers/buildah/pkg/cli"
-	"github.com/containers/common/pkg/auth"
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/image/v5/types"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/util"
 	"github.com/spf13/cobra"
+	"go.podman.io/buildah/pkg/cli"
+	"go.podman.io/common/pkg/auth"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/util"
 )
 
 // pushOptionsWrapper wraps entities.ImagepushOptions and prevents leaking
 // CLI-only fields into the API types.
 type pushOptionsWrapper struct {
 	entities.ImagePushOptions
-	TLSVerifyCLI               bool // CLI only
-	CredentialsCLI             string
-	SignPassphraseFileCLI      string
-	SignBySigstoreParamFileCLI string
-	EncryptionKeys             []string
-	EncryptLayers              []int
-	DigestFile                 string
+	TLSVerifyCLI   bool // CLI only
+	CredentialsCLI string
+	signing        common.SigningCLIOnlyOptions
+	EncryptionKeys []string
+	EncryptLayers  []int
+	DigestFile     string
 }
 
 var (
@@ -43,7 +42,7 @@ var (
 		Args:              cobra.RangeArgs(1, 2),
 		ValidArgsFunction: common.AutocompleteImages,
 		Example: `podman push imageID docker://registry.example.com/repository:tag
-		podman push imageID oci-archive:/path/to/layout:image:tag`,
+podman push imageID oci-archive:/path/to/layout:image:tag`,
 	}
 
 	// Command: podman image push
@@ -57,7 +56,7 @@ var (
 		Args:              pushCmd.Args,
 		ValidArgsFunction: pushCmd.ValidArgsFunction,
 		Example: `podman image push imageID docker://registry.example.com/repository:tag
-		podman image push imageID oci-archive:/path/to/layout:image:tag`,
+podman image push imageID oci-archive:/path/to/layout:image:tag`,
 	}
 )
 
@@ -118,21 +117,7 @@ func pushFlags(cmd *cobra.Command) {
 	flags.String(retryDelayFlagName, registry.RetryDelayDefault(), "delay between retries in case of push failures")
 	_ = cmd.RegisterFlagCompletionFunc(retryDelayFlagName, completion.AutocompleteNone)
 
-	signByFlagName := "sign-by"
-	flags.StringVar(&pushOptions.SignBy, signByFlagName, "", "Add a signature at the destination using the specified key")
-	_ = cmd.RegisterFlagCompletionFunc(signByFlagName, completion.AutocompleteNone)
-
-	signBySigstoreFlagName := "sign-by-sigstore"
-	flags.StringVar(&pushOptions.SignBySigstoreParamFileCLI, signBySigstoreFlagName, "", "Sign the image using a sigstore parameter file at `PATH`")
-	_ = cmd.RegisterFlagCompletionFunc(signBySigstoreFlagName, completion.AutocompleteDefault)
-
-	signBySigstorePrivateKeyFlagName := "sign-by-sigstore-private-key"
-	flags.StringVar(&pushOptions.SignBySigstorePrivateKeyFile, signBySigstorePrivateKeyFlagName, "", "Sign the image using a sigstore private key at `PATH`")
-	_ = cmd.RegisterFlagCompletionFunc(signBySigstorePrivateKeyFlagName, completion.AutocompleteDefault)
-
-	signPassphraseFileFlagName := "sign-passphrase-file"
-	flags.StringVar(&pushOptions.SignPassphraseFileCLI, signPassphraseFileFlagName, "", "Read a passphrase for signing an image from `PATH`")
-	_ = cmd.RegisterFlagCompletionFunc(signPassphraseFileFlagName, completion.AutocompleteDefault)
+	common.DefineSigningFlags(cmd, &pushOptions.signing, &pushOptions.ImagePushOptions)
 
 	flags.BoolVar(&pushOptions.TLSVerifyCLI, "tls-verify", true, "Require HTTPS and verify certificates when contacting registries")
 
@@ -152,14 +137,14 @@ func pushFlags(cmd *cobra.Command) {
 	flags.IntSliceVar(&pushOptions.EncryptLayers, encryptLayersFlagName, nil, "Layers to encrypt, 0-indexed layer indices with support for negative indexing (e.g. 0 is the first layer, -1 is the last layer). If not defined, will encrypt all layers if encryption-key flag is specified")
 	_ = cmd.RegisterFlagCompletionFunc(encryptLayersFlagName, completion.AutocompleteDefault)
 
+	platformFlagName := "platform"
+	flags.String(platformFlagName, "", "Specify the platform for selecting the image from a manifest list")
+	_ = cmd.RegisterFlagCompletionFunc(platformFlagName, completion.AutocompleteNone)
+
 	if registry.IsRemote() {
 		_ = flags.MarkHidden("cert-dir")
 		_ = flags.MarkHidden("compress")
 		_ = flags.MarkHidden("quiet")
-		_ = flags.MarkHidden(signByFlagName)
-		_ = flags.MarkHidden(signBySigstoreFlagName)
-		_ = flags.MarkHidden(signBySigstorePrivateKeyFlagName)
-		_ = flags.MarkHidden(signPassphraseFileFlagName)
 		_ = flags.MarkHidden(encryptionKeysFlagName)
 		_ = flags.MarkHidden(encryptLayersFlagName)
 	} else {
@@ -201,8 +186,7 @@ func imagePush(cmd *cobra.Command, args []string) error {
 		pushOptions.Writer = os.Stderr
 	}
 
-	signingCleanup, err := common.PrepareSigning(&pushOptions.ImagePushOptions,
-		pushOptions.SignPassphraseFileCLI, pushOptions.SignBySigstoreParamFileCLI)
+	signingCleanup, err := common.PrepareSigning(&pushOptions.ImagePushOptions, &pushOptions.signing)
 	if err != nil {
 		return err
 	}
@@ -249,9 +233,20 @@ func imagePush(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	if cmd.Flags().Changed("platform") {
+		platform, err := cmd.Flags().GetString("platform")
+		if err != nil {
+			return err
+		}
+		if platform != "" {
+			pushOptions.OS, pushOptions.Arch, pushOptions.Variant = parsePlatform(platform)
+			pushOptions.All = false
+		}
+	}
+
 	// Let's do all the remaining Yoga in the API to prevent us from scattering
 	// logic across (too) many parts of the code.
-	report, err := registry.ImageEngine().Push(registry.GetContext(), source, destination, pushOptions.ImagePushOptions)
+	report, err := registry.ImageEngine().Push(registry.Context(), source, destination, pushOptions.ImagePushOptions)
 	if err != nil {
 		return err
 	}

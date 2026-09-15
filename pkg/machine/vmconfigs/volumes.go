@@ -3,6 +3,8 @@ package vmconfigs
 import (
 	"fmt"
 	"strings"
+
+	"github.com/sirupsen/logrus"
 )
 
 type VolumeMountType int
@@ -33,8 +35,8 @@ func extractMountOptions(paths []string) (bool, string) {
 	securityModel := "none"
 	if len(paths) > 2 {
 		options := paths[2]
-		volopts := strings.Split(options, ",")
-		for _, o := range volopts {
+		volopts := strings.SplitSeq(options, ",")
+		for o := range volopts {
 			switch {
 			case o == "rw":
 				readonly = false
@@ -43,7 +45,7 @@ func extractMountOptions(paths []string) (bool, string) {
 			case strings.HasPrefix(o, "security_model="):
 				securityModel = strings.Split(o, "=")[1]
 			default:
-				fmt.Printf("Unknown option: %s\n", o)
+				logrus.Warnf("ignoring unknown volume option %q", o)
 			}
 		}
 	}

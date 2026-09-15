@@ -1,20 +1,21 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package libpod
 
 import (
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/libpod/driver"
-	"github.com/containers/podman/v5/pkg/signal"
-	"github.com/containers/podman/v5/pkg/util"
-	"github.com/containers/storage/types"
 	"github.com/docker/go-units"
 	spec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/libpod/driver"
+	"go.podman.io/podman/v6/pkg/signal"
+	"go.podman.io/podman/v6/pkg/util"
 )
 
 // inspectLocked inspects a container for low-level information.
@@ -76,12 +77,10 @@ func (c *Container) getContainerInspectData(size bool, driverData *define.Driver
 	var path string
 	if len(args) > 0 {
 		path = args[0]
-	}
-	if len(args) > 1 {
 		args = args[1:]
 	}
 
-	execIDs := []string{}
+	execIDs := make([]string, 0, len(c.state.ExecSessions))
 	for id := range c.state.ExecSessions {
 		execIDs = append(execIDs, id)
 	}
@@ -171,6 +170,8 @@ func (c *Container) getContainerInspectData(size bool, driverData *define.Driver
 		IsService:               c.IsService(),
 		KubeExitCodePropagation: config.KubeExitCodePropagation.String(),
 		LockNumber:              c.lock.ID(),
+		UseImageHosts:           c.config.UseImageHosts,
+		UseImageHostname:        c.config.UseImageHostname,
 	}
 
 	if config.RootfsImageID != "" { // May not be set if the container was created with --rootfs
@@ -190,10 +191,7 @@ func (c *Container) getContainerInspectData(size bool, driverData *define.Driver
 		data.OCIConfigPath = c.state.ConfigPath
 	}
 
-	// Check if healthcheck is not nil and --no-healthcheck option is not set.
-	// If --no-healthcheck is set Test will be always set to `[NONE]`, so the
-	// inspect status should be set to nil.
-	if c.config.HealthCheckConfig != nil && !(len(c.config.HealthCheckConfig.Test) == 1 && c.config.HealthCheckConfig.Test[0] == "NONE") {
+	if c.HasHealthCheck() {
 		// This container has a healthcheck defined in it; we need to add its state
 		healthCheckState, err := c.readHealthCheckLog()
 		if err != nil {
@@ -211,7 +209,11 @@ func (c *Container) getContainerInspectData(size bool, driverData *define.Driver
 		return nil, err
 	}
 	data.NetworkSettings = networkConfig
-	addInspectPortsExpose(c.config.ExposedPorts, data.NetworkSettings.Ports)
+	// Ports in NetworkSettings includes exposed ports for network modes that are not host,
+	// and not container.
+	if c.config.NetNsCtr == "" && c.NetworkMode() != "host" {
+		addInspectPortsExpose(c.config.ExposedPorts, data.NetworkSettings.Ports)
+	}
 
 	inspectConfig := c.generateInspectContainerConfig(ctrSpec)
 	data.Config = inspectConfig
@@ -249,11 +251,14 @@ func (c *Container) GetMounts(namedVolumes []*ContainerNamedVolume, imageVolumes
 		return inspectMounts, nil
 	}
 
+	inspectMounts = make([]define.InspectMount, 0, len(namedVolumes)+len(imageVolumes)+len(mounts))
+
 	for _, volume := range namedVolumes {
 		mountStruct := define.InspectMount{}
 		mountStruct.Type = "volume"
 		mountStruct.Destination = volume.Dest
 		mountStruct.Name = volume.Name
+		mountStruct.SubPath = volume.SubPath
 
 		// For src and driver, we need to look up the named
 		// volume.
@@ -280,6 +285,7 @@ func (c *Container) GetMounts(namedVolumes []*ContainerNamedVolume, imageVolumes
 		mountStruct.Destination = volume.Dest
 		mountStruct.Source = volume.Source
 		mountStruct.RW = volume.ReadWrite
+		mountStruct.SubPath = volume.SubPath
 
 		inspectMounts = append(inspectMounts, mountStruct)
 	}
@@ -379,11 +385,11 @@ func (c *Container) generateInspectContainerConfig(spec *spec.Spec) *define.Insp
 		envSecrets := c.config.EnvSecrets
 		for envIndex, envValue := range ctrConfig.Env {
 			// env variables come in the style `name=value`
-			envName := strings.Split(envValue, "=")[0]
+			envName, _, _ := strings.Cut(envValue, "=")
 
-			envSecret, ok := envSecrets[envName]
+			_, ok := envSecrets[envName]
 			if ok {
-				ctrConfig.Env[envIndex] = envSecret.Name + "=*******"
+				ctrConfig.Env[envIndex] = envName + "=*******"
 			}
 		}
 
@@ -408,30 +414,26 @@ func (c *Container) generateInspectContainerConfig(spec *spec.Spec) *define.Insp
 	}
 
 	if len(c.config.Labels) != 0 {
-		ctrConfig.Labels = make(map[string]string)
-		for k, v := range c.config.Labels {
-			ctrConfig.Labels[k] = v
-		}
+		ctrConfig.Labels = maps.Clone(c.config.Labels)
 	}
 
 	if len(spec.Annotations) != 0 {
-		ctrConfig.Annotations = make(map[string]string)
-		for k, v := range spec.Annotations {
-			ctrConfig.Annotations[k] = v
-		}
+		ctrConfig.Annotations = maps.Clone(spec.Annotations)
 	}
 	ctrConfig.StopSignal = signal.ToDockerFormat(c.config.StopSignal)
 	// TODO: should JSON deep copy this to ensure internal pointers don't
 	// leak.
+	ctrConfig.StartupHealthCheck = c.config.StartupHealthCheckConfig
+
 	ctrConfig.Healthcheck = c.config.HealthCheckConfig
 
 	ctrConfig.HealthcheckOnFailureAction = c.config.HealthCheckOnFailureAction.String()
 
-	ctrConfig.HealthLogDestination = c.config.HealthLogDestination
+	ctrConfig.HealthLogDestination = c.HealthCheckLogDestination()
 
-	ctrConfig.HealthMaxLogCount = c.config.HealthMaxLogCount
+	ctrConfig.HealthMaxLogCount = c.HealthCheckMaxLogCount()
 
-	ctrConfig.HealthMaxLogSize = c.config.HealthMaxLogSize
+	ctrConfig.HealthMaxLogSize = c.HealthCheckMaxLogSize()
 
 	ctrConfig.CreateCommand = c.config.CreateCommand
 
@@ -459,18 +461,26 @@ func (c *Container) generateInspectContainerConfig(spec *spec.Spec) *define.Insp
 
 	ctrConfig.SdNotifyMode = c.config.SdNotifyMode
 	ctrConfig.SdNotifySocket = c.config.SdNotifySocket
-	return ctrConfig
-}
 
-func generateIDMappings(idMappings types.IDMappingOptions) *define.InspectIDMappings {
-	var inspectMappings define.InspectIDMappings
-	for _, uid := range idMappings.UIDMap {
-		inspectMappings.UIDMap = append(inspectMappings.UIDMap, fmt.Sprintf("%d:%d:%d", uid.ContainerID, uid.HostID, uid.Size))
+	// Exposed ports consists of all exposed ports and all port mappings for
+	// this container. It does *NOT* follow to another container if we share
+	// the network namespace.
+	exposedPorts := make(map[string]struct{})
+	for port, protocols := range c.config.ExposedPorts {
+		for _, proto := range protocols {
+			exposedPorts[fmt.Sprintf("%d/%s", port, proto)] = struct{}{}
+		}
 	}
-	for _, gid := range idMappings.GIDMap {
-		inspectMappings.GIDMap = append(inspectMappings.GIDMap, fmt.Sprintf("%d:%d:%d", gid.ContainerID, gid.HostID, gid.Size))
+	for _, mapping := range c.config.PortMappings {
+		for i := range mapping.Range {
+			exposedPorts[fmt.Sprintf("%d/%s", mapping.ContainerPort+i, mapping.Protocol)] = struct{}{}
+		}
 	}
-	return &inspectMappings
+	if len(exposedPorts) > 0 {
+		ctrConfig.ExposedPorts = exposedPorts
+	}
+
+	return ctrConfig
 }
 
 // Generate the InspectContainerHostConfig struct for the HostConfig field of
@@ -481,7 +491,7 @@ func (c *Container) generateInspectContainerHostConfig(ctrSpec *spec.Spec, named
 	logConfig := new(define.InspectLogConfig)
 	logConfig.Type = c.config.LogDriver
 	logConfig.Path = c.config.LogPath
-	logConfig.Size = units.HumanSize(float64(c.config.LogSize))
+	logConfig.Size = units.HumanSize(float64(c.LogSizeMax()))
 	logConfig.Tag = c.config.LogTag
 
 	hostConfig.LogConfig = logConfig
@@ -504,17 +514,12 @@ func (c *Container) generateInspectContainerHostConfig(ctrSpec *spec.Spec, named
 		hostConfig.Dns = append(hostConfig.Dns, dns.String())
 	}
 
-	hostConfig.DnsOptions = make([]string, 0, len(c.config.DNSOption))
-	hostConfig.DnsOptions = append(hostConfig.DnsOptions, c.config.DNSOption...)
+	hostConfig.DnsOptions = slices.Clone(c.config.DNSOption)
+	hostConfig.DnsSearch = slices.Clone(c.config.DNSSearch)
+	hostConfig.ExtraHosts = slices.Clone(c.config.HostAdd)
+	hostConfig.GroupAdd = slices.Clone(c.config.Groups)
 
-	hostConfig.DnsSearch = make([]string, 0, len(c.config.DNSSearch))
-	hostConfig.DnsSearch = append(hostConfig.DnsSearch, c.config.DNSSearch...)
-
-	hostConfig.ExtraHosts = make([]string, 0, len(c.config.HostAdd))
-	hostConfig.ExtraHosts = append(hostConfig.ExtraHosts, c.config.HostAdd...)
-
-	hostConfig.GroupAdd = make([]string, 0, len(c.config.Groups))
-	hostConfig.GroupAdd = append(hostConfig.GroupAdd, c.config.Groups...)
+	hostConfig.HostsFile = c.config.BaseHostsFile
 
 	if ctrSpec.Process != nil {
 		if ctrSpec.Process.OOMScoreAdj != nil {
@@ -628,36 +633,13 @@ func (c *Container) generateInspectContainerHostConfig(ctrSpec *spec.Spec, named
 	return hostConfig, nil
 }
 
-// Return true if the container is running in the host's PID NS.
-func (c *Container) inHostPidNS() (bool, error) {
-	if c.config.PIDNsCtr != "" {
-		return false, nil
-	}
-	ctrSpec, err := c.specFromState()
-	if err != nil {
-		return false, err
-	}
-	if ctrSpec.Linux != nil {
-		// Locate the spec's PID namespace.
-		// If there is none, it's pid=host.
-		// If there is one and it has a path, it's "ns:".
-		// If there is no path, it's default - the empty string.
-		for _, ns := range ctrSpec.Linux.Namespaces {
-			if ns.Type == spec.PIDNamespace {
-				return false, nil
-			}
-		}
-	}
-	return true, nil
-}
-
 func (c *Container) GetDevices(priv bool, ctrSpec spec.Spec, deviceNodes map[string]string) ([]define.InspectDevice, error) {
 	devices := []define.InspectDevice{}
 	if ctrSpec.Linux != nil && !priv {
 		for _, dev := range ctrSpec.Linux.Devices {
 			key := fmt.Sprintf("%d:%d", dev.Major, dev.Minor)
 			if deviceNodes == nil {
-				nodes, err := util.FindDeviceNodes()
+				nodes, err := util.FindDeviceNodes(false)
 				if err != nil {
 					return nil, err
 				}
@@ -682,7 +664,7 @@ func blkioDeviceThrottle(deviceNodes map[string]string, devs []spec.LinuxThrottl
 	for _, dev := range devs {
 		key := fmt.Sprintf("%d:%d", dev.Major, dev.Minor)
 		if deviceNodes == nil {
-			nodes, err := util.FindDeviceNodes()
+			nodes, err := util.FindDeviceNodes(true)
 			if err != nil {
 				return nil, err
 			}

@@ -5,6 +5,22 @@
 
 load helpers
 
+@test "podman --log-level applies while loading containers.conf" {
+    skip_if_remote "containers.conf is loaded by the server for remote connections"
+
+    conf_tmp="$PODMAN_TMPDIR/containers.conf"
+    cat >$conf_tmp <<EOF
+[engine]
+invalid_option_for_test=true
+EOF
+
+    for log_arg in --log-level=debug --log-level=trace --debug; do
+        CONTAINERS_CONF_OVERRIDE="$conf_tmp" run_podman "$log_arg" version
+        assert "$output" =~ "Failed to decode the keys" "unknown containers.conf key is logged with $log_arg"
+        assert "$output" =~ "$conf_tmp" "diagnostic identifies containers.conf with $log_arg"
+    done
+}
+
 @test "podman CONTAINERS_CONF - CONTAINERS_CONF in conmon" {
     skip_if_remote "can't check conmon environment over remote"
 
@@ -107,7 +123,7 @@ See 'podman create --help'" "--module must be specified before the command"
     # Nonexistent module path with comma
     nonesuch=${PODMAN_TMPDIR}/nonexistent,withcomma
     run_podman 1 --module=$nonesuch sdfsdfdsf
-    is "$output" "Failed to obtain podman configuration: could not resolve module \"$nonesuch\": faccessat $nonesuch: no such file or directory" \
+    is "$output" "Failed to obtain podman configuration: parsing containers.conf: could not resolve module: open $nonesuch: no such file or directory" \
        "--module=ENOENT"
 }
 
@@ -180,17 +196,17 @@ EOF
 sdf=
 EOF
     XDG_CONFIG_HOME=$fake_home run_podman 1 --module $module_name
-    is "$output" "Failed to obtain podman configuration: reading additional config \"$conf_tmp\": decode configuration $conf_tmp: toml: line 3 (last key \"containers.sdf\"): expected value but found '\n' instead" \
+    is "$output" "Failed to obtain podman configuration: parsing containers.conf: decode configuration \"$conf_tmp\": toml: line 2 (last key \"containers.sdf\"): expected value but found '\n' instead" \
        "Corrupt module file"
 
     # Nonexistent module name
     nonesuch=assume-this-does-not-exist-$(random_string)
     XDG_CONFIG_HOME=$fake_home run_podman 1 --module=$nonesuch invalid-command
-    expect="Failed to obtain podman configuration: could not resolve module \"$nonesuch\": 3 errors occurred:"
+    expect="Failed to obtain podman configuration: parsing containers.conf: could not resolve module: "
     for dir in $fake_home /etc /usr/share;do
-        expect+=$'\n\t'"* faccessat $dir/containers/containers.conf.modules/$nonesuch: no such file or directory"
+        expect+="open $dir/containers/containers.conf.modules/$nonesuch: no such file or directory"$'\n'
     done
-    is "$output" "$expect" "--module=ENOENT : error message"
+    is "$output"$'\n' "$expect" "--module=ENOENT : error message"
 }
 
 # Too hard to test in 600-completion.bats because of the remote/rootless check
@@ -204,12 +220,28 @@ EOF
 
     m1=m1odule_$(random_string)
     m2=m2$(random_string)
+    bad_module=zz-invalid-$(random_string)
 
     touch $fake_modules_dir/{$m2,$m1}
+    cat >"$fake_modules_dir/$bad_module" <<EOF
+[containers]
+sdf=
+EOF
+
+    # The incomplete flag makes the early parser return an error, which
+    # initialization must ignore while Cobra completes the flag name.
+    XDG_CONFIG_HOME=$fake_home run_podman __completeNoDesc --module
+    assert "${lines[0]}" = "--module" "completion ignores the incomplete early flag"
+
     XDG_CONFIG_HOME=$fake_home run_podman __completeNoDesc --module ""
     # Even if there are modules in /etc or elsewhere, these will be first
     assert "${lines[0]}" = "$m1" "completion finds module 1"
     assert "${lines[1]}" = "$m2" "completion finds module 2"
+
+    # A parsed module must not be loaded during completion. The invalid module
+    # would make configuration initialization fail if it were loaded.
+    XDG_CONFIG_HOME=$fake_home run_podman __completeNoDesc --module="$bad_module" ""
+    assert "$output" !~ "Failed to obtain podman configuration" "completion does not load modules"
 }
 
 @test "podman --module - supported fields" {
@@ -227,7 +259,9 @@ EOF
     cname="$output"
 
     # Make sure `env_host` is read
-    run_podman container inspect $cname --format "{{.Config.Env}}"
+    # Only print the env vars that start with "FOO" to avoid printing output that
+    # may be considered problematic (see run_podman in helpers.bash).
+    run_podman container inspect $cname --format '{{range .Config.Env}} {{if eq "F" (slice . 0 1) }} {{.}} {{end}} {{end}}'
     assert "$output" =~ "FOO=$random_env_var" "--module should yield injecting host env vars into the container"
 
     # Make sure `privileged` is read during container creation

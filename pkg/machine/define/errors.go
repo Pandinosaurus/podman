@@ -3,18 +3,22 @@ package define
 import (
 	"errors"
 	"fmt"
-
-	"github.com/containers/common/pkg/strongunits"
 )
 
 var (
-	ErrNoSuchVM         = errors.New("VM does not exist")
-	ErrWrongState       = errors.New("VM in wrong state to perform action")
-	ErrVMAlreadyExists  = errors.New("VM already exists")
-	ErrVMAlreadyRunning = errors.New("VM already running or starting")
-	ErrMultipleActiveVM = errors.New("only one VM can be active at a time")
-	ErrNotImplemented   = errors.New("functionality not implemented")
+	ErrWrongState        = errors.New("VM in wrong state to perform action")
+	ErrNotImplemented    = errors.New("functionality not implemented")
+	ErrRelaunchSucceeded = errors.New("stopping execution: command relaunched with --reexec flag for elevated privileges succeeded")
+	ErrRebootInitiated   = errors.New("system reboot initiated")
 )
+
+type ErrVMAlreadyExists struct {
+	Name string
+}
+
+func (err *ErrVMAlreadyExists) Error() string {
+	return fmt.Sprintf("machine %q already exists", err.Name)
+}
 
 type ErrVMRunningCannotDestroyed struct {
 	Name string
@@ -33,14 +37,6 @@ func (err *ErrVMDoesNotExist) Error() string {
 	return fmt.Sprintf("%s: VM does not exist", err.Name)
 }
 
-type ErrNewDiskSizeTooSmall struct {
-	OldSize, NewSize strongunits.GiB
-}
-
-func (err *ErrNewDiskSizeTooSmall) Error() string {
-	return fmt.Sprintf("invalid disk size %d: new disk must be larger than %dGB", err.OldSize, err.NewSize)
-}
-
 type ErrIncompatibleMachineConfig struct {
 	Name string
 	Path string
@@ -48,4 +44,17 @@ type ErrIncompatibleMachineConfig struct {
 
 func (err *ErrIncompatibleMachineConfig) Error() string {
 	return fmt.Sprintf("incompatible machine config %q (%s) for this version of Podman", err.Path, err.Name)
+}
+
+type ErrMultipleActiveVM struct {
+	Name     string
+	Provider string
+}
+
+func (err *ErrMultipleActiveVM) Error() string {
+	msg := ""
+	if err.Provider != "" {
+		msg = " on the " + err.Provider + " provider"
+	}
+	return fmt.Sprintf("%s already starting or running%s: only one VM can be active at a time", err.Name, msg)
 }

@@ -1,17 +1,28 @@
 ####> This option file is used in:
-####>   podman create, pod clone, pod create, run
+####>   podman podman-build.unit.5.md.in, podman-container.unit.5.md.in, create, pod clone, pod create, podman-pod.unit.5.md.in, run
 ####> If file is edited, make sure the changes
 ####> are applicable to all of those.
+<< if is_quadlet >>
+### `Volume=[[SOURCE-VOLUME|HOST-DIR:]CONTAINER-DIR[:OPTIONS]]`
+<< else >>
 #### **--volume**, **-v**=*[[SOURCE-VOLUME|HOST-DIR:]CONTAINER-DIR[:OPTIONS]]*
+<< endif >>
 
 Create a bind mount. If `-v /HOST-DIR:/CONTAINER-DIR` is specified, Podman
 bind mounts `/HOST-DIR` from the host into `/CONTAINER-DIR` in the Podman
 container. Similarly, `-v SOURCE-VOLUME:/CONTAINER-DIR` mounts the named
 volume from the host into the container. If no such named volume exists,
-Podman creates one. If no source is given, the volume is created
-as an anonymously named volume with a randomly generated name, and is
-removed when the <<container|pod>> is removed via the `--rm` flag or
-the `podman rm --volumes` command.
+Podman creates one. The **nocreate** option can be used to disable this
+behavior and require the volume to already exist. If no source is given,
+the volume is created as an anonymously named volume with a randomly
+generated name, and is removed when the <<container|pod>> is removed via
+the `--rm` flag or the `podman rm --volumes` command.
+
+<< if is_quadlet >>
+Special case:
+
+* If `SOURCE-VOLUME` ends with `.volume`, a Podman named volume called `systemd-$name` is used as the source, and the generated systemd service contains a dependency on the `$name-volume.service`. Note that the corresponding `.volume` file must exist.
+<< endif >>
 
 (Note when using the remote client, including Mac and Windows (excluding WSL2) machines, the volumes are mounted from the remote server, not necessarily the client machine.)
 
@@ -28,6 +39,7 @@ The _OPTIONS_ is a comma-separated list and can be one or more of:
 * [**r**]**bind**
 * [**r**]**shared**|[**r**]**slave**|[**r**]**private**[**r**]**unbindable** <sup>[[1]](#Footnote1)</sup>
 * **idmap**[=**options**]
+* **nocreate**
 
 The `CONTAINER-DIR` must be an absolute path such as `/src/docs`. The volume
 is mounted into the container at this directory.
@@ -43,6 +55,13 @@ a named volume. If a volume with that name does not exist, it is created.
 Volumes created with names are not anonymous, and they are not removed by the `--rm`
 option and the `podman rm --volumes` command.
 
+The **nocreate** option can be specified for named volumes to prevent automatic
+volume creation. If **nocreate** is set and the volume does not exist, Podman
+returns an error instead of creating the volume. This is useful when you want
+to ensure that a volume was explicitly created before use.
+
+    $ podman <<fullsubcommand>> -v myvolume:/data:nocreate alpine
+
 Specify multiple **-v** options to mount one or more volumes into a
 <<container|pod>>.
 
@@ -54,10 +73,25 @@ See examples.
 
 `Chowning Volume Mounts`
 
-By default, Podman does not change the owner and group of source volume
-directories mounted into containers. If a <<container|pod>> is created in a new
-user namespace, the UID and GID in the container may correspond to another UID
-and GID on the host.
+When a named volume is first mounted to a container, Podman
+automatically adjusts the ownership of the volume's mount point during
+container initialization. This chown operation occurs under the
+following conditions:
+
+- The volume was not used yet (has `NeedsChown` set to true)
+- The volume is empty or has not been copied up yet
+- The volume is not managed by an external volume driver
+- The volume driver is not "image"
+
+For volumes with idmapped mounts (using the `idmap` option), the
+ownership change takes into account the container's user namespace
+mappings, but the idmapped volume retains proper UID/GID mapping. For
+volumes without idmapping, the mount point is chowned to match the
+container's process user and group, mapped to the host user namespace
+if user namespace remapping is enabled.
+
+If a <<container|pod>> is created in a new user namespace, the UID and
+GID in the container may correspond to another UID and GID on the host.
 
 The `:U` suffix tells Podman to use the correct host UID and GID based on the
 UID and GID within the <<container|pod>>, to change recursively the owner and
@@ -80,15 +114,17 @@ objects on the shared volumes. The **z** option tells Podman that two or more
 <<containers|pods>> share the volume content. As a result, Podman labels the
 content with a shared content label. Shared volume labels allow all containers
 to read/write content. The **Z** option tells Podman to label the content with
-a private unshared label Only the current <<container|pod>> can use a private
-volume. Note: all containers within a `pod` share the same SELinux label. This
+a private unshared label. Only the current <<container|pod>> can use a private
+volume.
+
+Note: all containers within a `pod` share the same SELinux label. This
 means all containers within said pod can read/write volumes shared into the
-container created with the `:Z` on any of one the containers. Relabeling walks
-the file system under the volume and changes the label on each file, if the
+container created with the `:Z` on any one of the containers. Relabeling walks
+the file system under the volume and changes the label on each file; if the
 volume has thousands of inodes, this process takes a long time, delaying the
 start of the <<container|pod>>. If the volume was previously relabeled with the
 `z` option, Podman is optimized to not relabel a second time. If files are
-moved into the volume, then the labels can be manually change with the
+moved into the volume, then the labels can be manually changed with the
 `chcon -Rt container_file_t PATH` command.
 
 Note: Do not relabel system files and directories. Relabeling system content

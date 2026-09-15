@@ -14,10 +14,14 @@ capabilities='{"drop":["CAP_FOWNER","CAP_SETFCAP"]}'
 
 # filter: convert yaml to json, because bash+yaml=madness
 function yaml2json() {
-    python3 -c 'import yaml
+    if command -v yq >/dev/null; then
+        yq -p yaml -o json
+    else
+        python3 -c 'import yaml
 import json
 import sys
 json.dump(yaml.safe_load(sys.stdin), sys.stdout)'
+    fi
 }
 
 ###############################################################################
@@ -92,6 +96,19 @@ status                           | =  | null
       is "$output" "[unmask=all]" "Inspect kube play container should see unmask all"
       run_podman kube down $KUBE
       run_podman rm $cname
+}
+
+@test "podman kube generate volumes" {
+      cname=c-$(safename)
+      KUBE=$PODMAN_TMPDIR/kube.yaml
+      source=$PODMAN_TMPDIR/Upper/Case/Path
+      mkdir -p ${source}
+      run_podman create --name $cname -v $source:/mnt -v UPPERCASE_Volume:/volume $IMAGE
+      run_podman kube generate $cname -f $KUBE
+      assert "$(< $KUBE)" =~ "name: uppercase-volume-pvc" "Lowercase volume name"
+      assert "$(< $KUBE)" =~ "upper-case-path" "Lowercase volume paths"
+      run_podman rm $cname
+      run_podman volume rm UPPERCASE_Volume
 }
 
 @test "podman kube generate - pod" {

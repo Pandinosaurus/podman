@@ -16,7 +16,6 @@ load helpers.network
 function setup() {
     basic_setup
     skip_if_not_rootless "pasta networking only available in rootless mode"
-    skip_if_no_pasta "pasta not found: install pasta(1) to run these tests"
 
     XFER_FILE="${PODMAN_TMPDIR}/pasta.bin"
 }
@@ -129,7 +128,7 @@ function pasta_test_do() {
     local tests_run=${BATS_FILE_TMPDIR}/tests_run
     touch ${tests_run}
     local testid="IPv${ip_ver} $proto $iftype $bind_type range=$range delta=$delta bytes=$bytes"
-    if grep -q -F -- "$testid" ${tests_run}; then
+    if grep -q -F -x -- "$testid" ${tests_run}; then
         die "Duplicate test! Have already run $testid"
     fi
     echo "$testid" >>${tests_run}
@@ -174,10 +173,14 @@ function pasta_test_do() {
     fi
 
     # socat options for second <address> in server ("STDOUT" or "EXEC"),
+    local recvhelper=
     if [ "${bytes}" = "1" ]; then
         recv="STDOUT"
     else
-        recv="EXEC:md5sum"
+        # To ease debugging in case of problems, use a helper that
+        # gives us byte count, hash, and first/last few bytes
+        recvhelper=/home/podman/bytecheck
+        recv="EXEC:$recvhelper"
     fi
 
     # and port forwarding configuration for Podman and pasta.
@@ -202,7 +205,8 @@ function pasta_test_do() {
     # Fill in file for data transfer tests, and expected output strings
     if [ "${bytes}" != "1" ]; then
         dd if=/dev/urandom bs=${bytes} count=1 of="${XFER_FILE}"
-        local expect="$(cat "${XFER_FILE}" | md5sum)"
+        run_podman run -i --rm $IMAGE $recvhelper < ${XFER_FILE}
+        local expect="$output"
     else
         printf "x" > "${XFER_FILE}"
         local expect="$(for i in $(seq ${seq}); do printf "x"; done)"
@@ -298,6 +302,7 @@ function pasta_test_do() {
 }
 
 @test "IPv6 default address assignment" {
+    skip "Host ipv6 set can vary vastly and may not have one true default address"
     skip_if_no_ipv6 "IPv6 not routable on the host"
 
     run_podman run --rm --net=pasta $IMAGE ip -j -6 address show

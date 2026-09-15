@@ -1,22 +1,21 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package compat
 
 import (
 	"bytes"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 
-	"github.com/containers/podman/v5/libpod"
-	"github.com/containers/podman/v5/pkg/api/handlers/utils"
-	api "github.com/containers/podman/v5/pkg/api/types"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/domain/infra/abi"
-	"github.com/containers/podman/v5/pkg/util"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/pkg/api/handlers/utils"
+	api "go.podman.io/podman/v6/pkg/api/types"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/domain/infra/abi"
+	"go.podman.io/podman/v6/pkg/util"
 )
 
 func ListSecrets(w http.ResponseWriter, r *http.Request) {
@@ -69,7 +68,7 @@ func InspectSecret(w http.ResponseWriter, r *http.Request) {
 	}
 	ic := abi.ContainerEngine{Libpod: runtime}
 	opts := entities.SecretInspectOptions{}
-	opts.ShowSecret = query.ShowSecret
+	opts.ShowSecret = query.ShowSecret && utils.IsLibpodRequest(r)
 
 	reports, errs, err := ic.SecretInspect(r.Context(), names, opts)
 	if err != nil {
@@ -123,8 +122,8 @@ func CreateSecret(w http.ResponseWriter, r *http.Request) {
 		Labels map[string]string `schema:"labels"`
 	}{}
 
-	if err := json.NewDecoder(r.Body).Decode(&createParams); err != nil {
-		utils.Error(w, http.StatusInternalServerError, fmt.Errorf("Decode(): %w", err))
+	if err := utils.ReadJSONFromBody(r, &createParams); err != nil {
+		utils.Error(w, http.StatusBadRequest, err)
 		return
 	}
 
@@ -146,6 +145,6 @@ func CreateSecret(w http.ResponseWriter, r *http.Request) {
 	utils.WriteResponse(w, http.StatusOK, report)
 }
 
-func UpdateSecret(w http.ResponseWriter, r *http.Request) {
+func UpdateSecret(w http.ResponseWriter, _ *http.Request) {
 	utils.Error(w, http.StatusNotImplemented, errors.New("update is not supported"))
 }

@@ -6,13 +6,13 @@ import (
 	"os"
 	"strings"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/utils"
-	"github.com/containers/podman/v5/cmd/podman/validate"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/utils"
+	"go.podman.io/podman/v6/cmd/podman/validate"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 var (
@@ -27,8 +27,8 @@ var (
 		},
 		ValidArgsFunction: common.AutocompleteContainersRunning,
 		Example: `podman pause mywebserver
-  podman pause 860a4b23
-  podman pause --all`,
+podman pause 860a4b23
+podman pause --all`,
 	}
 
 	containerPauseCommand = &cobra.Command{
@@ -41,8 +41,8 @@ var (
 		},
 		ValidArgsFunction: pauseCommand.ValidArgsFunction,
 		Example: `podman container pause mywebserver
-  podman container pause 860a4b23
-  podman container pause --all`,
+podman container pause 860a4b23
+podman container pause --all`,
 	}
 )
 
@@ -86,10 +86,8 @@ func init() {
 	validate.AddLatestFlag(containerPauseCommand, &pauseOpts.Latest)
 }
 
-func pause(cmd *cobra.Command, args []string) error {
-	var (
-		errs utils.OutputErrors
-	)
+func pause(_ *cobra.Command, args []string) error {
+	var errs utils.OutputErrors
 	args = utils.RemoveSlash(args)
 
 	for _, cidFile := range pauseCidFiles {
@@ -97,7 +95,7 @@ func pause(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("reading CIDFile: %w", err)
 		}
-		id := strings.Split(string(content), "\n")[0]
+		id, _, _ := strings.Cut(string(content), "\n")
 		args = append(args, id)
 	}
 

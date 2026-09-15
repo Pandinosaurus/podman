@@ -89,6 +89,8 @@ func StringToContainerStatus(status string) (ContainerStatus, error) {
 		return ContainerStateExited, nil
 	case ContainerStateRemoving.String():
 		return ContainerStateRemoving, nil
+	case ContainerStateStopping.String():
+		return ContainerStateStopping, nil
 	default:
 		return ContainerStateUnknown, fmt.Errorf("unknown container state: %s: %w", status, ErrInvalidArg)
 	}
@@ -133,7 +135,6 @@ type ContainerStats struct {
 	AvgCPU        float64
 	ContainerID   string
 	Name          string
-	PerCPU        []uint64
 	CPU           float64
 	CPUNano       uint64
 	CPUSystemNano uint64

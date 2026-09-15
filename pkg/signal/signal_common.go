@@ -46,11 +46,14 @@ func ParseSignalNameOrNumber(rawSignal string) (syscall.Signal, error) {
 	return -1, fmt.Errorf("invalid signal: %s", basename)
 }
 
-// CatchAll catches all signals and relays them to the specified channel.
+// CatchAll catches all signals (except the ones that make no sense to handle/forward,
+// see isSignalIgnoredBySigProxy()) and relays them to the specified channel.
 func CatchAll(sigc chan os.Signal) {
 	handledSigs := make([]os.Signal, 0, len(SignalMap))
 	for _, s := range SignalMap {
-		handledSigs = append(handledSigs, s)
+		if !isSignalIgnoredBySigProxy(s) {
+			handledSigs = append(handledSigs, s)
+		}
 	}
 	signal.Notify(sigc, handledSigs...)
 }
@@ -73,7 +76,7 @@ func ParseSysSignalToName(s syscall.Signal) (string, error) {
 }
 
 func ToDockerFormat(s uint) string {
-	var signalStr, err = ParseSysSignalToName(syscall.Signal(s))
+	signalStr, err := ParseSysSignalToName(syscall.Signal(s))
 	if err != nil {
 		return strconv.FormatUint(uint64(s), 10)
 	}

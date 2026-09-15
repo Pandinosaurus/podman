@@ -57,7 +57,7 @@ func NewInMemoryManager(numLocks uint32) (Manager, error) {
 	manager.locks = make([]*Mutex, numLocks)
 
 	var i uint32
-	for i = 0; i < numLocks; i++ {
+	for i = range numLocks {
 		lock := new(Mutex)
 		lock.id = i
 		manager.locks[i] = lock
@@ -133,7 +133,6 @@ func (m *InMemoryManager) AvailableLocks() (*uint32, error) {
 // Get any locks that are presently being held.
 // Useful for debugging deadlocks.
 func (m *InMemoryManager) LocksHeld() ([]uint32, error) {
-	//nolint:prealloc
 	var locks []uint32
 
 	for _, lock := range m.locks {

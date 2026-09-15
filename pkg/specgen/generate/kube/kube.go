@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package kube
 
@@ -7,42 +7,55 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"net"
 	"os"
-	"regexp"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/containers/common/libimage"
-	"github.com/containers/common/libnetwork/types"
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/common/pkg/parse"
-	"github.com/containers/common/pkg/secrets"
-	"github.com/containers/image/v5/manifest"
-	itypes "github.com/containers/image/v5/types"
-	"github.com/containers/podman/v5/libpod/define"
-	ann "github.com/containers/podman/v5/pkg/annotations"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	v1 "github.com/containers/podman/v5/pkg/k8s.io/api/core/v1"
-	"github.com/containers/podman/v5/pkg/k8s.io/apimachinery/pkg/api/resource"
-	"github.com/containers/podman/v5/pkg/k8s.io/apimachinery/pkg/util/intstr"
-	"github.com/containers/podman/v5/pkg/specgen"
-	"github.com/containers/podman/v5/pkg/specgen/generate"
-	systemdDefine "github.com/containers/podman/v5/pkg/systemd/define"
-	"github.com/containers/podman/v5/pkg/util"
-	"github.com/docker/docker/pkg/meminfo"
+	"go.podman.io/storage/pkg/regexp"
+
 	"github.com/docker/go-units"
 	spec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/libimage"
+	"go.podman.io/common/libnetwork/types"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/common/pkg/parse"
+	"go.podman.io/common/pkg/secrets"
+	"go.podman.io/image/v5/manifest"
+	itypes "go.podman.io/image/v5/types"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/libpod/define"
+	ann "go.podman.io/podman/v6/pkg/annotations"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	v1 "go.podman.io/podman/v6/pkg/k8s.io/api/core/v1"
+	"go.podman.io/podman/v6/pkg/k8s.io/apimachinery/pkg/api/resource"
+	"go.podman.io/podman/v6/pkg/k8s.io/apimachinery/pkg/util/intstr"
+	"go.podman.io/podman/v6/pkg/specgen"
+	"go.podman.io/podman/v6/pkg/specgen/generate"
+	systemdDefine "go.podman.io/podman/v6/pkg/systemd/define"
+	"go.podman.io/podman/v6/pkg/util"
+	"go.podman.io/storage/pkg/system"
 	"sigs.k8s.io/yaml"
+	cdiparser "tags.cncf.io/container-device-interface/pkg/parser"
 )
 
-func ToPodOpt(ctx context.Context, podName string, p entities.PodCreateOptions, publishAllPorts bool, podYAML *v1.PodTemplateSpec) (entities.PodCreateOptions, error) {
-	p.Net = &entities.NetOptions{NoHosts: p.Net.NoHosts}
+func restoreKubeAnnotationAliases(annotations map[string]string, containerName string) {
+	for _, alias := range define.OCIRuntimeAnnotationAliases {
+		if value, ok := annotations[alias.Kube+"/"+containerName]; ok {
+			annotations[alias.Runtime] = value
+		}
+	}
+}
+
+func ToPodOpt(_ context.Context, podName string, p entities.PodCreateOptions, publishAllPorts bool, podYAML *v1.PodTemplateSpec) (entities.PodCreateOptions, error) {
+	p.Net = &entities.NetOptions{NoHosts: p.Net.NoHosts, NoHostname: p.Net.NoHostname}
 
 	p.Name = podName
 	p.Labels = podYAML.ObjectMeta.Labels
@@ -86,7 +99,10 @@ func ToPodOpt(ctx context.Context, podName string, p entities.PodCreateOptions, 
 		}
 		p.Net.AddHosts = hosts
 	}
-	podPorts := getPodPorts(podYAML.Spec.Containers, publishAllPorts)
+	podPorts, err := getPodPorts(podYAML.Spec.Containers, publishAllPorts)
+	if err != nil {
+		return p, err
+	}
 	p.Net.PublishPorts = podPorts
 
 	if dnsConfig := podYAML.Spec.DNSConfig; dnsConfig != nil {
@@ -152,8 +168,10 @@ type CtrSpecGenOptions struct {
 	PodInfraID string
 	// ConfigMaps the configuration maps for environment variables
 	ConfigMaps []v1.ConfigMap
-	// SeccompPaths for finding the seccomp profile path
-	SeccompPaths *KubeSeccompPaths
+	// SeccompAnnotationPaths contains deprecated annotation-based seccomp profiles parsed from the pod
+	SeccompAnnotationPaths *SeccompAnnotationPaths
+	// SeccompProfileRoot is the base directory for Localhost seccomp profiles
+	SeccompProfileRoot string
 	// ReadOnly make all containers root file system readonly
 	ReadOnly itypes.OptionalBool
 	// RestartPolicy defines the restart policy of the container
@@ -183,6 +201,8 @@ type CtrSpecGenOptions struct {
 	PodSecurityContext *v1.PodSecurityContext
 	// TerminationGracePeriodSeconds is the grace period given to a container to stop before being forcefully killed
 	TerminationGracePeriodSeconds *int64
+	// Don't use pod name as prefix in resulting container name.
+	NoPodPrefix bool
 }
 
 func ToSpecGen(ctx context.Context, opts *CtrSpecGenOptions) (*specgen.SpecGenerator, error) {
@@ -215,7 +235,19 @@ func ToSpecGen(ctx context.Context, opts *CtrSpecGenOptions) (*specgen.SpecGener
 		return nil, errors.New("got empty pod name on container creation when playing kube")
 	}
 
-	s.Name = fmt.Sprintf("%s-%s", opts.PodName, opts.Container.Name)
+	// We do validate against the Container spec however it has Image set as optional to allow
+	// higher level config management to default or override container images. Image is
+	// required for pods so we must manually validate here.
+	// https://github.com/kubernetes/kubernetes/pull/48406
+	if opts.Container.Image == "" {
+		return nil, fmt.Errorf("container %q is missing the required 'image' field", opts.Container.Name)
+	}
+
+	if opts.NoPodPrefix {
+		s.Name = opts.Container.Name
+	} else {
+		s.Name = fmt.Sprintf("%s-%s", opts.PodName, opts.Container.Name)
+	}
 
 	s.Terminal = &opts.Container.TTY
 
@@ -228,6 +260,7 @@ func ToSpecGen(ctx context.Context, opts *CtrSpecGenOptions) (*specgen.SpecGener
 	s.ImageVolumes = opts.ImageVolumes
 
 	s.LogConfiguration.Options = make(map[string]string)
+	s.LogConfiguration.Labels = make(map[string]string)
 	for _, o := range opts.LogOptions {
 		opt, val, hasVal := strings.Cut(o, "=")
 		if !hasVal {
@@ -244,24 +277,27 @@ func ToSpecGen(ctx context.Context, opts *CtrSpecGenOptions) (*specgen.SpecGener
 				return nil, err
 			}
 			s.LogConfiguration.Size = logSize
-		default:
-			switch len(val) {
-			case 0:
-				return nil, fmt.Errorf("invalid log option: %w", define.ErrInvalidArg)
-			default:
-				// tags for journald only
-				if s.LogConfiguration.Driver == "" || s.LogConfiguration.Driver == define.JournaldLogging {
-					s.LogConfiguration.Options[opt] = val
-				} else {
-					logrus.Warnf("Can only set tags with journald log driver but driver is %q", s.LogConfiguration.Driver)
-				}
+		case "label":
+			labelKey, labelVal, hasVal := strings.Cut(val, "=")
+			if !hasVal {
+				return nil, fmt.Errorf("invalid log label %q", o)
 			}
+			s.LogConfiguration.Labels[labelKey] = labelVal
+		default:
+			if len(val) == 0 {
+				return nil, fmt.Errorf("invalid log option: %w", define.ErrInvalidArg)
+			}
+			s.LogConfiguration.Options[opt] = val
 		}
 	}
 
 	s.InitContainerType = opts.InitContainerType
 
-	setupSecurityContext(s, opts.Container.SecurityContext, opts.PodSecurityContext)
+	err = setupSecurityContext(s, opts.Container.SecurityContext, opts.PodSecurityContext, opts.SeccompProfileRoot, opts.SeccompAnnotationPaths, opts.Container.Name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to configure securityContext: %w", err)
+	}
+
 	err = setupLivenessProbe(s, opts.Container, opts.RestartPolicy)
 	if err != nil {
 		return nil, fmt.Errorf("failed to configure livenessProbe: %w", err)
@@ -271,47 +307,16 @@ func ToSpecGen(ctx context.Context, opts *CtrSpecGenOptions) (*specgen.SpecGener
 		return nil, fmt.Errorf("failed to configure startupProbe: %w", err)
 	}
 
-	// Since we prefix the container name with pod name to work-around the uniqueness requirement,
-	// the seccomp profile should reference the actual container name from the YAML
-	// but apply to the containers with the prefixed name
-	s.SeccompProfilePath = opts.SeccompPaths.FindForContainer(opts.Container.Name)
+	setupContainerResources(s, opts.Container)
 
-	s.ResourceLimits = &spec.LinuxResources{}
-	milliCPU := opts.Container.Resources.Limits.Cpu().MilliValue()
-	if milliCPU > 0 {
-		period, quota := util.CoresToPeriodAndQuota(float64(milliCPU) / 1000)
-		s.ResourceLimits.CPU = &spec.LinuxCPU{
-			Quota:  &quota,
-			Period: &period,
-		}
-	}
-
-	limit, err := quantityToInt64(opts.Container.Resources.Limits.Memory())
+	err = setupContainerDevices(s, opts.Container)
 	if err != nil {
-		return nil, fmt.Errorf("failed to set memory limit: %w", err)
-	}
-
-	memoryRes, err := quantityToInt64(opts.Container.Resources.Requests.Memory())
-	if err != nil {
-		return nil, fmt.Errorf("failed to set memory reservation: %w", err)
-	}
-
-	if limit > 0 || memoryRes > 0 {
-		s.ResourceLimits.Memory = &spec.LinuxMemory{}
-	}
-
-	if limit > 0 {
-		s.ResourceLimits.Memory.Limit = &limit
-	}
-
-	if memoryRes > 0 {
-		s.ResourceLimits.Memory.Reservation = &memoryRes
+		return nil, fmt.Errorf("failed to configure container devices: %w", err)
 	}
 
 	ulimitVal, ok := opts.Annotations[define.UlimitAnnotation]
 	if ok {
-		ulimits := strings.Split(ulimitVal, ",")
-		for _, ul := range ulimits {
+		for ul := range strings.SplitSeq(ulimitVal, ",") {
 			parsed, err := units.ParseUlimit(ul)
 			if err != nil {
 				return nil, err
@@ -322,9 +327,13 @@ func ToSpecGen(ctx context.Context, opts *CtrSpecGenOptions) (*specgen.SpecGener
 
 	// TODO: We don't understand why specgen does not take of this, but
 	// integration tests clearly pointed out that it was required.
-	imageData, err := opts.Image.Inspect(ctx, nil)
-	if err != nil {
-		return nil, err
+	var imageData *libimage.ImageData
+	if opts.Image != nil {
+		var err error
+		imageData, err = opts.Image.Inspect(ctx, nil)
+		if err != nil {
+			return nil, err
+		}
 	}
 	s.WorkDir = "/"
 	// Entrypoint/Command handling is based off of
@@ -342,9 +351,7 @@ func ToSpecGen(ctx context.Context, opts *CtrSpecGenOptions) (*specgen.SpecGener
 			return nil, err
 		}
 
-		for k, v := range s.Expose {
-			exposed[k] = v
-		}
+		maps.Copy(exposed, s.Expose)
 		s.Expose = exposed
 		// Pull entrypoint and cmd from image
 		s.Entrypoint = imageData.Config.Entrypoint
@@ -383,6 +390,7 @@ func ToSpecGen(ctx context.Context, opts *CtrSpecGenOptions) (*specgen.SpecGener
 		annotations[ann.SandboxID] = opts.PodInfraID
 	}
 	s.Annotations = annotations
+	restoreKubeAnnotationAliases(s.Annotations, opts.Container.Name)
 
 	if containerCIDFile, ok := opts.Annotations[define.InspectAnnotationCIDFile+"/"+opts.Container.Name]; ok {
 		s.Annotations[define.InspectAnnotationCIDFile] = containerCIDFile
@@ -394,6 +402,42 @@ func ToSpecGen(ctx context.Context, opts *CtrSpecGenOptions) (*specgen.SpecGener
 
 	if apparmor, ok := opts.Annotations[define.InspectAnnotationApparmor+"/"+opts.Container.Name]; ok {
 		s.Annotations[define.InspectAnnotationApparmor] = apparmor
+	}
+
+	if pidslimit, ok := annotations[define.PIDsLimitAnnotation+"/"+opts.Container.Name]; ok {
+		s.Annotations[define.PIDsLimitAnnotation] = pidslimit
+		pidslimitAsInt, err := strconv.ParseInt(pidslimit, 10, 0)
+		if err != nil {
+			return nil, err
+		}
+		if s.ResourceLimits == nil {
+			s.ResourceLimits = &spec.LinuxResources{}
+		}
+		s.ResourceLimits.Pids = &spec.LinuxPids{
+			Limit: &pidslimitAsInt,
+		}
+	}
+
+	if cpuset, ok := annotations[define.CpusetAnnotation+"/"+opts.Container.Name]; ok {
+		s.Annotations[define.CpusetAnnotation] = cpuset
+		if s.ResourceLimits == nil {
+			s.ResourceLimits = &spec.LinuxResources{}
+		}
+		if s.ResourceLimits.CPU == nil {
+			s.ResourceLimits.CPU = &spec.LinuxCPU{}
+		}
+		s.ResourceLimits.CPU.Cpus = cpuset
+	}
+
+	if memNodes, ok := annotations[define.MemoryNodesAnnotation+"/"+opts.Container.Name]; ok {
+		s.Annotations[define.MemoryNodesAnnotation] = memNodes
+		if s.ResourceLimits == nil {
+			s.ResourceLimits = &spec.LinuxResources{}
+		}
+		if s.ResourceLimits.CPU == nil {
+			s.ResourceLimits.CPU = &spec.LinuxCPU{}
+		}
+		s.ResourceLimits.CPU.Mems = memNodes
 	}
 
 	if label, ok := opts.Annotations[define.InspectAnnotationLabel+"/"+opts.Container.Name]; ok {
@@ -425,6 +469,10 @@ func ToSpecGen(ctx context.Context, opts *CtrSpecGenOptions) (*specgen.SpecGener
 		s.Annotations[define.InspectAnnotationInit] = init
 	}
 
+	s.HealthLogDestination = define.DefaultHealthCheckLocalDestination
+	s.HealthMaxLogCount = define.DefaultHealthMaxLogCount
+	s.HealthMaxLogSize = define.DefaultHealthMaxLogSize
+
 	if publishAll, ok := opts.Annotations[define.InspectAnnotationPublishAll+"/"+opts.Container.Name]; ok {
 		if opts.IsInfra {
 			publishAllAsBool, err := strconv.ParseBool(publishAll)
@@ -438,17 +486,24 @@ func ToSpecGen(ctx context.Context, opts *CtrSpecGenOptions) (*specgen.SpecGener
 	}
 
 	s.Annotations[define.KubeHealthCheckAnnotation] = "true"
-	s.HealthLogDestination = define.DefaultHealthCheckLocalDestination
-	s.HealthMaxLogCount = define.DefaultHealthMaxLogCount
-	s.HealthMaxLogSize = define.DefaultHealthMaxLogSize
 
 	// Environment Variables
-	envs := map[string]string{}
-	for _, env := range imageData.Config.Env {
-		key, val, _ := strings.Cut(env, "=")
-		envs[key] = val
+	envs, err := generate.ParseImageEnvs(imageData.Config.Env)
+	if err != nil {
+		return nil, err
 	}
 
+	// Process envFrom first (lower precedence)
+	for _, envFrom := range opts.Container.EnvFrom {
+		cmEnvs, err := envVarsFrom(envFrom, opts)
+		if err != nil {
+			return nil, err
+		}
+
+		maps.Copy(envs, cmEnvs)
+	}
+
+	// Process env second (higher precedence, overrides envFrom)
 	for _, env := range opts.Container.Env {
 		value, err := envVarValue(env, opts)
 		if err != nil {
@@ -458,16 +513,6 @@ func ToSpecGen(ctx context.Context, opts *CtrSpecGenOptions) (*specgen.SpecGener
 		// Only set the env if the value is not nil
 		if value != nil {
 			envs[env.Name] = *value
-		}
-	}
-	for _, envFrom := range opts.Container.EnvFrom {
-		cmEnvs, err := envVarsFrom(envFrom, opts)
-		if err != nil {
-			return nil, err
-		}
-
-		for k, v := range cmEnvs {
-			envs[k] = v
 		}
 	}
 	s.Env = envs
@@ -564,18 +609,25 @@ func ToSpecGen(ctx context.Context, opts *CtrSpecGenOptions) (*specgen.SpecGener
 			}
 			s.Volumes = append(s.Volumes, &emptyDirVolume)
 		case KubeVolumeTypeEmptyDirTmpfs:
-			memVolume := spec.Mount{
-				Destination: volume.MountPath,
-				Type:        define.TypeTmpfs,
-				Source:      define.TypeTmpfs,
+			// A named volume, so the tmpfs is shared by every container in the pod.
+			tmpfsOptions := append(slices.Clone(options), "volume-opt=type="+define.TypeTmpfs)
+			if volumeSource.SizeLimit > 0 {
+				tmpfsOptions = append(tmpfsOptions, fmt.Sprintf("volume-opt=o=size=%d", volumeSource.SizeLimit))
 			}
-			s.Mounts = append(s.Mounts, memVolume)
+			memVolume := specgen.NamedVolume{
+				Dest:        volume.MountPath,
+				Name:        volumeSource.Source,
+				Options:     tmpfsOptions,
+				IsAnonymous: true,
+				SubPath:     volume.SubPath,
+			}
+			s.Volumes = append(s.Volumes, &memVolume)
 		case KubeVolumeTypeImage:
 			imageVolume := specgen.ImageVolume{
 				Destination: volume.MountPath,
 				ReadWrite:   false,
 				Source:      volumeSource.Source,
-				SubPath:     "",
+				SubPath:     volume.SubPath,
 			}
 			s.ImageVolumes = append(s.ImageVolumes, &imageVolume)
 		default:
@@ -611,9 +663,7 @@ func ToSpecGen(ctx context.Context, opts *CtrSpecGenOptions) (*specgen.SpecGener
 	} else {
 		// If there are already labels in the map, append the ones
 		// obtained from kube
-		for k, v := range opts.Labels {
-			s.Labels[k] = v
-		}
+		maps.Copy(s.Labels, opts.Labels)
 	}
 
 	if ro := opts.ReadOnly; ro != itypes.OptionalBoolUndefined {
@@ -634,6 +684,14 @@ func ToSpecGen(ctx context.Context, opts *CtrSpecGenOptions) (*specgen.SpecGener
 	if opts.TerminationGracePeriodSeconds != nil {
 		timeout := uint(*opts.TerminationGracePeriodSeconds)
 		s.StopTimeout = &timeout
+	}
+
+	if lifecycle := opts.Container.Lifecycle; lifecycle != nil && lifecycle.StopSignal != nil {
+		stopSignal, err := util.ParseSignal(*lifecycle.StopSignal)
+		if err != nil {
+			return nil, err
+		}
+		s.StopSignal = &stopSignal
 	}
 
 	return s, nil
@@ -801,8 +859,8 @@ func makeHealthCheck(inCmd string, interval int32, retries int32, timeout int32,
 		err := json.Unmarshal([]byte(inCmd), &cmd)
 		if err != nil {
 			// ...otherwise pass it to "/bin/sh -c" inside the container
-			cmd = []string{define.HealthConfigTestCmdShell}
-			cmd = append(cmd, strings.Split(inCmd, " ")...)
+			args := strings.Split(inCmd, " ")
+			cmd = append([]string{define.HealthConfigTestCmdShell}, args...)
 		} else {
 			cmd = append([]string{define.HealthConfigTestCmd}, cmd...)
 		}
@@ -840,7 +898,78 @@ func makeHealthCheck(inCmd string, interval int32, retries int32, timeout int32,
 	return &hc, nil
 }
 
-func setupSecurityContext(s *specgen.SpecGenerator, securityContext *v1.SecurityContext, podSecurityContext *v1.PodSecurityContext) {
+func setupContainerResources(s *specgen.SpecGenerator, containerYAML v1.Container) {
+	s.ResourceLimits = &spec.LinuxResources{}
+	milliCPU := containerYAML.Resources.Limits.Cpu().MilliValue()
+	if milliCPU > 0 {
+		period, quota := util.CoresToPeriodAndQuota(float64(milliCPU) / 1000)
+		s.ResourceLimits.CPU = &spec.LinuxCPU{
+			Quota:  &quota,
+			Period: &period,
+		}
+	}
+
+	limit := quantityToInt64(containerYAML.Resources.Limits.Memory())
+
+	memoryRes := quantityToInt64(containerYAML.Resources.Requests.Memory())
+
+	if limit > 0 || memoryRes > 0 {
+		s.ResourceLimits.Memory = &spec.LinuxMemory{}
+	}
+
+	if limit > 0 {
+		s.ResourceLimits.Memory.Limit = &limit
+	}
+
+	if memoryRes > 0 {
+		s.ResourceLimits.Memory.Reservation = &memoryRes
+	}
+}
+
+const PodmanDeviceResourcePrefix = "io.podman/device"
+
+func setupContainerDevices(s *specgen.SpecGenerator, containerYAML v1.Container) error {
+	s.Devices = make([]spec.LinuxDevice, 0)
+	// avoid duplicates
+	devices := make(map[string]bool, 0)
+
+	parse := func(device string) error {
+		vendor, class, name := cdiparser.ParseDevice(device)
+		if vendor == "" {
+			return nil
+		}
+
+		if err := cdiparser.ValidateDeviceName(name); err != nil {
+			// handle internal "fake" CDI
+			if vendor == "podman.io" && class == "device" {
+				device = name
+			} else {
+				return fmt.Errorf("not a qualified name %v: %w", device, err)
+			}
+		}
+
+		if _, ok := devices[device]; !ok {
+			devices[device] = true
+			s.Devices = append(s.Devices, spec.LinuxDevice{Path: device})
+		}
+		return nil
+	}
+
+	for key := range containerYAML.Resources.Requests {
+		if err := parse(key.String()); err != nil {
+			return err
+		}
+	}
+	for key := range containerYAML.Resources.Limits {
+		if err := parse(key.String()); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func setupSecurityContext(s *specgen.SpecGenerator, securityContext *v1.SecurityContext, podSecurityContext *v1.PodSecurityContext, profileRoot string, seccompAnnotationPaths *SeccompAnnotationPaths, ctrName string) error {
 	if securityContext == nil {
 		securityContext = &v1.SecurityContext{}
 	}
@@ -885,6 +1014,54 @@ func setupSecurityContext(s *specgen.SpecGenerator, securityContext *v1.Security
 			s.SelinuxOpts = append(s.SelinuxOpts, fmt.Sprintf("filetype:%s", seopt.FileType))
 		}
 	}
+
+	seccompProfile := securityContext.SeccompProfile
+	if seccompProfile == nil && seccompAnnotationPaths != nil {
+		// Since we prefix the container name with pod name to work-around the uniqueness requirement,
+		// the seccomp profile should reference the actual container name from the YAML
+		// but apply to the containers with the prefixed name
+		if seccompAnnotationPath, ok := seccompAnnotationPaths.FindForContainer(ctrName); ok {
+			s.SeccompProfilePath = seccompAnnotationPath
+			logrus.Warnf("Container %q: Kubernetes seccomp annotation is deprecated; use securityContext.seccompProfile instead", ctrName)
+		}
+	}
+	if seccompProfile == nil && s.SeccompProfilePath == "" {
+		seccompProfile = podSecurityContext.SeccompProfile
+	}
+	if seccompProfile == nil && s.SeccompProfilePath == "" && seccompAnnotationPaths != nil {
+		if seccompAnnotationPaths.podPath != "" {
+			s.SeccompProfilePath = seccompAnnotationPaths.podPath
+			logrus.Warn("Pod-level Kubernetes seccomp annotation is deprecated; use spec.securityContext.seccompProfile instead")
+		}
+	}
+	if seccompProfile == nil && s.SeccompProfilePath == "" {
+		seccompProfile = &v1.SeccompProfile{Type: v1.SeccompProfileTypeRuntimeDefault}
+	}
+
+	if seccompProfile != nil {
+		switch seccompProfile.Type {
+		case v1.SeccompProfileTypeRuntimeDefault:
+			seccompProfilePath, err := libpod.DefaultSeccompPath()
+			if err != nil {
+				return err
+			}
+			s.SeccompProfilePath = seccompProfilePath
+		case v1.SeccompProfileTypeUnconfined:
+			s.SeccompProfilePath = "unconfined"
+		case v1.SeccompProfileTypeLocalhost:
+			if seccompProfile.LocalhostProfile == nil || *seccompProfile.LocalhostProfile == "" {
+				return fmt.Errorf("seccomp profile type %q requires localhostProfile", seccompProfile.Type)
+			}
+			localhostProfile := *seccompProfile.LocalhostProfile
+			if err := validateSeccompLocalhostProfile(localhostProfile); err != nil {
+				return fmt.Errorf("invalid seccomp profile path %q: %w", localhostProfile, err)
+			}
+			s.SeccompProfilePath = filepath.Join(profileRoot, filepath.FromSlash(localhostProfile))
+		default:
+			return fmt.Errorf("invalid seccomp profile type: %s", seccompProfile.Type)
+		}
+	}
+
 	if caps := securityContext.Capabilities; caps != nil {
 		for _, capability := range caps.Add {
 			s.CapAdd = append(s.CapAdd, string(capability))
@@ -914,18 +1091,18 @@ func setupSecurityContext(s *specgen.SpecGenerator, securityContext *v1.Security
 	for _, group := range podSecurityContext.SupplementalGroups {
 		s.Groups = append(s.Groups, strconv.FormatInt(group, 10))
 	}
+
+	return nil
 }
 
-func quantityToInt64(quantity *resource.Quantity) (int64, error) {
+func quantityToInt64(quantity *resource.Quantity) int64 {
 	if i, ok := quantity.AsInt64(); ok {
-		return i, nil
+		return i
 	}
 
-	if i, ok := quantity.AsDec().Unscaled(); ok {
-		return i, nil
-	}
-
-	return 0, fmt.Errorf("quantity cannot be represented as int64: %v", quantity)
+	// Value() properly accounts for the decimal scale, unlike
+	// AsDec().Unscaled() which silently drops it.
+	return quantity.Value()
 }
 
 // read a k8s secret in JSON/YAML format from the secret manager
@@ -941,12 +1118,10 @@ func k8sSecretFromSecretManager(name string, secretsManager *secrets.SecretsMana
 		secrets = make(map[string][]byte)
 		var secret v1.Secret
 		if err := yaml.Unmarshal(inputSecret, &secret); err != nil {
-			return nil, fmt.Errorf("secret %v is not valid JSON/YAML: %v", name, err)
+			return nil, fmt.Errorf("secret %v is not valid JSON/YAML: %w", name, err)
 		}
 
-		for key, val := range secret.Data {
-			secrets[key] = val
-		}
+		maps.Copy(secrets, secret.Data)
 
 		for key, val := range secret.StringData {
 			secrets[key] = []byte(val)
@@ -1026,7 +1201,7 @@ func envVarValue(env v1.EnvVar, opts *CtrSpecGenOptions) (*string, error) {
 				err = fmt.Errorf("secret %v has not %v key", secKeyRef.Name, secKeyRef.Key)
 			}
 			if secKeyRef.Optional == nil || !*secKeyRef.Optional {
-				return nil, fmt.Errorf("cannot set env %v: %v", env.Name, err)
+				return nil, fmt.Errorf("cannot set env %v: %w", env.Name, err)
 			}
 			return nil, nil
 		}
@@ -1043,13 +1218,13 @@ func envVarValue(env v1.EnvVar, opts *CtrSpecGenOptions) (*string, error) {
 	return &env.Value, nil
 }
 
+var (
+	fieldPathLabelRegex      = regexp.Delayed(`^metadata.labels\['(.+)'\]$`)
+	fieldPathAnnotationRegex = regexp.Delayed(`^metadata.annotations\['(.+)'\]$`)
+)
+
 func envVarValueFieldRef(env v1.EnvVar, opts *CtrSpecGenOptions) (*string, error) {
 	fieldRef := env.ValueFrom.FieldRef
-
-	fieldPathLabelPattern := `^metadata.labels\['(.+)'\]$`
-	fieldPathLabelRegex := regexp.MustCompile(fieldPathLabelPattern)
-	fieldPathAnnotationPattern := `^metadata.annotations\['(.+)'\]$`
-	fieldPathAnnotationRegex := regexp.MustCompile(fieldPathAnnotationPattern)
 
 	fieldPath := fieldRef.FieldPath
 
@@ -1153,7 +1328,7 @@ func getContainerResources(container v1.Container) (v1.ResourceRequirements, err
 	requests := container.Resources.Requests
 
 	if limits == nil || limits.Memory().IsZero() {
-		mi, err := meminfo.Read()
+		mi, err := system.ReadMemInfo()
 		if err != nil {
 			return result, err
 		}
@@ -1184,9 +1359,20 @@ func getContainerResources(container v1.Container) (v1.ResourceRequirements, err
 }
 
 // getPodPorts converts a slice of kube container descriptions to an
-// array of portmapping
-func getPodPorts(containers []v1.Container, publishAll bool) []types.PortMapping {
+// array of portmapping.
+// It returns an error if two containers in the same pod bind to the
+// same host port (same hostIP + hostPort + protocol combination).
+func getPodPorts(containers []v1.Container, publishAll bool) ([]types.PortMapping, error) {
+	type portKey struct {
+		hostIP   string
+		hostPort int32
+		protocol string
+	}
+
 	var infraPorts []types.PortMapping
+	// Track which container claimed each (hostIP, hostPort, protocol) tuple.
+	usedPorts := make(map[portKey]string)
+
 	for _, container := range containers {
 		for _, p := range container.Ports {
 			if p.HostPort != 0 && p.ContainerPort == 0 {
@@ -1207,9 +1393,18 @@ func getPodPorts(containers []v1.Container, publishAll bool) []types.PortMapping
 			// only hostPort is utilized in podman context, all container ports
 			// are accessible inside the shared network namespace
 			if p.HostPort != 0 {
+				key := portKey{
+					hostIP:   p.HostIP,
+					hostPort: p.HostPort,
+					protocol: strings.ToLower(string(p.Protocol)),
+				}
+				if prev, exists := usedPorts[key]; exists {
+					return nil, fmt.Errorf("containers %q and %q both bind to host port %d/%s", prev, container.Name, p.HostPort, strings.ToLower(string(p.Protocol)))
+				}
+				usedPorts[key] = container.Name
 				infraPorts = append(infraPorts, portBinding)
 			}
 		}
 	}
-	return infraPorts
+	return infraPorts, nil
 }

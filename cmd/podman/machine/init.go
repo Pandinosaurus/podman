@@ -3,20 +3,25 @@
 package machine
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"runtime"
+	"slices"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/common/pkg/strongunits"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	ldefine "github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/libpod/events"
-	"github.com/containers/podman/v5/pkg/machine/define"
-	"github.com/containers/podman/v5/pkg/machine/shim"
-	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
 	"github.com/shirou/gopsutil/v4/mem"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/common/pkg/strongunits"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	ldefine "go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/libpod/events"
+	"go.podman.io/podman/v6/pkg/machine/define"
+	"go.podman.io/podman/v6/pkg/machine/provider"
+	"go.podman.io/podman/v6/pkg/machine/shim"
+	"go.podman.io/podman/v6/pkg/machine/vmconfigs"
 )
 
 var (
@@ -35,11 +40,13 @@ var (
 	initOptionalFlags  = InitOptionalFlags{}
 	defaultMachineName = define.DefaultMachineName
 	now                bool
+	providerOverride   string
 )
 
 // Flags which have a meaning when unspecified that differs from the flag default
 type InitOptionalFlags struct {
 	UserModeNetworking bool
+	tlsVerify          bool
 }
 
 // maxMachineNameSize is set to thirty to limit huge machine names primarily
@@ -62,6 +69,10 @@ func init() {
 	)
 	_ = initCmd.RegisterFlagCompletionFunc(cpusFlagName, completion.AutocompleteNone)
 
+	runPlaybookFlagName := "playbook"
+	flags.StringVar(&initOpts.PlaybookPath, runPlaybookFlagName, "", "Run an Ansible playbook after first boot")
+	_ = initCmd.RegisterFlagCompletionFunc(runPlaybookFlagName, completion.AutocompleteDefault)
+
 	diskSizeFlagName := "disk-size"
 	flags.Uint64Var(
 		&initOpts.DiskSize,
@@ -78,6 +89,14 @@ func init() {
 		"Memory in MiB",
 	)
 	_ = initCmd.RegisterFlagCompletionFunc(memoryFlagName, completion.AutocompleteNone)
+
+	swapFlagName := "swap"
+	flags.Uint64VarP(
+		&initOpts.Swap,
+		swapFlagName, "s", 0,
+		"Swap in MiB",
+	)
+	_ = initCmd.RegisterFlagCompletionFunc(swapFlagName, completion.AutocompleteNone)
 
 	flags.BoolVar(
 		&now,
@@ -141,6 +160,19 @@ func init() {
 	userModeNetFlagName := "user-mode-networking"
 	flags.BoolVar(&initOptionalFlags.UserModeNetworking, userModeNetFlagName, false,
 		"Whether this machine should use user-mode networking, routing traffic through a host user-space process")
+
+	flags.BoolVar(&initOptionalFlags.tlsVerify, "tls-verify", true,
+		"Require HTTPS and verify certificates when contacting registries")
+
+	providerFlagName := "provider"
+	flags.StringVar(&providerOverride, providerFlagName, "", "Override the default machine provider")
+	_ = initCmd.RegisterFlagCompletionFunc(providerFlagName, autocompleteMachineProvider)
+
+	setDefaultConnectionFlagName := "update-connection"
+	flags.BoolVarP(&setDefaultSystemConn, setDefaultConnectionFlagName, "u", false, "Set default system connection for this machine")
+
+	importNativeCaFlagName := "import-native-ca"
+	flags.BoolVar(&initOpts.ImportNativeCA, importNativeCaFlagName, cfg.ContainersConfDefaultsRO.Machine.ImportNativeCA, "Import the host trusted CA certificates into the machine")
 }
 
 func initMachine(cmd *cobra.Command, args []string) error {
@@ -156,6 +188,21 @@ func initMachine(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// If the provider option was given, we need to override the
+	// current provider
+	if cmd.Flags().Changed("provider") {
+		// var found bool
+		indexFunc := func(s vmconfigs.VMProvider) bool {
+			return s.VMType().String() == providerOverride
+		}
+		providers := provider.GetAll()
+		indexVal := slices.IndexFunc(providers, indexFunc)
+		if indexVal == -1 {
+			return fmt.Errorf("unsupported provider %q", providerOverride)
+		}
+		machineProvider = providers[indexVal]
+	}
+
 	// The vmtype names need to be reserved and cannot be used for podman machine names
 	if _, err := define.ParseVMType(initOpts.Name, define.UnknownVirt); err == nil {
 		return fmt.Errorf("cannot use %q for a machine name", initOpts.Name)
@@ -166,14 +213,22 @@ func initMachine(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check if machine already exists
-	_, exists, err := shim.VMExists(initOpts.Name, []vmconfigs.VMProvider{provider})
-	if err != nil {
+	_, _, err := shim.VMExists(initOpts.Name)
+	// if nil, means we found a vm and need to reject it by name
+	if err == nil {
+		return &define.ErrVMAlreadyExists{Name: initOpts.Name}
+	}
+	if _, ok := errors.AsType[*define.ErrVMDoesNotExist](err); !ok {
 		return err
 	}
 
-	// machine exists, return error
+	// Check if something on the hypervisor exists with the same name
+	exists, err := shim.VMExistsOnHyperVisor(initOpts.Name)
+	if err != nil {
+		return err
+	}
 	if exists {
-		return fmt.Errorf("%s: %w", initOpts.Name, define.ErrVMAlreadyExists)
+		return fmt.Errorf("%s already exists on hypervisor", initOpts.Name)
 	}
 
 	// check if a system connection already exists
@@ -200,10 +255,21 @@ func initMachine(cmd *cobra.Command, args []string) error {
 		initOpts.UserModeNetworking = &initOptionalFlags.UserModeNetworking
 	}
 
-	if cmd.Flags().Changed("memory") {
-		if err := checkMaxMemory(strongunits.MiB(initOpts.Memory)); err != nil {
-			return err
-		}
+	if err := checkMaxMemory(strongunits.MiB(initOpts.Memory)); err != nil {
+		return err
+	}
+	if err := checkMaxCPUs(initOpts.CPUS); err != nil {
+		return err
+	}
+
+	// initOpts.SkipTlsVerify defaults to OptionalBoolUndefined, which means the backend library
+	// decides whether to verify TLS. We only explicitly set it if the user specifies the
+	// --tls-verify flag on the CLI.
+	//
+	// The flag value from initOptionalFlags.tlsVerify indicates whether TLS verification is desired.
+	// Since we are converting tlsVerify -> SkipTlsVerify, we must invert the bool accordingly.
+	if cmd.Flags().Changed("tls-verify") {
+		initOpts.SkipTlsVerify = types.NewOptionalBool(!initOptionalFlags.tlsVerify)
 	}
 
 	// TODO need to work this back in
@@ -218,8 +284,23 @@ func initMachine(cmd *cobra.Command, args []string) error {
 	// 	return err
 	// }
 
-	err = shim.Init(initOpts, provider)
+	err = shim.Init(initOpts, machineProvider)
 	if err != nil {
+		// ErrRelaunchSucceeded is not a real error: it signals that
+		// an elevated child process completed init successfully.
+		// Exit gracefully with a success message.
+		//
+		// This can happen with WSL when installing the WSL features
+		// or with HyperV when adding entries to the Registry
+		if errors.Is(err, define.ErrRelaunchSucceeded) {
+			fmt.Println("Machine init complete")
+			if now {
+				fmt.Printf("Machine %q started successfully\n", initOpts.Name)
+				return nil
+			}
+			printStartCommand(initOpts.Name)
+			return nil
+		}
 		return err
 	}
 
@@ -227,14 +308,21 @@ func initMachine(cmd *cobra.Command, args []string) error {
 	fmt.Println("Machine init complete")
 
 	if now {
+		// Pass reexec flag from init to start
+		startOpts.ReExec = initOpts.ReExec
 		return start(cmd, args)
 	}
+
+	printStartCommand(initOpts.Name)
+	return err
+}
+
+func printStartCommand(machineName string) {
 	extra := ""
-	if initOpts.Name != defaultMachineName {
-		extra = " " + initOpts.Name
+	if machineName != defaultMachineName {
+		extra = " " + machineName
 	}
 	fmt.Printf("To start your machine run:\n\n\tpodman machine start%s\n\n", extra)
-	return err
 }
 
 // checkMaxMemory gets the total system memory and compares it to the variable.  if the variable
@@ -245,7 +333,16 @@ func checkMaxMemory(newMem strongunits.MiB) error {
 		return err
 	}
 	if total := strongunits.B(memStat.Total); strongunits.B(memStat.Total) < newMem.ToBytes() {
-		return fmt.Errorf("requested amount of memory (%d MB) greater than total system memory (%d MB)", newMem, total)
+		return fmt.Errorf("requested amount of memory (%d MB) greater than total system memory (%d MB)", newMem, strongunits.ToMib(total))
+	}
+	return nil
+}
+
+// checkMaxCPUs compares requested CPUs to the host (runtime.NumCPU).
+func checkMaxCPUs(requestedCPUs uint64) error {
+	hostCPUs := uint64(runtime.NumCPU())
+	if requestedCPUs > hostCPUs {
+		return fmt.Errorf("requested number of CPUs (%d) greater than number of host CPUs (%d)", requestedCPUs, hostCPUs)
 	}
 	return nil
 }

@@ -7,14 +7,13 @@ import (
 	"path/filepath"
 	"time"
 
-	. "github.com/containers/podman/v5/test/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	. "github.com/onsi/gomega/gexec"
+	. "go.podman.io/podman/v6/test/utils"
 )
 
 var _ = Describe("Podman restart", func() {
-
 	It("podman restart bogus container", func() {
 		session := podmanTest.Podman([]string{"start", "123"})
 		session.WaitWithDefaultTimeout()
@@ -57,8 +56,6 @@ var _ = Describe("Podman restart", func() {
 
 	It("podman restart running container", func() {
 		_ = podmanTest.RunTopContainer("test1")
-		ok := WaitForContainer(podmanTest)
-		Expect(ok).To(BeTrue(), "test1 container is up")
 		startTime := podmanTest.Podman([]string{"inspect", "--format='{{.State.StartedAt}}'", "test1"})
 		startTime.WaitWithDefaultTimeout()
 
@@ -72,8 +69,6 @@ var _ = Describe("Podman restart", func() {
 
 	It("podman container restart running container", func() {
 		_ = podmanTest.RunTopContainer("test1")
-		ok := WaitForContainer(podmanTest)
-		Expect(ok).To(BeTrue(), "test1 container is up")
 		startTime := podmanTest.Podman([]string{"container", "inspect", "--format='{{.State.StartedAt}}'", "test1"})
 		startTime.WaitWithDefaultTimeout()
 

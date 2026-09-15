@@ -6,32 +6,30 @@ import (
 	"os/exec"
 	"strings"
 
-	. "github.com/containers/podman/v5/test/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	. "go.podman.io/podman/v6/test/utils"
 )
 
 var _ = Describe("Podman run ns", func() {
-
 	It("podman run pidns test", func() {
-		SkipIfRootlessCgroupsV1("Not supported for rootless + CgroupsV1")
-		session := podmanTest.Podman([]string{"run", fedoraMinimal, "bash", "-c", "echo $$"})
+		session := podmanTest.Podman([]string{"run", FEDORA_MINIMAL, "bash", "-c", "echo $$"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 		Expect(session.OutputToString()).To(Equal("1"))
 
-		session = podmanTest.Podman([]string{"run", "--pid=host", fedoraMinimal, "bash", "-c", "echo $$"})
+		session = podmanTest.Podman([]string{"run", "--pid=host", FEDORA_MINIMAL, "bash", "-c", "echo $$"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 		Expect(session.OutputToString()).To(Not(Equal("1")))
 
-		session = podmanTest.Podman([]string{"run", "--pid=badpid", fedoraMinimal, "bash", "-c", "echo $$"})
+		session = podmanTest.Podman([]string{"run", "--pid=badpid", FEDORA_MINIMAL, "bash", "-c", "echo $$"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).To(ExitWithError(125, "unrecognized namespace mode badpid passed"))
 	})
 
 	It("podman run --cgroup private test", func() {
-		session := podmanTest.Podman([]string{"run", "--cgroupns=private", fedoraMinimal, "cat", "/proc/self/cgroup"})
+		session := podmanTest.Podman([]string{"run", "--cgroupns=private", FEDORA_MINIMAL, "cat", "/proc/self/cgroup"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 
@@ -44,7 +42,7 @@ var _ = Describe("Podman run ns", func() {
 		Expect(setup).Should(ExitCleanly())
 		hostShm := setup.OutputToString()
 
-		session := podmanTest.Podman([]string{"run", "--ipc=host", fedoraMinimal, "ls", "--inode", "-d", "/dev/shm"})
+		session := podmanTest.Podman([]string{"run", "--ipc=host", FEDORA_MINIMAL, "ls", "--inode", "-d", "/dev/shm"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 		Expect(session.OutputToString()).To(Equal(hostShm))
@@ -55,7 +53,7 @@ var _ = Describe("Podman run ns", func() {
 		Expect(setup).Should(ExitCleanly())
 		output := strings.Split(setup.OutputToString(), " ")
 		ipc := output[len(output)-1]
-		session := podmanTest.Podman([]string{"run", "--ipc=host", fedoraMinimal, "ipcs", "-m", "-i", ipc})
+		session := podmanTest.Podman([]string{"run", "--ipc=host", FEDORA_MINIMAL, "ipcs", "-m", "-i", ipc})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 
@@ -64,7 +62,7 @@ var _ = Describe("Podman run ns", func() {
 	})
 
 	It("podman run ipcns ipcmk container test", func() {
-		setup := podmanTest.Podman([]string{"run", "-d", "--name", "test1", fedoraMinimal, "sleep", "999"})
+		setup := podmanTest.Podman([]string{"run", "-d", "--name", "test1", FEDORA_MINIMAL, "sleep", "999"})
 		setup.WaitWithDefaultTimeout()
 		Expect(setup).Should(ExitCleanly())
 
@@ -73,19 +71,19 @@ var _ = Describe("Podman run ns", func() {
 		Expect(session).Should(ExitCleanly())
 		output := strings.Split(session.OutputToString(), " ")
 		ipc := output[len(output)-1]
-		session = podmanTest.Podman([]string{"run", "--ipc=container:test1", fedoraMinimal, "ipcs", "-m", "-i", ipc})
+		session = podmanTest.Podman([]string{"run", "--ipc=container:test1", FEDORA_MINIMAL, "ipcs", "-m", "-i", ipc})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 	})
 
 	It("podman run bad ipc pid test", func() {
-		session := podmanTest.Podman([]string{"run", "--ipc=badpid", fedoraMinimal, "bash", "-c", "echo $$"})
+		session := podmanTest.Podman([]string{"run", "--ipc=badpid", FEDORA_MINIMAL, "bash", "-c", "echo $$"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).To(ExitWithError(125, "unrecognized namespace mode badpid passed"))
 	})
 
 	It("podman run mounts fresh cgroup", func() {
-		session := podmanTest.Podman([]string{"run", fedoraMinimal, "grep", "cgroup", "/proc/self/mountinfo"})
+		session := podmanTest.Podman([]string{"run", FEDORA_MINIMAL, "grep", "cgroup", "/proc/self/mountinfo"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 		output := session.OutputToString()
@@ -93,7 +91,6 @@ var _ = Describe("Podman run ns", func() {
 	})
 
 	It("podman run --ipc=host --pid=host", func() {
-		SkipIfRootlessCgroupsV1("Not supported for rootless + CgroupsV1")
 		cmd := exec.Command("ls", "-l", "/proc/self/ns/pid")
 		res, err := cmd.Output()
 		Expect(err).ToNot(HaveOccurred())
@@ -121,5 +118,4 @@ var _ = Describe("Podman run ns", func() {
 		Expect(hostPidNS).To(Equal(ctrPidNS))
 		Expect(hostIpcNS).To(Equal(ctrIpcNS))
 	})
-
 })

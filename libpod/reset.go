@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package libpod
 
@@ -9,16 +9,14 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/containers/common/libimage"
-	"github.com/containers/common/libnetwork/types"
-	blobinfocache "github.com/containers/image/v5/pkg/blobinfocache"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/errorhandling"
-	"github.com/containers/podman/v5/pkg/util"
-	"github.com/containers/storage"
-	"github.com/containers/storage/pkg/lockfile"
-	stypes "github.com/containers/storage/types"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/libimage"
+	"go.podman.io/common/libnetwork/types"
+	blobinfocache "go.podman.io/image/v5/pkg/blobinfocache"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/errorhandling"
+	"go.podman.io/podman/v6/pkg/util"
+	"go.podman.io/storage/pkg/lockfile"
 )
 
 // removeAllDirs removes all Podman storage directories. It is intended to be
@@ -178,7 +176,7 @@ func (r *Runtime) Reset(ctx context.Context) error {
 	rmiOptions := &libimage.RemoveImagesOptions{
 		Force:               true,
 		Ignore:              true,
-		RemoveContainerFunc: r.RemoveContainersForImageCallback(ctx),
+		RemoveContainerFunc: r.RemoveContainersForImageCallback(ctx, true),
 		Filters:             []string{"readonly=false"},
 	}
 	if _, rmiErrors := r.LibimageRuntime().RemoveImages(ctx, nil, rmiOptions); rmiErrors != nil {
@@ -260,23 +258,6 @@ func (r *Runtime) Reset(ctx context.Context) error {
 	}
 
 	if err := blobinfocache.CleanupDefaultCache(nil); err != nil {
-		if prevError != nil {
-			logrus.Error(prevError)
-		}
-		prevError = err
-	}
-
-	if storageConfPath, err := storage.DefaultConfigFile(); err == nil {
-		switch storageConfPath {
-		case stypes.SystemConfigFile:
-			break
-		default:
-			if _, err = os.Stat(storageConfPath); err == nil {
-				fmt.Printf(" A %q config file exists.\n", storageConfPath)
-				fmt.Println("Remove this file if you did not modify the configuration.")
-			}
-		}
-	} else {
 		if prevError != nil {
 			logrus.Error(prevError)
 		}

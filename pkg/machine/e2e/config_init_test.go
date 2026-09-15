@@ -1,6 +1,7 @@
 package e2e_test
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -10,22 +11,11 @@ import (
 )
 
 type initMachine struct {
-	/*
-	      --cpus uint              Number of CPUs (default 1)
-	      --disk-size uint         Disk size in GiB (default 100)
-	      --ignition-path string   Path to ignition file
-	      --username string        Username of the remote user (default "core" for FCOS, "user" for Fedora)
-	      --image-path string      Path to bootable image (default "testing")
-	  -m, --memory uint            Memory in MiB (default 2048)
-	      --now                    Start machine now
-	      --rootful                Whether this machine should prefer rootful container execution
-	      --timezone string        Set timezone (default "local")
-	  -v, --volume stringArray     Volumes to mount, source:target
-	      --volume-driver string   Optional volume driver
-
-	*/
+	playbook           string
+	provider           string
 	cpus               *uint
 	diskSize           *uint
+	swap               *uint
 	ignitionPath       string
 	username           string
 	image              string
@@ -34,7 +24,10 @@ type initMachine struct {
 	timezone           string
 	rootful            bool
 	volumes            []string
+	updateConnection   *bool
 	userModeNetworking bool
+	tlsVerify          *bool
+	importNativeCA     bool
 
 	cmd []string
 }
@@ -73,9 +66,28 @@ func (i *initMachine) buildCmd(m *machineTestBuilder) []string {
 	if i.rootful {
 		cmd = append(cmd, "--rootful")
 	}
+	if l := len(i.playbook); l > 0 {
+		cmd = append(cmd, "--playbook", i.playbook)
+	}
+	if l := len(i.provider); l > 0 {
+		cmd = append(cmd, "--provider", i.provider)
+	}
 	if i.userModeNetworking {
 		cmd = append(cmd, "--user-mode-networking")
 	}
+	if i.swap != nil {
+		cmd = append(cmd, "--swap", strconv.Itoa(int(*i.swap)))
+	}
+	if i.tlsVerify != nil {
+		cmd = append(cmd, "--tls-verify="+strconv.FormatBool(*i.tlsVerify))
+	}
+	if i.updateConnection != nil {
+		cmd = append(cmd, fmt.Sprintf("--update-connection=%s", strconv.FormatBool(*i.updateConnection)))
+	}
+	if i.importNativeCA {
+		cmd = append(cmd, "--import-native-ca")
+	}
+
 	name := m.name
 	cmd = append(cmd, name)
 
@@ -90,6 +102,11 @@ func (i *initMachine) buildCmd(m *machineTestBuilder) []string {
 			if strings.Contains(session.errorToString(), "VM does not exist") {
 				return
 			}
+
+			// FIXME:#24344 work-around for custom ignition removal
+			if strings.Contains(session.errorToString(), "failed to remove machines files: unable to find connection named") {
+				return
+			}
 		}
 		Expect(session).To(Exit(0))
 	})
@@ -102,12 +119,18 @@ func (i *initMachine) withCPUs(num uint) *initMachine {
 	i.cpus = &num
 	return i
 }
+
 func (i *initMachine) withDiskSize(size uint) *initMachine {
 	i.diskSize = &size
 	return i
 }
 
-func (i *initMachine) withIgnitionPath(path string) *initMachine { //nolint:unused
+func (i *initMachine) withSwap(size uint) *initMachine {
+	i.swap = &size
+	return i
+}
+
+func (i *initMachine) withIgnitionPath(path string) *initMachine {
 	i.ignitionPath = path
 	return i
 }
@@ -147,7 +170,32 @@ func (i *initMachine) withRootful(r bool) *initMachine {
 	return i
 }
 
-func (i *initMachine) withUserModeNetworking(r bool) *initMachine { //nolint:unused
+func (i *initMachine) withRunPlaybook(p string) *initMachine {
+	i.playbook = p
+	return i
+}
+
+func (i *initMachine) withProvider(p string) *initMachine {
+	i.provider = p
+	return i
+}
+
+func (i *initMachine) withTlsVerify(tlsVerify *bool) *initMachine {
+	i.tlsVerify = tlsVerify
+	return i
+}
+
+func (i *initMachine) withUpdateConnection(value *bool) *initMachine {
+	i.updateConnection = value
+	return i
+}
+
+func (i *initMachine) withUserModeNetworking(r bool) *initMachine { //nolint:unused,nolintlint
 	i.userModeNetworking = r
+	return i
+}
+
+func (i *initMachine) withImportNativeCA(r bool) *initMachine {
+	i.importNativeCA = r
 	return i
 }

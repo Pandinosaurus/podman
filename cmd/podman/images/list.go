@@ -10,14 +10,14 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/common/pkg/report"
-	"github.com/containers/image/v5/docker/reference"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/docker/go-units"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/report"
+	"go.podman.io/image/v5/docker/reference"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/validate"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 type listFlagType struct {
@@ -41,8 +41,8 @@ var (
 		RunE:              images,
 		ValidArgsFunction: common.AutocompleteImages,
 		Example: `podman image list --format json
-  podman image list --sort repository --format "table {{.ID}} {{.Repository}} {{.Tag}}"
-  podman image list --filter dangling=true`,
+podman image list --sort repository --format "table {{.ID}} {{.Repository}} {{.Tag}}"
+podman image list --filter dangling=true`,
 	}
 
 	imagesCmd = &cobra.Command{
@@ -53,8 +53,8 @@ var (
 		RunE:              imageListCmd.RunE,
 		ValidArgsFunction: imageListCmd.ValidArgsFunction,
 		Example: `podman images --format json
-  podman images --sort repository --format "table {{.ID}} {{.Repository}} {{.Tag}}"
-  podman images --filter dangling=true`,
+podman images --sort repository --format "table {{.ID}} {{.Repository}} {{.Tag}}"
+podman images --filter dangling=true`,
 	}
 
 	// Options to pull data
@@ -62,13 +62,6 @@ var (
 
 	// Options for presenting data
 	listFlag = listFlagType{}
-
-	sortFields = entities.NewStringSet(
-		"created",
-		"id",
-		"repository",
-		"size",
-		"tag")
 )
 
 func init() {
@@ -102,9 +95,18 @@ func imageListFlagSet(cmd *cobra.Command) {
 	flags.BoolVar(&listFlag.noTrunc, "no-trunc", false, "Do not truncate output")
 	flags.BoolVarP(&listFlag.quiet, "quiet", "q", false, "Display only image IDs")
 
+	// set default sort value
+	listFlag.sort = "created"
+	sort := validate.Value(&listFlag.sort,
+		"created",
+		"id",
+		"repository",
+		"size",
+		"tag",
+	)
 	sortFlagName := "sort"
-	flags.StringVar(&listFlag.sort, sortFlagName, "created", "Sort by "+sortFields.String())
-	_ = cmd.RegisterFlagCompletionFunc(sortFlagName, completion.AutocompleteNone)
+	flags.Var(sort, sortFlagName, "Sort by "+sort.Choices())
+	_ = cmd.RegisterFlagCompletionFunc(sortFlagName, common.AutocompleteImageSort)
 
 	flags.BoolVarP(&listFlag.history, "history", "", false, "Display the image name history")
 }
@@ -118,12 +120,7 @@ func images(cmd *cobra.Command, args []string) error {
 		listOptions.Filter = append(listOptions.Filter, "reference="+args[0])
 	}
 
-	if cmd.Flags().Changed("sort") && !sortFields.Contains(listFlag.sort) {
-		return fmt.Errorf("\"%s\" is not a valid field for sorting. Choose from: %s",
-			listFlag.sort, sortFields.String())
-	}
-
-	summaries, err := registry.ImageEngine().List(registry.GetContext(), listOptions)
+	summaries, err := registry.ImageEngine().List(registry.Context(), listOptions)
 	if err != nil {
 		return err
 	}
@@ -164,8 +161,11 @@ func writeID(imgs []imageReporter) error {
 func writeJSON(images []imageReporter) error {
 	type image struct {
 		entities.ImageSummary
-		Created   int64
-		CreatedAt string
+		Created    int64
+		CreatedAt  string
+		Repository string   `json:"Repository,omitempty"`
+		Tag        string   `json:"Tag,omitempty"`
+		RepoTags   []string `json:",omitempty"`
 	}
 
 	imgs := make([]image, 0, len(images))
@@ -174,6 +174,10 @@ func writeJSON(images []imageReporter) error {
 		h.ImageSummary = e.ImageSummary
 		h.Created = e.ImageSummary.Created
 		h.CreatedAt = e.created().Format(time.RFC3339Nano)
+		h.Repository = e.Repository
+		h.Tag = e.Tag
+		// This field is redundant with Repository and Tag
+		// but embedded from entities.ImageSummary
 		h.RepoTags = nil
 
 		imgs = append(imgs, h)

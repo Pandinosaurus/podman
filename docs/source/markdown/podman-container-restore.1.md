@@ -148,7 +148,17 @@ The default is **false**.
 Replaces the ports that the *container* publishes, as configured during the
 initial *container* start, with a new set of port forwarding rules.
 
-For more details, see **[podman run --publish](podman-run.1.md#--publish)**.
+For more details, see **[podman run --publish](podman-run.1.md#--publish)**.\
+*IMPORTANT: This OPTION is only available for a checkpoint image or in combination
+with __--import, -i__.*
+
+#### **--tcp-close**
+
+Restore a *container* and close all TCP connections. This option is useful
+when TCP connections are not needed after restore or when connections
+will be reestablished by the application. If the checkpoint image was created with
+**--tcp-close**, this option should be used during restore.\
+The default is **false**.
 
 #### **--tcp-established**
 
@@ -159,7 +169,7 @@ option is ignored. Defaults to not restoring *containers* with established TCP
 connections.\
 The default is **false**.
 
-## EXAMPLE
+## EXAMPLES
 Restore the container "mywebserver".
 ```
 # podman container restore mywebserver

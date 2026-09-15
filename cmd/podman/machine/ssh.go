@@ -3,36 +3,31 @@
 package machine
 
 import (
+	"errors"
 	"fmt"
-	"net/url"
 
-	"github.com/containers/podman/v5/pkg/machine/define"
-	"github.com/containers/podman/v5/pkg/machine/env"
-
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/utils"
-	"github.com/containers/podman/v5/pkg/machine"
-	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/utils"
+	"go.podman.io/podman/v6/pkg/machine"
+	"go.podman.io/podman/v6/pkg/machine/define"
+	"go.podman.io/podman/v6/pkg/machine/shim"
+	"go.podman.io/podman/v6/pkg/machine/vmconfigs"
 )
 
-var (
-	sshCmd = &cobra.Command{
-		Use:               "ssh [options] [NAME] [COMMAND [ARG ...]]",
-		Short:             "SSH into an existing machine",
-		Long:              "SSH into a managed virtual machine ",
-		PersistentPreRunE: machinePreRunE,
-		RunE:              ssh,
-		Example: `podman machine ssh podman-machine-default
-  podman machine ssh myvm echo hello`,
-		ValidArgsFunction: autocompleteMachineSSH,
-	}
-)
+var sshCmd = &cobra.Command{
+	Use:               "ssh [options] [NAME] [COMMAND [ARG ...]]",
+	Short:             "SSH into an existing machine",
+	Long:              "SSH into a managed virtual machine ",
+	PersistentPreRunE: machinePreRunE,
+	RunE:              ssh,
+	Example: `podman machine ssh podman-machine-default
+podman machine ssh myvm echo hello`,
+	ValidArgsFunction: autocompleteMachineSSH,
+}
 
-var (
-	sshOpts machine.SSHOptions
-)
+var sshOpts machine.SSHOptions
 
 func init() {
 	sshCmd.Flags().SetInterspersed(false)
@@ -46,19 +41,13 @@ func init() {
 	_ = sshCmd.RegisterFlagCompletionFunc(usernameFlagName, completion.AutocompleteNone)
 }
 
-// TODO Remember that this changed upstream and needs to updated as such!
-
-func ssh(cmd *cobra.Command, args []string) error {
+func ssh(_ *cobra.Command, args []string) error {
 	var (
-		err     error
-		mc      *vmconfigs.MachineConfig
-		validVM bool
+		err        error
+		exists     bool
+		mc         *vmconfigs.MachineConfig
+		vmProvider vmconfigs.VMProvider
 	)
-
-	dirs, err := env.GetMachineDirs(provider.VMType())
-	if err != nil {
-		return err
-	}
 
 	// Set the VM to default
 	vmName := defaultMachineName
@@ -69,23 +58,22 @@ func ssh(cmd *cobra.Command, args []string) error {
 		// note: previous incantations of this up by a specific name
 		// and errors were ignored.  this error is not ignored because
 		// it implies podman cannot read its machine files, which is bad
-		machines, err := vmconfigs.LoadMachinesInDir(dirs)
+		mc, vmProvider, err = shim.VMExists(args[0])
 		if err != nil {
-			return err
-		}
-
-		mc, validVM = machines[args[0]]
-		if validVM {
-			vmName = args[0]
-		} else {
+			if _, ok := errors.AsType[*define.ErrVMDoesNotExist](err); !ok {
+				return err
+			}
 			sshOpts.Args = append(sshOpts.Args, args[0])
+		} else {
+			vmName = args[0]
+			exists = true
 		}
 	}
 
 	// If len is greater than 1, it means we might have been
 	// given a vmname and args or just args
 	if len(args) > 1 {
-		if validVM {
+		if exists {
 			sshOpts.Args = args[1:]
 		} else {
 			sshOpts.Args = args
@@ -94,20 +82,12 @@ func ssh(cmd *cobra.Command, args []string) error {
 
 	// If the machine config was not loaded earlier, we load it now
 	if mc == nil {
-		mc, err = vmconfigs.LoadMachineByName(vmName, dirs)
-		if err != nil {
-			return fmt.Errorf("vm %s not found: %w", vmName, err)
-		}
-	}
-
-	if !validVM && sshOpts.Username == "" {
-		sshOpts.Username, err = remoteConnectionUsername()
+		mc, vmProvider, err = shim.VMExists(vmName)
 		if err != nil {
 			return err
 		}
 	}
-
-	state, err := provider.State(mc, false)
+	state, err := vmProvider.State(mc, false)
 	if err != nil {
 		return err
 	}
@@ -115,25 +95,14 @@ func ssh(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("vm %q is not running", mc.Name)
 	}
 
-	username := sshOpts.Username
-	if username == "" {
-		username = mc.SSH.RemoteUsername
+	if sshOpts.Username == "" {
+		if mc.HostUser.Rootful {
+			sshOpts.Username = "root"
+		} else {
+			sshOpts.Username = mc.SSH.RemoteUsername
+		}
 	}
 
-	err = machine.CommonSSHShell(username, mc.SSH.IdentityPath, mc.Name, mc.SSH.Port, sshOpts.Args)
+	err = machine.LocalhostSSHShell(sshOpts.Username, mc.SSH.IdentityPath, mc.Name, mc.SSH.Port, sshOpts.Args)
 	return utils.HandleOSExecError(err)
-}
-
-func remoteConnectionUsername() (string, error) {
-	con, err := registry.PodmanConfig().ContainersConfDefaultsRO.GetConnection("", true)
-	if err != nil {
-		return "", err
-	}
-
-	uri, err := url.Parse(con.URI)
-	if err != nil {
-		return "", err
-	}
-	username := uri.User.String()
-	return username, nil
 }

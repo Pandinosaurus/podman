@@ -16,16 +16,15 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/containers/common/libimage/define"
-	"github.com/containers/image/v5/manifest"
-	imageTypes "github.com/containers/image/v5/types"
-	"github.com/containers/podman/v5/pkg/auth"
-	"github.com/containers/podman/v5/pkg/bindings"
-	"github.com/containers/podman/v5/pkg/bindings/images"
-	entitiesTypes "github.com/containers/podman/v5/pkg/domain/entities/types"
-	"github.com/containers/podman/v5/pkg/errorhandling"
-	dockerAPI "github.com/docker/docker/api/types"
 	jsoniter "github.com/json-iterator/go"
+	"go.podman.io/common/libimage/define"
+	"go.podman.io/image/v5/manifest"
+	imageTypes "go.podman.io/image/v5/types"
+	"go.podman.io/podman/v6/pkg/auth"
+	"go.podman.io/podman/v6/pkg/bindings"
+	"go.podman.io/podman/v6/pkg/bindings/images"
+	entitiesTypes "go.podman.io/podman/v6/pkg/domain/entities/types"
+	"go.podman.io/podman/v6/pkg/errorhandling"
 )
 
 // Create creates a manifest for the given name.  Optional images to be associated with
@@ -33,7 +32,7 @@ import (
 // of a list if the name provided is a manifest list.  The ID of the new manifest list
 // is returned as a string.
 func Create(ctx context.Context, name string, images []string, options *CreateOptions) (string, error) {
-	var idr dockerAPI.IDResponse
+	var idr entitiesTypes.IDResponse
 	if options == nil {
 		options = new(CreateOptions)
 	}
@@ -63,7 +62,7 @@ func Create(ctx context.Context, name string, images []string, options *CreateOp
 }
 
 // Exists returns true if a given manifest list exists
-func Exists(ctx context.Context, name string, options *ExistsOptions) (bool, error) {
+func Exists(ctx context.Context, name string, _ *ExistsOptions) (bool, error) {
 	conn, err := bindings.GetClient(ctx)
 	if err != nil {
 		return false, err
@@ -91,10 +90,9 @@ func Inspect(ctx context.Context, name string, options *InspectOptions) (*manife
 	if err != nil {
 		return nil, err
 	}
-	// SkipTLSVerify is special.  We need to delete the param added by
-	// ToParams() and change the key and flip the bool
+	// SkipTLSVerify is not serialized by ToParams(); the server expects
+	// tlsVerify with the opposite meaning.
 	if options.SkipTLSVerify != nil {
-		params.Del("SkipTLSVerify")
 		params.Set("tlsVerify", strconv.FormatBool(!options.GetSkipTLSVerify()))
 	}
 
@@ -129,10 +127,9 @@ func InspectListData(ctx context.Context, name string, options *InspectOptions) 
 	if err != nil {
 		return nil, err
 	}
-	// SkipTLSVerify is special.  We need to delete the param added by
-	// ToParams() and change the key and flip the bool
+	// SkipTLSVerify is not serialized by ToParams(); the server expects
+	// tlsVerify with the opposite meaning.
 	if options.SkipTLSVerify != nil {
-		params.Del("SkipTLSVerify")
 		params.Set("tlsVerify", strconv.FormatBool(!options.GetSkipTLSVerify()))
 	}
 
@@ -200,6 +197,8 @@ func AddArtifact(ctx context.Context, name string, options *AddArtifactOptions) 
 		ArtifactExcludeTitles: options.ExcludeTitles,
 		ArtifactSubject:       options.Subject,
 		ArtifactAnnotations:   options.Annotations,
+
+		IndexSubject: options.IndexSubject,
 	}
 	if len(options.Files) > 0 {
 		optionsv4.WithArtifactFiles(options.Files)
@@ -354,8 +353,7 @@ func Modify(ctx context.Context, name string, images []string, options *ModifyOp
 		// upload the files in another goroutine
 		writer := multipart.NewWriter(bodyWriter)
 		artifactContentType = writer.FormDataContentType()
-		artifactWriterGroup.Add(1)
-		go func() {
+		artifactWriterGroup.Go(func() {
 			defer bodyWriter.Close()
 			defer writer.Close()
 			// start with the body we would have uploaded if we weren't
@@ -365,11 +363,11 @@ func Modify(ctx context.Context, name string, images []string, options *ModifyOp
 			}
 			requestPartWriter, err := writer.CreatePart(headers)
 			if err != nil {
-				artifactWriterError = fmt.Errorf("creating form part for request: %v", err)
+				artifactWriterError = fmt.Errorf("creating form part for request: %w", err)
 				return
 			}
 			if _, err := io.Copy(requestPartWriter, requestBodyReader); err != nil {
-				artifactWriterError = fmt.Errorf("uploading request as form part: %v", err)
+				artifactWriterError = fmt.Errorf("uploading request as form part: %w", err)
 				return
 			}
 			// now walk the list of files we're attaching
@@ -403,7 +401,7 @@ func Modify(ctx context.Context, name string, images []string, options *ModifyOp
 					break
 				}
 			}
-		}()
+		})
 	}
 
 	header, err := auth.MakeXRegistryAuthHeader(&imageTypes.SystemContext{AuthFilePath: options.GetAuthfile()}, options.GetUsername(), options.GetPassword())
@@ -432,7 +430,7 @@ func Modify(ctx context.Context, name string, images []string, options *ModifyOp
 
 	artifactWriterGroup.Wait()
 	if artifactWriterError != nil {
-		return "", fmt.Errorf("uploading artifacts: %w", err)
+		return "", fmt.Errorf("uploading artifacts: %w", artifactWriterError)
 	}
 
 	data, err := io.ReadAll(response.Body)

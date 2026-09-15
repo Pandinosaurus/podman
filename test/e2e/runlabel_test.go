@@ -5,9 +5,9 @@ package integration
 import (
 	"fmt"
 
-	. "github.com/containers/podman/v5/test/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	. "go.podman.io/podman/v6/test/utils"
 )
 
 var PodmanDockerfile = fmt.Sprintf(`
@@ -23,7 +23,6 @@ FROM  %s
 LABEL RUN podman run --name NAME IMAGE`, ALPINE)
 
 var _ = Describe("podman container runlabel", func() {
-
 	BeforeEach(func() {
 		SkipIfRemote("runlabel is not supported for remote connections")
 	})

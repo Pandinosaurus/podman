@@ -3,11 +3,11 @@ package bindings_test
 import (
 	"time"
 
-	"github.com/containers/podman/v5/pkg/api/handlers"
-	"github.com/containers/podman/v5/pkg/bindings/containers"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/gexec"
+	"go.podman.io/podman/v6/pkg/api/handlers"
+	"go.podman.io/podman/v6/pkg/bindings/containers"
 )
 
 var _ = Describe("Podman containers exec", func() {
@@ -52,10 +52,15 @@ var _ = Describe("Podman containers exec", func() {
 		err = containers.ExecStart(bt.conn, sessionID, nil)
 		Expect(err).ToNot(HaveOccurred())
 
-		inspectOut, err = containers.ExecInspect(bt.conn, sessionID, nil)
-		Expect(err).ToNot(HaveOccurred())
+		// ExecStart returning only means the session was started, the process
+		// can still be running when we inspect it.
+		Eventually(func() bool {
+			inspectOut, err = containers.ExecInspect(bt.conn, sessionID, nil)
+			Expect(err).ToNot(HaveOccurred())
+			return inspectOut.Running
+		}, "20s", "250ms").Should(BeFalse(), "session should not be running")
+
 		Expect(inspectOut.ContainerID).To(Equal(cid))
-		Expect(inspectOut.Running).To(BeFalse(), "session should not be running")
 		Expect(inspectOut.ExitCode).To(Equal(0), "exit code from echo")
 	})
 

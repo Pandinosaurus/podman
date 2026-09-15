@@ -1,12 +1,12 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package server
 
 import (
 	"net/http"
 
-	"github.com/containers/podman/v5/pkg/api/handlers/libpod"
 	"github.com/gorilla/mux"
+	"go.podman.io/podman/v6/pkg/api/handlers/libpod"
 )
 
 func (s *APIServer) registerManifestHandlers(r *mux.Router) error {
@@ -70,6 +70,14 @@ func (s *APIServer) registerManifestHandlers(r *mux.Router) error {
 	//    items:
 	//      type: string
 	//  - in: query
+	//    name: compressionFormat
+	//    type: string
+	//    description: Compression format used to compress image layers.
+	//  - in: query
+	//    name: compressionLevel
+	//    type: integer
+	//    description: Compression level used to compress image layers.
+	//  - in: query
 	//    name: forceCompressionFormat
 	//    description: Enforce compressing the layers with the specified --compression and do not reuse differently compressed blobs on the registry.
 	//    type: boolean
@@ -85,6 +93,14 @@ func (s *APIServer) registerManifestHandlers(r *mux.Router) error {
 	//    type: boolean
 	//    default: true
 	//  - in: query
+	//    name: format
+	//    type: string
+	//    description: Manifest type (oci, v2s1, or v2s2) to use when pushing an image. Default is manifest type of source, with fallbacks.
+	//  - in: query
+	//    name: removeSignatures
+	//    type: boolean
+	//    description: Discard any pre-existing signatures in the image.
+	//  - in: query
 	//    name: tlsVerify
 	//    type: boolean
 	//    default: true
@@ -94,6 +110,14 @@ func (s *APIServer) registerManifestHandlers(r *mux.Router) error {
 	//    description: "silences extra stream data on push"
 	//    type: boolean
 	//    default: true
+	//  - in: query
+	//    name: retry
+	//    description: Number of times to retry push in case of failure.
+	//    type: integer
+	//  - in: query
+	//    name: retryDelay
+	//    description: Delay between retries in case of push failures.
+	//    type: string
 	// responses:
 	//   200:
 	//     schema:
@@ -120,7 +144,6 @@ func (s *APIServer) registerManifestHandlers(r *mux.Router) error {
 	// - in: query
 	//   name: images
 	//   type: string
-	//   required: true
 	//   description: |
 	//     One or more names of an image or a manifest list. Repeat parameter as needed.
 	//
@@ -135,6 +158,17 @@ func (s *APIServer) registerManifestHandlers(r *mux.Router) error {
 	//   name: amend
 	//   type: boolean
 	//   description: modify an existing list if one with the desired name already exists
+	// - in: query
+	//   name: annotation
+	//   type: array
+	//   items:
+	//     type: string
+	//   description: |
+	//     Annotation to set on the manifest list, in key=value format. Repeat parameter as needed.
+	// - in: query
+	//   name: annotations
+	//   type: string
+	//   description: JSON encoded map[string]string of annotations to set on the manifest list
 	// - in: body
 	//   name: options
 	//   description: options for new manifest
@@ -322,6 +356,10 @@ func (s *APIServer) registerManifestHandlers(r *mux.Router) error {
 	//    type: string
 	//    required: true
 	//    description: The name or ID of the  list to be deleted
+	//  - in: query
+	//    name: ignore
+	//    description: Ignore if a specified manifest does not exist and do not throw an error.
+	//    type: boolean
 	// responses:
 	//   200:
 	//     $ref: "#/responses/imagesRemoveResponseLibpod"

@@ -2,14 +2,15 @@ package registry
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/domain/infra"
-	"github.com/containers/podman/v5/pkg/rootless"
-	"github.com/containers/podman/v5/pkg/util"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/domain/infra"
+	"go.podman.io/podman/v6/pkg/rootless"
+	"go.podman.io/podman/v6/pkg/util"
 )
 
 // DefaultRootAPIAddress is the default path of the REST socket with unix:// prefix
@@ -21,7 +22,7 @@ type CliCommand struct {
 }
 
 var (
-	cliCtx          context.Context
+	cliCtx          = context.Background()
 	containerEngine entities.ContainerEngine
 	exitCode        = 0
 	imageEngine     entities.ImageEngine
@@ -44,7 +45,7 @@ func ImageEngine() entities.ImageEngine {
 }
 
 // NewImageEngine is a wrapper for building an ImageEngine to be used for PreRunE functions
-func NewImageEngine(cmd *cobra.Command, args []string) (entities.ImageEngine, error) {
+func NewImageEngine(cmd *cobra.Command, _ []string) (entities.ImageEngine, error) {
 	if imageEngine == nil {
 		podmanOptions.FlagSet = cmd.Flags()
 		engine, err := infra.NewImageEngine(&podmanOptions)
@@ -61,7 +62,7 @@ func ContainerEngine() entities.ContainerEngine {
 }
 
 // NewContainerEngine is a wrapper for building a ContainerEngine to be used for PreRunE functions
-func NewContainerEngine(cmd *cobra.Command, args []string) (entities.ContainerEngine, error) {
+func NewContainerEngine(cmd *cobra.Command, _ []string) (entities.ContainerEngine, error) {
 	if containerEngine == nil {
 		podmanOptions.FlagSet = cmd.Flags()
 		if cmd.Name() == "reset" && cmd.Parent().Name() == "system" {
@@ -72,6 +73,16 @@ func NewContainerEngine(cmd *cobra.Command, args []string) (entities.ContainerEn
 			logrus.Debugf("Performing system renumber, runtime validation checks will be relaxed")
 			podmanOptions.IsRenumber = true
 		}
+		if cmd.Name() == "migrate" && cmd.Parent().Name() == "system" {
+			isMigrateDB, err := cmd.Flags().GetBool("migrate-db")
+			if err != nil {
+				return nil, errors.New("system migrate command missing flag migrate-db")
+			}
+			if isMigrateDB {
+				podmanOptions.IsMigrateDB = true
+				logrus.Debugf("Performing database migration, BoltDB checks will be relaxed")
+			}
+		}
 		engine, err := infra.NewContainerEngine(&podmanOptions)
 		if err != nil {
 			return nil, err
@@ -81,28 +92,8 @@ func NewContainerEngine(cmd *cobra.Command, args []string) (entities.ContainerEn
 	return containerEngine, nil
 }
 
-type PodmanOptionsKey struct{}
-
 func Context() context.Context {
-	if cliCtx == nil {
-		cliCtx = ContextWithOptions(context.Background())
-	}
 	return cliCtx
-}
-
-func ContextWithOptions(ctx context.Context) context.Context {
-	cliCtx = context.WithValue(ctx, PodmanOptionsKey{}, podmanOptions)
-	return cliCtx
-}
-
-// GetContextWithOptions deprecated, use  NewContextWithOptions()
-func GetContextWithOptions() context.Context {
-	return ContextWithOptions(context.Background())
-}
-
-// GetContext deprecated, use  Context()
-func GetContext() context.Context {
-	return Context()
 }
 
 func DefaultAPIAddress() string {

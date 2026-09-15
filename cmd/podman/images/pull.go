@@ -6,16 +6,17 @@ import (
 	"os"
 	"strings"
 
-	"github.com/containers/buildah/pkg/cli"
-	"github.com/containers/common/pkg/auth"
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/image/v5/types"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/utils"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/util"
 	"github.com/spf13/cobra"
+	"go.podman.io/buildah/pkg/cli"
+	"go.podman.io/common/pkg/auth"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/utils"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/util"
 )
 
 // pullOptionsWrapper wraps entities.ImagePullOptions and prevents leaking
@@ -25,6 +26,7 @@ type pullOptionsWrapper struct {
 	TLSVerifyCLI   bool // CLI only
 	CredentialsCLI string
 	DecryptionKeys []string
+	PolicyCLI      string
 }
 
 var (
@@ -42,7 +44,7 @@ var (
 		RunE:              imagePull,
 		ValidArgsFunction: common.AutocompleteImages,
 		Example: `podman pull imageName
-  podman pull fedora:latest`,
+podman pull fedora:latest`,
 	}
 
 	// Command: podman image pull
@@ -56,7 +58,7 @@ var (
 		RunE:              pullCmd.RunE,
 		ValidArgsFunction: pullCmd.ValidArgsFunction,
 		Example: `podman image pull imageName
-  podman image pull fedora:latest`,
+podman image pull fedora:latest`,
 	}
 )
 
@@ -101,6 +103,11 @@ func pullFlags(cmd *cobra.Command) {
 	flags.String(platformFlagName, "", "Specify the platform for selecting the image.  (Conflicts with arch and os)")
 	_ = cmd.RegisterFlagCompletionFunc(platformFlagName, completion.AutocompleteNone)
 
+	policyFlagName := "policy"
+	// Explicitly set the default to "always" to avoid the default being "missing"
+	flags.StringVar(&pullOptions.PolicyCLI, policyFlagName, "always", `Pull image policy ("always"|"missing"|"never"|"newer")`)
+	_ = cmd.RegisterFlagCompletionFunc(policyFlagName, common.AutocompletePullOption)
+
 	flags.Bool("disable-content-trust", false, "This is a Docker specific option and is a NOOP")
 	flags.BoolVarP(&pullOptions.Quiet, "quiet", "q", false, "Suppress output information when pulling images")
 	flags.BoolVar(&pullOptions.TLSVerifyCLI, "tls-verify", true, "Require HTTPS and verify certificates when contacting registries")
@@ -143,6 +150,12 @@ func imagePull(cmd *cobra.Command, args []string) error {
 		pullOptions.SkipTLSVerify = types.NewOptionalBool(!pullOptions.TLSVerifyCLI)
 	}
 
+	pullPolicy, err := config.ParsePullPolicy(pullOptions.PolicyCLI)
+	if err != nil {
+		return err
+	}
+	pullOptions.PullPolicy = pullPolicy
+
 	if cmd.Flags().Changed("retry") {
 		retry, err := cmd.Flags().GetUint("retry")
 		if err != nil {
@@ -175,14 +188,7 @@ func imagePull(cmd *cobra.Command, args []string) error {
 			return errors.New("--platform option can not be specified with --arch or --os")
 		}
 
-		specs := strings.Split(platform, "/")
-		pullOptions.OS = specs[0] // may be empty
-		if len(specs) > 1 {
-			pullOptions.Arch = specs[1]
-			if len(specs) > 2 {
-				pullOptions.Variant = specs[2]
-			}
-		}
+		pullOptions.OS, pullOptions.Arch, pullOptions.Variant = parsePlatform(platform)
 	}
 
 	if pullOptions.CredentialsCLI != "" {
@@ -208,7 +214,7 @@ func imagePull(cmd *cobra.Command, args []string) error {
 	// scattering logic across (too) many parts of the code.
 	var errs utils.OutputErrors
 	for _, arg := range args {
-		pullReport, err := registry.ImageEngine().Pull(registry.GetContext(), arg, pullOptions.ImagePullOptions)
+		pullReport, err := registry.ImageEngine().Pull(registry.Context(), arg, pullOptions.ImagePullOptions)
 		if err != nil {
 			errs = append(errs, err)
 			continue
@@ -218,4 +224,18 @@ func imagePull(cmd *cobra.Command, args []string) error {
 		}
 	}
 	return errs.PrintErrors()
+}
+
+func parsePlatform(platform string) (string, string, string) {
+	specs := strings.Split(platform, "/")
+	os := specs[0] // may be empty
+	var arch string
+	var variant string
+	if len(specs) > 1 {
+		arch = specs[1]
+		if len(specs) > 2 {
+			variant = specs[2]
+		}
+	}
+	return os, arch, variant
 }

@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package libpod
 
@@ -10,20 +10,20 @@ import (
 	"strings"
 	"time"
 
-	"github.com/containers/podman/v5/libpod"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/api/handlers"
-	"github.com/containers/podman/v5/pkg/api/handlers/utils"
-	api "github.com/containers/podman/v5/pkg/api/types"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/domain/infra/abi"
-	"github.com/containers/podman/v5/pkg/specgen"
-	"github.com/containers/podman/v5/pkg/specgen/generate"
-	"github.com/containers/podman/v5/pkg/specgenutil"
-	"github.com/containers/podman/v5/pkg/util"
 	"github.com/gorilla/schema"
 	"github.com/hashicorp/go-multierror"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/api/handlers"
+	"go.podman.io/podman/v6/pkg/api/handlers/utils"
+	api "go.podman.io/podman/v6/pkg/api/types"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/domain/infra/abi"
+	"go.podman.io/podman/v6/pkg/specgen"
+	"go.podman.io/podman/v6/pkg/specgen/generate"
+	"go.podman.io/podman/v6/pkg/specgenutil"
+	"go.podman.io/podman/v6/pkg/util"
 )
 
 func PodCreate(w http.ResponseWriter, r *http.Request) {
@@ -35,14 +35,11 @@ func PodCreate(w http.ResponseWriter, r *http.Request) {
 		err     error
 	)
 	psg := specgen.PodSpecGenerator{InfraContainerSpec: &specgen.SpecGenerator{}}
-	if err := json.NewDecoder(r.Body).Decode(&psg); err != nil {
-		utils.Error(w, http.StatusInternalServerError, fmt.Errorf("%v: %w", failedToDecodeSpecgen, err))
+	if err := utils.ReadJSONFromBody(r, &psg); err != nil {
+		utils.Error(w, http.StatusBadRequest, err)
 		return
 	}
-	if err != nil {
-		utils.Error(w, http.StatusInternalServerError, fmt.Errorf("%v: %w", failedToDecodeSpecgen, err))
-		return
-	}
+
 	if !psg.NoInfra {
 		infraOptions := entities.NewInfraContainerCreateOptions() // options for pulling the image and FillOutSpec
 		infraOptions.Net = &entities.NetOptions{}
@@ -73,7 +70,6 @@ func PodCreate(w http.ResponseWriter, r *http.Request) {
 		// a few extra that do not have the same json tags
 		psg.InfraContainerSpec.Name = psg.InfraName
 		psg.InfraContainerSpec.ConmonPidFile = psg.InfraConmonPidFile
-		psg.InfraContainerSpec.ContainerCreateCommand = psg.InfraCommand
 		psg.InfraContainerSpec.Image = psg.InfraImage
 		psg.InfraContainerSpec.RawImageName = psg.InfraImage
 	}
@@ -171,7 +167,7 @@ func PodStop(w http.ResponseWriter, r *http.Request) {
 		responses, stopError = pod.Stop(r.Context(), false)
 	}
 	if stopError != nil && !errors.Is(stopError, define.ErrPodPartialFail) {
-		utils.Error(w, http.StatusInternalServerError, err)
+		utils.Error(w, http.StatusInternalServerError, stopError)
 		return
 	}
 	// Try to clean up the pod - but only warn on failure, it's nonfatal.

@@ -49,9 +49,9 @@ setup() {
     # the default c/storage behavior is to make the mount propagation private.
     export _PODMAN_TEST_OPTS="--storage-opt=skip_mount_home=true --cgroup-manager=cgroupfs --root=$PODMAN_UPGRADE_WORKDIR/root --runroot=$PODMAN_UPGRADE_WORKDIR/runroot --tmpdir=$PODMAN_UPGRADE_WORKDIR/tmp"
 
-    # Old netavark used iptables but newer versions might uses nftables.
-    # Networking can only work correctly if both use the same firewall driver so force iptables.
-    printf "[network]\nfirewall_driver=\"iptables\"\n" > $PODMAN_UPGRADE_WORKDIR/containers.conf
+
+    # Starting with v6.0.0 we only test upgrade from versions that support nftables.
+    printf "[network]\nfirewall_driver=\"nftables\"\n" > $PODMAN_UPGRADE_WORKDIR/containers.conf
     export CONTAINERS_CONF_OVERRIDE=$PODMAN_UPGRADE_WORKDIR/containers.conf
 }
 
@@ -63,21 +63,6 @@ setup() {
 
     OLD_PODMAN=quay.io/podman/stable:$PODMAN_UPGRADE_FROM
     $PODMAN pull $OLD_PODMAN
-
-    # Can't mix-and-match iptables.
-    # This can only fail when we bring in new CI VMs. If/when it does fail,
-    # we'll need to figure out how to solve it. Until then, punt.
-    iptables_old_version=$($PODMAN run --rm $OLD_PODMAN iptables -V)
-    run -0 expr "$iptables_old_version" : ".*(\(.*\))"
-    iptables_old_which="$output"
-
-    iptables_new_version=$(iptables -V)
-    run -0 expr "$iptables_new_version" : ".*(\(.*\))"
-    iptables_new_which="$output"
-
-    if [[ "$iptables_new_which" != "$iptables_old_which" ]]; then
-        die "Cannot mix iptables; $PODMAN_UPGRADE_FROM container uses $iptables_old_which, host uses $iptables_new_which"
-    fi
 
     # Shortcut name, because we're referencing it a lot
     pmroot=$PODMAN_UPGRADE_WORKDIR
@@ -161,13 +146,6 @@ EOF
     # Not entirely a NOP! This is just so we get the /run/... mount points created on a CI VM
     $PODMAN run --rm $OLD_PODMAN true
 
-    # Containers-common around release 1-55 no-longer supplies this file
-    sconf=/etc/containers/storage.conf
-    v_sconf=
-    if [[ -e "$sconf" ]]; then
-        v_sconf="-v $sconf:$sconf"
-    fi
-
     #
     # Use new-podman to run the above script under old-podman.
     #
@@ -176,7 +154,6 @@ EOF
     # pollute it for use by old-podman. We must keep that pristine
     # so old-podman is the first to write to it.
     #
-    # mount /etc/containers/storage.conf to use the same storage settings as on the host
     # mount /dev/shm because the container locks are stored there
     # mount /run/containers for the dnsname plugin
     #
@@ -212,23 +189,21 @@ EOF
 
 @test "info - network" {
     run_podman info --format '{{.Host.NetworkBackend}}'
-    assert "$output" = "netavark" "As of Feb 2024, CNI will never be default"
+    assert "$output" = "netavark" "Netavark is the only supported network backend"
 }
 
 # Whichever DB was picked by old_podman, make sure we honor it
 @test "info - database" {
     run_podman info --format '{{.Host.DatabaseBackend}}'
-    if version_is_older_than 4.8; then
-        assert "$output" = "boltdb" "DatabaseBackend for podman < 4.8"
-    else
-        assert "$output" = "sqlite" "DatabaseBackend for podman >= 4.8"
-    fi
+    assert "$output" = "sqlite" "DatabaseBackend for podman >= 4.8"
 }
 
 @test "images" {
     run_podman images -a --format '{{.Names}}'
-    assert "${lines[0]}" =~ "\[localhost/podman-pause:${PODMAN_UPGRADE_FROM##v}-.*\]" "podman images, line 0"
-    assert "${lines[1]}" = "[$IMAGE]" "podman images, line 1"
+    # Filter out the podman-pause image which isn't present for
+    # versions >= 5.5.0
+    run -0 grep -v "localhost/podman-pause" <<< "$output"
+    assert "${lines[0]}" = "[$IMAGE]" "podman images, line 0"
 }
 
 @test "ps : one container running" {
@@ -238,10 +213,10 @@ EOF
 
 @test "ps -a : shows all containers" {
     run_podman ps -a \
-               --format '{{.Names}}--{{.Status}}--{{.Ports}}--{{.Labels.mylabel}}' \
+               --format '{{.Names}}--{{.Status}}--{{.Ports}}--{{.Label "mylabel"}}' \
                --sort=created
     assert "${lines[0]}" == "mycreatedcontainer--Created----$LABEL_CREATED" "line 0, created"
-    assert "${lines[1]}" =~ "mydonecontainer--Exited \(0\).*----<no value>"   "line 1, done"
+    assert "${lines[1]}" =~ "mydonecontainer--Exited \(0\).*----"   "line 1, done"
     assert "${lines[2]}" =~ "myfailedcontainer--Exited \(17\) .*----$LABEL_FAILED" "line 2, fail"
 
     # Port order is not guaranteed
@@ -249,7 +224,7 @@ EOF
     assert "${lines[3]}" =~ ".*--.*0\.0\.0\.0:$HOST_PORT->80\/tcp.*--.*"  "line 3, first port forward"
     assert "${lines[3]}" =~ ".*--.*127\.0\.0\.1\:9090-9092->8080-8082\/tcp.*--.*" "line 3, second port forward"
 
-    assert "${lines[4]}" =~ ".*-infra--Created----<no value>" "line 4, infra container"
+    assert "${lines[4]}" =~ ".*-infra--Created----" "line 4, infra container"
 
     # For debugging: dump containers and IDs
     if [[ -n "$PODMAN_UPGRADE_TEST_DEBUG" ]]; then
@@ -272,6 +247,11 @@ failed    | exited     | 17
         run_podman inspect --format '{{.State.Status}}--{{.State.ExitCode}}' my${cname}container
         is "$output" "$state--$exitstatus" "status of my${cname}container"
     done < <(parse_table "$tests")
+}
+
+@test "inspect - HealthCheck Defaults" {
+    run_podman inspect --format '{{.Config.HealthMaxLogSize}}--{{.Config.HealthMaxLogCount}}--{{.Config.HealthLogDestination}}' myrunningcontainer
+    assert "$output" == "500--5--local" "HealthCheck Default values of Log size, count and destination"
 }
 
 @test "network - curl" {

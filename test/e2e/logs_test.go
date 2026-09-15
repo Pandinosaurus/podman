@@ -8,12 +8,12 @@ import (
 	"os/exec"
 	"time"
 
-	. "github.com/containers/podman/v5/test/utils"
-	"github.com/containers/storage/pkg/stringid"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/onsi/gomega/format"
 	. "github.com/onsi/gomega/gexec"
+	. "go.podman.io/podman/v6/test/utils"
+	"go.podman.io/storage/pkg/stringid"
 )
 
 func isEventBackendJournald(podmanTest *PodmanTestIntegration) bool {
@@ -27,7 +27,6 @@ func isEventBackendJournald(podmanTest *PodmanTestIntegration) bool {
 }
 
 var _ = Describe("Podman logs", func() {
-
 	It("podman logs on not existent container", func() {
 		results := podmanTest.Podman([]string{"logs", "notexist"})
 		results.WaitWithDefaultTimeout()
@@ -122,7 +121,9 @@ var _ = Describe("Podman logs", func() {
 			Expect(wait).To(ExitCleanly())
 
 			Eventually(func(g Gomega) {
-				results := podmanTest.Podman([]string{"logs", "--tail", "99", name})
+				// Options after name should work as well
+				// https://github.com/containers/podman/issues/25653
+				results := podmanTest.Podman([]string{"logs", name, "--tail", "99"})
 				results.WaitWithDefaultTimeout()
 				g.Expect(results).To(ExitCleanly())
 				g.Expect(results.OutputToStringArray()).To(HaveLen(3))
@@ -178,6 +179,29 @@ var _ = Describe("Podman logs", func() {
 				results.WaitWithDefaultTimeout()
 				g.Expect(results).To(ExitCleanly())
 				g.Expect(results.OutputToStringArray()).To(HaveLen(2))
+			}).WithTimeout(logTimeout).Should(Succeed())
+		})
+
+		It("timestamps with nanosecond precision: "+log, func() {
+			skipIfJournaldInContainer()
+
+			logc := podmanTest.Podman([]string{"run", "--log-driver", log, "-dt", ALPINE, "echo", "test message"})
+			logc.WaitWithDefaultTimeout()
+			Expect(logc).To(ExitCleanly())
+			cid := logc.OutputToString()
+
+			wait := podmanTest.Podman([]string{"wait", cid})
+			wait.WaitWithDefaultTimeout()
+			Expect(wait).To(ExitCleanly())
+
+			Eventually(func(g Gomega) {
+				results := podmanTest.Podman([]string{"logs", "-t", cid})
+				results.WaitWithDefaultTimeout()
+				g.Expect(results).To(ExitCleanly())
+				// LogTimeFormat: 2006-01-02T15:04:05.000000000Z07:00
+				// Verify timestamp contains nanoseconds (exactly 9 digits, zero-padded)
+				// Timezone can be 'Z' (UTC) or '+/-HH:MM'
+				g.Expect(results.OutputToString()).To(MatchRegexp(`\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{9}(Z|[+-]\d{2}:\d{2})\s+test message`))
 			}).WithTimeout(logTimeout).Should(Succeed())
 		})
 
@@ -574,6 +598,27 @@ var _ = Describe("Podman logs", func() {
 		}).Should(Succeed())
 	})
 
+	It("using journald labels", func() {
+		SkipIfJournaldUnavailable()
+		SkipIfConmonVersionLessThan("2.2.0")
+		containerName := "inside-journal"
+		logc := podmanTest.Podman([]string{"run", "--log-driver", "journald", "--log-opt", "label=CONTAINER_LABEL=LabelValue", "-d", "--name", containerName, ALPINE, "sh", "-c", "echo podman; sleep 0.1; echo podman; sleep 0.1; echo podman"})
+		logc.WaitWithDefaultTimeout()
+		Expect(logc).To(ExitCleanly())
+		cid := logc.OutputToString()
+
+		wait := podmanTest.Podman([]string{"wait", cid})
+		wait.WaitWithDefaultTimeout()
+		Expect(wait).To(ExitCleanly())
+
+		Eventually(func(g Gomega) {
+			cmd := exec.Command("journalctl", "--no-pager", "-o", "json", "--output-fields=CONTAINER_LABEL", fmt.Sprintf("CONTAINER_ID_FULL=%s", cid))
+			out, err := cmd.CombinedOutput()
+			g.Expect(err).ToNot(HaveOccurred())
+			g.Expect(string(out)).To(ContainSubstring("LabelValue"))
+		}).Should(Succeed())
+	})
+
 	It("podman logs with log-driver=none errors", func() {
 		ctrName := "logsctr"
 		logc := podmanTest.Podman([]string{"run", "--name", ctrName, "-d", "--log-driver", "none", ALPINE, "top"})
@@ -612,6 +657,12 @@ var _ = Describe("Podman logs", func() {
 		logc.WaitWithDefaultTimeout()
 		Expect(logc).To(ExitCleanly())
 		Expect(logc.OutputToString()).To(Equal("podman"))
+	})
+
+	It("log tag with non-journald driver fails", func() {
+		logc := podmanTest.Podman([]string{"run", "--log-driver", "k8s-file", "--log-opt", "tag=mytag", ALPINE, "true"})
+		logc.WaitWithDefaultTimeout()
+		Expect(logc).To(ExitWithError(125, "log tags can only be used with the journald log driver"))
 	})
 
 	It("podman pod logs with container names", func() {

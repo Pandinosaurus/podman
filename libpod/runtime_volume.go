@@ -1,14 +1,16 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package libpod
 
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/libpod/events"
-	"github.com/containers/podman/v5/pkg/domain/entities/reports"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/libpod/events"
+	"go.podman.io/podman/v6/pkg/domain/entities/reports"
 )
 
 // Contains the public Runtime API for volumes
@@ -71,7 +73,7 @@ func (r *Runtime) HasVolume(name string) (bool, error) {
 // Volumes retrieves all volumes
 // Filters can be provided which will determine which volumes are included in the
 // output. If multiple filters are used, a volume will be returned if
-// any of the filters are matched
+// all of the filters are matched
 func (r *Runtime) Volumes(filters ...VolumeFilter) ([]*Volume, error) {
 	if !r.valid {
 		return nil, define.ErrRuntimeStopped
@@ -88,9 +90,9 @@ func (r *Runtime) Volumes(filters ...VolumeFilter) ([]*Volume, error) {
 
 	volsFiltered := make([]*Volume, 0, len(vols))
 	for _, vol := range vols {
-		include := false
+		include := true
 		for _, filter := range filters {
-			include = include || filter(vol)
+			include = include && filter(vol)
 		}
 
 		if include {
@@ -110,8 +112,66 @@ func (r *Runtime) GetAllVolumes() ([]*Volume, error) {
 	return r.state.AllVolumes()
 }
 
+// RenameVolume renames the given volume to a new name.
+// The volume must not be in use by any containers, and must use the local
+// driver.
+func (r *Runtime) RenameVolume(_ context.Context, vol *Volume, newName string) (*Volume, error) {
+	if !r.valid {
+		return nil, define.ErrRuntimeStopped
+	}
+
+	vol.lock.Lock()
+	defer vol.lock.Unlock()
+
+	if err := vol.update(); err != nil {
+		return nil, err
+	}
+
+	if newName == "" || !define.NameRegex.MatchString(newName) {
+		return nil, define.RegexError
+	}
+
+	if vol.Name() == newName {
+		return vol, nil
+	}
+
+	// Only local-driver volumes can be renamed
+	driver := vol.Driver()
+	if driver != "" && driver != define.VolumeDriverLocal {
+		return nil, fmt.Errorf("renaming volume %s: rename is not supported for volumes using driver %q: %w", vol.Name(), driver, define.ErrInvalidArg)
+	}
+
+	// Refuse rename if the volume is currently mounted
+	if vol.state.MountCount > 0 {
+		return nil, fmt.Errorf("renaming volume %s: volume is currently mounted: %w", vol.Name(), define.ErrVolumeBeingUsed)
+	}
+
+	// Refuse rename if the volume is in use by any container
+	ctrs, err := r.state.VolumeInUse(vol)
+	if err != nil {
+		return nil, fmt.Errorf("checking if volume %s is in use: %w", vol.Name(), err)
+	}
+	if len(ctrs) > 0 {
+		return nil, fmt.Errorf("volume %s is being used by the following container(s): %s: %w", vol.Name(), strings.Join(ctrs, ", "), define.ErrVolumeBeingUsed)
+	}
+
+	oldName := vol.config.Name
+	config := *vol.config
+	config.Name = newName
+	config.MountPoint = r.volumeDataPath(newName)
+	config.IsAnon = false
+
+	if err := r.state.RenameVolume(vol, &config); err != nil {
+		return nil, fmt.Errorf("renaming volume %s: %w", oldName, err)
+	}
+	vol.config = &config
+
+	vol.newVolumeEvent(events.Rename)
+	return vol, nil
+}
+
 // PruneVolumes removes unused volumes from the system
-func (r *Runtime) PruneVolumes(ctx context.Context, filterFuncs []VolumeFilter) ([]*reports.PruneReport, error) {
+func (r *Runtime) PruneVolumes(ctx context.Context, filterFuncs []VolumeFilter, dryRun bool) ([]*reports.PruneReport, error) {
 	preports := make([]*reports.PruneReport, 0)
 	vols, err := r.Volumes(filterFuncs...)
 	if err != nil {
@@ -119,6 +179,17 @@ func (r *Runtime) PruneVolumes(ctx context.Context, filterFuncs []VolumeFilter) 
 	}
 
 	for _, vol := range vols {
+		dangling, err := vol.IsDangling()
+		if err != nil {
+			preports = append(preports, &reports.PruneReport{
+				Id:  vol.Name(),
+				Err: err,
+			})
+		}
+		if !dangling {
+			continue
+		}
+
 		report := new(reports.PruneReport)
 		volSize, err := vol.Size()
 		if err != nil {
@@ -126,16 +197,18 @@ func (r *Runtime) PruneVolumes(ctx context.Context, filterFuncs []VolumeFilter) 
 		}
 		report.Size = volSize
 		report.Id = vol.Name()
-		var timeout *uint
-		if err := r.RemoveVolume(ctx, vol, false, timeout); err != nil {
-			if !errors.Is(err, define.ErrVolumeBeingUsed) && !errors.Is(err, define.ErrVolumeRemoved) {
-				report.Err = err
+		if !dryRun {
+			var timeout *uint
+			if err := r.RemoveVolume(ctx, vol, false, timeout); err != nil {
+				if !errors.Is(err, define.ErrVolumeBeingUsed) && !errors.Is(err, define.ErrVolumeRemoved) {
+					report.Err = err
+				} else {
+					// We didn't remove the volume for some reason
+					continue
+				}
 			} else {
-				// We didn't remove the volume for some reason
-				continue
+				vol.newVolumeEvent(events.Prune)
 			}
-		} else {
-			vol.newVolumeEvent(events.Prune)
 		}
 		preports = append(preports, report)
 	}

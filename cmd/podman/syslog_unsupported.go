@@ -7,7 +7,7 @@ import (
 	"os"
 	"runtime"
 
-	"github.com/containers/podman/v5/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/registry"
 )
 
 func syslogHook() {
@@ -15,6 +15,6 @@ func syslogHook() {
 		return
 	}
 
-	fmt.Fprintf(os.Stderr, "Logging to Syslog is not supported on %s", runtime.GOOS)
+	fmt.Fprintf(os.Stderr, "Logging to Syslog is not supported on %s\n", runtime.GOOS)
 	os.Exit(1)
 }

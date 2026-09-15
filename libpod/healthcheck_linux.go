@@ -4,17 +4,19 @@ package libpod
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
 	"os/exec"
 	"strings"
 
-	systemdCommon "github.com/containers/common/pkg/systemd"
-	"github.com/containers/podman/v5/pkg/errorhandling"
-	"github.com/containers/podman/v5/pkg/rootless"
-	"github.com/containers/podman/v5/pkg/systemd"
 	"github.com/sirupsen/logrus"
+	systemdCommon "go.podman.io/common/pkg/systemd"
+	"go.podman.io/podman/v6/pkg/errorhandling"
+	"go.podman.io/podman/v6/pkg/rootless"
+	"go.podman.io/podman/v6/pkg/specgenutil"
+	"go.podman.io/podman/v6/pkg/systemd"
 )
 
 // createTimer systemd timers for healthchecks of a container
@@ -30,7 +32,7 @@ func (c *Container) createTimer(interval string, isStartup bool) error {
 		return fmt.Errorf("failed to get path for podman for a health check timer: %w", err)
 	}
 
-	var cmd = []string{"--property", "LogLevelMax=notice"}
+	cmd := []string{"--property", "LogLevelMax=notice"}
 	if rootless.IsRootless() {
 		cmd = append(cmd, "--user")
 	}
@@ -39,13 +41,12 @@ func (c *Container) createTimer(interval string, isStartup bool) error {
 		cmd = append(cmd, "--setenv=PATH="+path)
 	}
 
-	cmd = append(cmd, "--unit", hcUnitName, fmt.Sprintf("--on-unit-inactive=%s", interval), "--timer-property=AccuracySec=1s", podman)
+	// StartLimitIntervalSec=0 so we don't hit the restart limit
+	cmd = append(cmd, "--unit", hcUnitName, fmt.Sprintf("--on-unit-inactive=%s", interval), "--timer-property=AccuracySec=1s", "--property=StartLimitIntervalSec=0", podman)
 
-	if logrus.IsLevelEnabled(logrus.DebugLevel) {
-		cmd = append(cmd, "--log-level=debug", "--syslog")
-	}
+	cmd = append(cmd, specgenutil.GlobalPodmanArgs(c.runtime.storageConfig, c.runtime.config, logrus.IsLevelEnabled(logrus.DebugLevel))...)
 
-	cmd = append(cmd, "healthcheck", "run", c.ID())
+	cmd = append(cmd, "healthcheck", "run", "--ignore-result", c.ID())
 
 	conn, err := systemd.ConnectToDBUS()
 	if err != nil {
@@ -55,7 +56,11 @@ func (c *Container) createTimer(interval string, isStartup bool) error {
 	logrus.Debugf("creating systemd-transient files: %s %s", "systemd-run", cmd)
 	systemdRun := exec.Command("systemd-run", cmd...)
 	if output, err := systemdRun.CombinedOutput(); err != nil {
-		return fmt.Errorf("%s", output)
+		exitError := &exec.ExitError{}
+		if errors.As(err, &exitError) {
+			return fmt.Errorf("systemd-run failed: %w: output: %s", err, strings.TrimSpace(string(output)))
+		}
+		return fmt.Errorf("failed to execute systemd-run: %w", err)
 	}
 
 	c.state.HCUnitName = hcUnitName
@@ -137,19 +142,20 @@ func (c *Container) removeTransientFiles(ctx context.Context, isStartup bool, un
 		stopErrors = append(stopErrors, fmt.Errorf("stopping systemd health-check timer %q: %w", timerFile, err))
 	}
 
-	// Reset the service before stopping it to make sure it's being removed
-	// on stop.
 	serviceChan := make(chan string)
 	serviceFile := fmt.Sprintf("%s.service", unitName)
-	if err := conn.ResetFailedUnitContext(ctx, serviceFile); err != nil {
-		logrus.Debugf("Failed to reset unit file: %q", err)
-	}
 	if _, err := conn.StopUnitContext(ctx, serviceFile, "ignore-dependencies", serviceChan); err != nil {
 		if !strings.HasSuffix(err.Error(), ".service not loaded.") {
 			stopErrors = append(stopErrors, fmt.Errorf("removing health-check service %q: %w", serviceFile, err))
 		}
 	} else if err := systemdOpSuccessful(serviceChan); err != nil {
 		stopErrors = append(stopErrors, fmt.Errorf("stopping systemd health-check service %q: %w", serviceFile, err))
+	}
+	// Reset the service after stopping it to make sure it's being removed, systemd keep failed transient services
+	// around in its state. We do not care about the error and we need to ensure to reset the state so we do not
+	// leak resources forever.
+	if err := conn.ResetFailedUnitContext(ctx, serviceFile); err != nil {
+		logrus.Debugf("Failed to reset unit file: %q", err)
 	}
 
 	return errorhandling.JoinErrors(stopErrors)
@@ -174,10 +180,12 @@ func (c *Container) disableHealthCheckSystemd(isStartup bool) bool {
 // Bare indicates that a random suffix should not be applied to the name. This
 // was default behavior previously, and is used for backwards compatibility.
 func (c *Container) hcUnitName(isStartup, bare bool) string {
-	unitName := c.ID()
+	unitName := "libpod-healthcheck-" + c.ID()
+
 	if isStartup {
 		unitName += "-startup"
 	}
+
 	if !bare {
 		// Ensure that unit names are unique from run to run by appending
 		// a random suffix.

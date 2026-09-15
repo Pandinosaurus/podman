@@ -1,26 +1,26 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package compat
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 
-	"github.com/containers/common/pkg/resize"
-	"github.com/containers/podman/v5/libpod"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/api/handlers"
-	"github.com/containers/podman/v5/pkg/api/handlers/utils"
-	"github.com/containers/podman/v5/pkg/api/server/idle"
-	api "github.com/containers/podman/v5/pkg/api/types"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/specgenutil"
-	"github.com/containers/podman/v5/pkg/util"
 	"github.com/gorilla/mux"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/pkg/resize"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/api/handlers"
+	"go.podman.io/podman/v6/pkg/api/handlers/utils"
+	"go.podman.io/podman/v6/pkg/api/server/idle"
+	api "go.podman.io/podman/v6/pkg/api/types"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/signal"
+	"go.podman.io/podman/v6/pkg/specgenutil"
+	"go.podman.io/podman/v6/pkg/util"
 )
 
 // ExecCreateHandler creates an exec session for a given container.
@@ -28,8 +28,8 @@ func ExecCreateHandler(w http.ResponseWriter, r *http.Request) {
 	runtime := r.Context().Value(api.RuntimeKey).(*libpod.Runtime)
 
 	input := new(handlers.ExecCreateConfig)
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		utils.InternalServerError(w, fmt.Errorf("decoding request body as JSON: %w", err))
+	if err := utils.ReadJSONFromBody(r, &input); err != nil {
+		utils.Error(w, http.StatusBadRequest, err)
 		return
 	}
 
@@ -43,6 +43,14 @@ func ExecCreateHandler(w http.ResponseWriter, r *http.Request) {
 	libpodConfig := new(libpod.ExecConfig)
 	libpodConfig.Command = input.Cmd
 	libpodConfig.Terminal = input.Tty
+	// Preserve the requested initial terminal size so the exec PTY can be sized
+	// at creation (docker sends ConsoleSize as [height, width]).
+	if input.ConsoleSize != nil {
+		libpodConfig.ConsoleSize = &resize.TerminalSize{
+			Height: uint16(input.ConsoleSize[0]),
+			Width:  uint16(input.ConsoleSize[1]),
+		}
+	}
 	libpodConfig.AttachStdin = input.AttachStdin
 	libpodConfig.AttachStderr = input.AttachStderr
 	libpodConfig.AttachStdout = input.AttachStdout
@@ -142,11 +150,11 @@ func ExecStartHandler(w http.ResponseWriter, r *http.Request) {
 
 	// TODO: We should read/support Tty from here.
 	bodyParams := new(handlers.ExecStartConfig)
-
-	if err := json.NewDecoder(r.Body).Decode(&bodyParams); err != nil {
-		utils.Error(w, http.StatusBadRequest, fmt.Errorf("failed to decode parameters for %s: %w", r.URL.String(), err))
+	if err := utils.ReadJSONFromBody(r, &bodyParams); err != nil {
+		utils.Error(w, http.StatusBadRequest, err)
 		return
 	}
+
 	// TODO: Verify TTY setting against what inspect session was made with
 
 	sessionCtr, err := runtime.GetExecSessionContainer(sessionID)
@@ -200,7 +208,7 @@ func ExecStartHandler(w http.ResponseWriter, r *http.Request) {
 		t := r.Context().Value(api.IdleTrackerKey).(*idle.Tracker)
 		defer t.Close()
 
-		if err != nil {
+		if err != nil && !errors.Is(err, define.ErrDetach) {
 			// Cannot report error to client as a 500 as the Upgrade set status to 101
 			logErr(err)
 		}
@@ -212,6 +220,49 @@ func ExecStartHandler(w http.ResponseWriter, r *http.Request) {
 	logrus.Debugf("Attach for container %s exec session %s completed successfully", sessionCtr.ID(), sessionID)
 }
 
+// ExecKillHandler sends a signal to a running exec session.
+func ExecKillHandler(w http.ResponseWriter, r *http.Request) {
+	runtime := r.Context().Value(api.RuntimeKey).(*libpod.Runtime)
+	decoder := utils.GetDecoder(r)
+
+	sessionID := mux.Vars(r)["id"]
+
+	query := struct {
+		Signal string `schema:"signal"`
+	}{}
+	if err := decoder.Decode(&query, r.URL.Query()); err != nil {
+		utils.Error(w, http.StatusBadRequest, fmt.Errorf("failed to parse parameters for %s: %w", r.URL.String(), err))
+		return
+	}
+
+	sig, err := signal.ParseSignalNameOrNumber(query.Signal)
+	if err != nil {
+		utils.Error(w, http.StatusBadRequest, err)
+		return
+	}
+
+	sessionCtr, err := runtime.GetExecSessionContainer(sessionID)
+	if err != nil {
+		utils.Error(w, http.StatusNotFound, err)
+		return
+	}
+
+	if err := sessionCtr.ExecKill(sessionID, uint(sig)); err != nil {
+		if errors.Is(err, define.ErrNoSuchExecSession) {
+			utils.Error(w, http.StatusNotFound, err)
+			return
+		}
+		if errors.Is(err, define.ErrExecSessionStateInvalid) {
+			utils.Error(w, http.StatusConflict, err)
+			return
+		}
+		utils.InternalServerError(w, err)
+		return
+	}
+
+	utils.WriteResponse(w, http.StatusOK, "OK")
+}
+
 // ExecRemoveHandler removes a exec session.
 func ExecRemoveHandler(w http.ResponseWriter, r *http.Request) {
 	runtime := r.Context().Value(api.RuntimeKey).(*libpod.Runtime)
@@ -219,9 +270,8 @@ func ExecRemoveHandler(w http.ResponseWriter, r *http.Request) {
 	sessionID := mux.Vars(r)["id"]
 
 	bodyParams := new(handlers.ExecRemoveConfig)
-
-	if err := json.NewDecoder(r.Body).Decode(&bodyParams); err != nil {
-		utils.Error(w, http.StatusBadRequest, fmt.Errorf("failed to decode parameters for %s: %w", r.URL.String(), err))
+	if err := utils.ReadJSONFromBody(r, &bodyParams); err != nil {
+		utils.Error(w, http.StatusBadRequest, err)
 		return
 	}
 

@@ -4,29 +4,34 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
-	buildahDefine "github.com/containers/buildah/define"
-	buildahCLI "github.com/containers/buildah/pkg/cli"
-	"github.com/containers/buildah/pkg/parse"
-	buildahUtil "github.com/containers/buildah/pkg/util"
-	"github.com/containers/common/pkg/auth"
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/image/v5/docker/reference"
-	"github.com/containers/image/v5/types"
 	encconfig "github.com/containers/ocicrypt/config"
 	enchelpers "github.com/containers/ocicrypt/helpers"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/utils"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/env"
+	"github.com/openshift/imagebuilder"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	buildahDefine "go.podman.io/buildah/define"
+	buildahCLI "go.podman.io/buildah/pkg/cli"
+	"go.podman.io/buildah/pkg/parse"
+	buildahUtil "go.podman.io/buildah/pkg/util"
+	"go.podman.io/common/pkg/auth"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/image/v5/docker/reference"
+	"go.podman.io/image/v5/pkg/compression"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/utils"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/env"
 )
 
 // BuildFlagsWrapper are local to cmd/ as the build code is using Buildah-internal
@@ -48,9 +53,11 @@ type BuildFlagsWrapper struct {
 
 // FarmBuildHiddenFlags are the flags hidden from the farm build command because they are either not
 // supported or don't make sense in the farm build use case
-var FarmBuildHiddenFlags = []string{"arch", "all-platforms", "compress", "cw", "disable-content-trust",
-	"logsplit", "manifest", "os", "output", "platform", "sign-by", "signature-policy", "stdin",
-	"variant"}
+var FarmBuildHiddenFlags = []string{
+	"arch", "all-platforms", "compress", "cw", "disable-content-trust",
+	"logsplit", "manifest", "metadata-file", "os", "output", "platform", "sign-by", "signature-policy", "stdin",
+	"variant",
+}
 
 func DefineBuildFlags(cmd *cobra.Command, buildOpts *BuildFlagsWrapper, isFarmBuild bool) {
 	flags := cmd.Flags()
@@ -143,6 +150,9 @@ func ParseBuildOpts(cmd *cobra.Command, args []string, buildOpts *BuildFlagsWrap
 	if cmd.Flag("output").Changed && registry.IsRemote() {
 		return nil, errors.New("'--output' option is not supported in remote mode")
 	}
+	if cmd.Flag("metadata-file").Changed && registry.IsRemote() {
+		return nil, errors.New("'--metadata-file' option is not supported in remote mode")
+	}
 
 	if buildOpts.Network == "none" {
 		if cmd.Flag("dns").Changed {
@@ -160,6 +170,10 @@ func ParseBuildOpts(cmd *cobra.Command, args []string, buildOpts *BuildFlagsWrap
 		if buildOpts.Network != "host" && buildOpts.Isolation == buildahDefine.IsolationChroot.String() {
 			return nil, fmt.Errorf("cannot set --network other than host with --isolation %s", buildOpts.Isolation)
 		}
+	}
+
+	if buildOpts.StageLabels && !buildOpts.SaveStages {
+		return nil, errors.New(`"--stage-labels" requires "--save-stages"`)
 	}
 
 	// Extract container files from the CLI (i.e., --file/-f) first.
@@ -181,6 +195,22 @@ func ParseBuildOpts(cmd *cobra.Command, args []string, buildOpts *BuildFlagsWrap
 		contextDir   string
 		apiBuildOpts entities.BuildOptions
 	)
+	// The caller only cleans up TmpDirToClose and LogFileToClose when we
+	// return successfully, so clean them up ourselves on every error path.
+	succeeded := false
+	defer func() {
+		if succeeded {
+			return
+		}
+		if apiBuildOpts.TmpDirToClose != "" {
+			if err := os.RemoveAll(apiBuildOpts.TmpDirToClose); err != nil {
+				logrus.Errorf("Removing temporary directory %q: %v", apiBuildOpts.TmpDirToClose, err)
+			}
+		}
+		if apiBuildOpts.LogFileToClose != nil {
+			apiBuildOpts.LogFileToClose.Close()
+		}
+	}()
 	if len(args) > 0 {
 		// The context directory could be a URL.  Try to handle that.
 		tempDir, subDir, err := buildahDefine.TempDirForURL("", "buildah", args[0])
@@ -210,6 +240,15 @@ func ParseBuildOpts(cmd *cobra.Command, args []string, buildOpts *BuildFlagsWrap
 				return nil, fmt.Errorf("determining path to file %q: %w", containerFiles[i], err)
 			}
 			contextDir = filepath.Dir(absFile)
+			// /dev/fd cannot be used as an overlay mount lower layer, use a tmp context dir instead
+			if contextDir == "/dev/fd" || contextDir == "/proc/self/fd" {
+				tempDir, err := os.MkdirTemp("", "podman-build-context-")
+				if err != nil {
+					return nil, fmt.Errorf("creating temporary context directory: %w", err)
+				}
+				apiBuildOpts.TmpDirToClose = tempDir
+				contextDir = tempDir
+			}
 			containerFiles[i] = absFile
 			break
 		}
@@ -245,7 +284,7 @@ func ParseBuildOpts(cmd *cobra.Command, args []string, buildOpts *BuildFlagsWrap
 	var logFile *os.File
 	if cmd.Flag("logfile").Changed {
 		var err error
-		logFile, err = os.OpenFile(buildOpts.Logfile, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
+		logFile, err = os.OpenFile(buildOpts.Logfile, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 		if err != nil {
 			return nil, err
 		}
@@ -260,6 +299,7 @@ func ParseBuildOpts(cmd *cobra.Command, args []string, buildOpts *BuildFlagsWrap
 	apiBuildOpts.ContainerFiles = containerFiles
 	apiBuildOpts.Authfile = buildOpts.Authfile
 
+	succeeded = true
 	return &apiBuildOpts, err
 }
 
@@ -322,6 +362,10 @@ func buildFlagsWrapperToOptions(c *cobra.Command, contextDir string, flags *Buil
 		pullPolicy = buildahDefine.PullNever
 	}
 
+	if strings.EqualFold(strings.TrimSpace(flags.Pull), "newer") {
+		pullPolicy = buildahDefine.PullIfNewer
+	}
+
 	var cleanTmpFile bool
 	flags.Authfile, cleanTmpFile = buildahUtil.MirrorToTempFileIfPathIsDescriptor(flags.Authfile)
 	if cleanTmpFile {
@@ -335,9 +379,7 @@ func buildFlagsWrapperToOptions(c *cobra.Command, contextDir string, flags *Buil
 			if err != nil {
 				return nil, err
 			}
-			for name, val := range fargs {
-				args[name] = val
-			}
+			maps.Copy(args, fargs)
 		}
 	}
 	if c.Flag("build-arg").Changed {
@@ -401,9 +443,9 @@ func buildFlagsWrapperToOptions(c *cobra.Command, contextDir string, flags *Buil
 		return nil, err
 	}
 
-	compression := buildahDefine.Gzip
+	compressionIntent := buildahDefine.Gzip
 	if flags.DisableCompression {
-		compression = buildahDefine.Uncompressed
+		compressionIntent = buildahDefine.Uncompressed
 	}
 
 	isolation := buildahDefine.IsolationDefault
@@ -446,6 +488,12 @@ func buildFlagsWrapperToOptions(c *cobra.Command, contextDir string, flags *Buil
 	podmanConfig := registry.PodmanConfig()
 	for _, arg := range podmanConfig.RuntimeFlags {
 		runtimeFlags = append(runtimeFlags, "--"+arg)
+	}
+	configIndex := filepath.Base(podmanConfig.RuntimePath)
+	if len(runtimeFlags) == 0 {
+		for _, arg := range podmanConfig.ContainersConfDefaultsRO.Engine.OCIRuntimesFlags[configIndex] {
+			runtimeFlags = append(runtimeFlags, "--"+arg)
+		}
 	}
 	if podmanConfig.ContainersConf.Engine.CgroupManager == config.SystemdCgroupsManager {
 		runtimeFlags = append(runtimeFlags, "--systemd-cgroup")
@@ -506,6 +554,70 @@ func buildFlagsWrapperToOptions(c *cobra.Command, contextDir string, flags *Buil
 		}
 	}
 
+	retryDelay := 2 * time.Second
+	if flags.RetryDelay != "" {
+		retryDelay, err = time.ParseDuration(flags.RetryDelay)
+		if err != nil {
+			return nil, fmt.Errorf("unable to parse value provided %q as --retry-delay: %w", flags.RetryDelay, err)
+		}
+	}
+
+	var sbomScanOptions []buildahDefine.SBOMScanOptions
+	if c.Flag("sbom").Changed || c.Flag("sbom-scanner-command").Changed || c.Flag("sbom-scanner-image").Changed || c.Flag("sbom-image-output").Changed || c.Flag("sbom-merge-strategy").Changed || c.Flag("sbom-output").Changed || c.Flag("sbom-image-output").Changed || c.Flag("sbom-purl-output").Changed || c.Flag("sbom-image-purl-output").Changed {
+		sbomScanOption, err := parse.SBOMScanOptions(c)
+		if err != nil {
+			return nil, err
+		}
+		if !slices.Contains(sbomScanOption.ContextDir, contextDir) {
+			sbomScanOption.ContextDir = append(sbomScanOption.ContextDir, contextDir)
+		}
+		for _, abc := range additionalBuildContext {
+			if !abc.IsURL && !abc.IsImage {
+				sbomScanOption.ContextDir = append(sbomScanOption.ContextDir, abc.Value)
+			}
+		}
+		sbomScanOption.PullPolicy = pullPolicy
+		sbomScanOptions = append(sbomScanOptions, *sbomScanOption)
+	}
+
+	if c.Flag("disable-compression").Changed && flags.DisableCompression {
+		if c.Flag("compression-format").Changed {
+			return nil, errors.New("--disable-compression and --compression-format cannot be used together")
+		}
+		if c.Flag("force-compression").Changed {
+			return nil, errors.New("--disable-compression and --force-compression cannot be used together")
+		}
+	}
+	var compressionLevel *int
+	if c.Flag("compression-level").Changed {
+		compressionLevel = &flags.CompressionLevel
+	} else {
+		compressionLevel = podmanConfig.ContainersConfDefaultsRO.Engine.CompressionLevel
+	}
+	var compressionFormat *compression.Algorithm
+	forceCompressionFormat := flags.ForceCompressionFormat
+	if c.Flag("compression-format").Changed {
+		algo, err := compression.AlgorithmByName(flags.CompressionFormat)
+		if err != nil {
+			return nil, fmt.Errorf("unable to parse value provided %q as --compression-format: %w", flags.CompressionFormat, err)
+		}
+		compressionFormat = &algo
+		if !c.Flag("disable-compression").Changed {
+			compressionIntent = buildahDefine.Gzip
+		}
+	} else {
+		algo, err := compression.AlgorithmByName(podmanConfig.ContainersConfDefaultsRO.Engine.CompressionFormat)
+		if err != nil {
+			return nil, fmt.Errorf("parsing compression_format from containers.conf: %w", err)
+		}
+		compressionFormat = &algo
+		if !c.Flag("force-compression").Changed {
+			forceCompressionFormat = true
+		}
+		if !c.Flag("disable-compression").Changed {
+			compressionIntent = buildahDefine.Gzip
+		}
+	}
 	opts := buildahDefine.BuildOptions{
 		AddCapabilities:         flags.CapAdd,
 		AdditionalTags:          tags,
@@ -514,14 +626,15 @@ func buildFlagsWrapperToOptions(c *cobra.Command, contextDir string, flags *Buil
 		Annotations:             flags.Annotation,
 		Args:                    args,
 		BlobDirectory:           flags.BlobCache,
-		BuildOutput:             flags.BuildOutput,
+		BuildOutputs:            flags.BuildOutputs,
 		CacheFrom:               cacheFrom,
 		CacheTo:                 cacheTo,
 		CacheTTL:                cacheTTL,
 		ConfidentialWorkload:    confidentialWorkloadOptions,
 		CommonBuildOpts:         commonOpts,
-		CompatVolumes:           types.NewOptionalBool(flags.CompatVolumes),
-		Compression:             compression,
+		Compression:             compressionIntent,
+		CompressionFormat:       compressionFormat,
+		CompressionLevel:        compressionLevel,
 		ConfigureNetwork:        networkPolicy,
 		ContextDirectory:        contextDir,
 		CPPFlags:                flags.CPPFlags,
@@ -530,6 +643,7 @@ func buildFlagsWrapperToOptions(c *cobra.Command, contextDir string, flags *Buil
 		DropCapabilities:        flags.CapDrop,
 		Envs:                    buildahCLI.LookupEnvVarReferences(flags.Envs, os.Environ()),
 		Err:                     stderr,
+		ForceCompressionFormat:  forceCompressionFormat,
 		ForceRmIntermediateCtrs: flags.ForceRm,
 		From:                    flags.From,
 		GroupAdd:                flags.GroupAdd,
@@ -544,7 +658,7 @@ func buildFlagsWrapperToOptions(c *cobra.Command, contextDir string, flags *Buil
 		LogFile:                 flags.Logfile,
 		LogSplitByPlatform:      flags.LogSplitByPlatform,
 		Manifest:                flags.Manifest,
-		MaxPullPushRetries:      3,
+		MaxPullPushRetries:      flags.Retry,
 		NamespaceOptions:        nsValues,
 		NoCache:                 flags.NoCache,
 		OSFeatures:              flags.OSFeatures,
@@ -555,35 +669,74 @@ func buildFlagsWrapperToOptions(c *cobra.Command, contextDir string, flags *Buil
 		OutputFormat:            format,
 		Platforms:               platforms,
 		PullPolicy:              pullPolicy,
-		PullPushRetryDelay:      2 * time.Second,
+		PullPushRetryDelay:      retryDelay,
 		Quiet:                   flags.Quiet,
 		RemoveIntermediateCtrs:  flags.Rm,
 		ReportWriter:            reporter,
+		RewriteTimestamp:        flags.RewriteTimestamp,
 		Runtime:                 podmanConfig.RuntimePath,
 		RuntimeArgs:             runtimeFlags,
 		RusageLogFile:           flags.RusageLogFile,
+		SaveStages:              flags.SaveStages,
+		SBOMScanOptions:         sbomScanOptions,
 		SignBy:                  flags.SignBy,
 		SignaturePolicyPath:     flags.SignaturePolicy,
+		SourcePolicyFile:        flags.SourcePolicyFile,
 		Squash:                  flags.Squash,
+		StageLabels:             flags.StageLabels,
 		SystemContext:           systemContext,
 		Target:                  flags.Target,
 		TransientMounts:         flags.Volumes,
+		TransientRunMounts:      flags.TransientRunMounts,
 		UnsetEnvs:               flags.UnsetEnvs,
 		UnsetLabels:             flags.UnsetLabels,
+		UnsetAnnotations:        flags.UnsetAnnotations,
+		MetadataFile:            flags.MetadataFile,
+	}
+
+	if c.Flag("created-annotation").Changed {
+		opts.CreatedAnnotation = types.NewOptionalBool(flags.CreatedAnnotation)
+	}
+	if c.Flag("compat-volumes").Changed {
+		opts.CompatVolumes = types.NewOptionalBool(flags.CompatVolumes)
+	}
+	if c.Flag("inherit-labels").Changed {
+		opts.InheritLabels = types.NewOptionalBool(flags.InheritLabels)
+	}
+
+	if c.Flag("inherit-annotations").Changed {
+		opts.InheritAnnotations = types.NewOptionalBool(flags.InheritAnnotations)
 	}
 
 	if flags.IgnoreFile != "" {
-		excludes, err := parseDockerignore(flags.IgnoreFile)
+		excludes, err := imagebuilder.ParseIgnore(flags.IgnoreFile)
 		if err != nil {
-			return nil, fmt.Errorf("unable to obtain decrypt config: %w", err)
+			return nil, fmt.Errorf("unable to parse ignore file: %w", err)
 		}
 		opts.Excludes = excludes
+
+		// Always pass ignore file to force buildah to consider
+		// an empty ignore file if passed.
+		absIgnoreFile, err := filepath.Abs(flags.IgnoreFile)
+		if err != nil {
+			return nil, fmt.Errorf("unable to resolve ignore file path: %w", err)
+		}
+		opts.IgnoreFile = absIgnoreFile
 	}
 
+	if flags.SourceDateEpoch != "" { // could be explicitly specified, or passed via the environment, tricking .Changed()
+		sde, err := strconv.ParseInt(flags.SourceDateEpoch, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("parsing source-date-epoch value %q: %w", flags.SourceDateEpoch, err)
+		}
+		sourceDateEpoch := time.Unix(sde, 0).UTC()
+		opts.SourceDateEpoch = &sourceDateEpoch
+	}
 	if c.Flag("timestamp").Changed {
 		timestamp := time.Unix(flags.Timestamp, 0).UTC()
 		opts.Timestamp = &timestamp
 	}
+
 	if c.Flag("skip-unused-stages").Changed {
 		opts.SkipUnusedStages = types.NewOptionalBool(flags.SkipUnusedStages)
 	}
@@ -595,7 +748,7 @@ func buildFlagsWrapperToOptions(c *cobra.Command, contextDir string, flags *Buil
 // otherwise it returns true
 func useLayers() string {
 	layers := os.Getenv("BUILDAH_LAYERS")
-	if strings.ToLower(layers) == "false" || layers == "0" {
+	if strings.EqualFold(layers, "false") || layers == "0" {
 		return "false"
 	}
 	return "true"
@@ -614,21 +767,6 @@ func getDecryptConfig(decryptionKeys []string) (*encconfig.DecryptConfig, error)
 	}
 
 	return decConfig, nil
-}
-
-func parseDockerignore(ignoreFile string) ([]string, error) {
-	excludes := []string{}
-	ignore, err := os.ReadFile(ignoreFile)
-	if err != nil {
-		return excludes, err
-	}
-	for _, e := range strings.Split(string(ignore), "\n") {
-		if len(e) == 0 || e[0] == '#' {
-			continue
-		}
-		excludes = append(excludes, e)
-	}
-	return excludes, nil
 }
 
 func areContainerfilesValid(contextDir string, containerFiles []string) error {

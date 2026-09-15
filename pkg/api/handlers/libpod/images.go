@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package libpod
 
@@ -8,38 +8,41 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
-	"github.com/containers/buildah"
-	"github.com/containers/common/libimage"
-	"github.com/containers/common/pkg/ssh"
-	"github.com/containers/image/v5/manifest"
-	"github.com/containers/image/v5/pkg/shortnames"
-	"github.com/containers/image/v5/types"
-	"github.com/containers/podman/v5/libpod"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/api/handlers"
-	"github.com/containers/podman/v5/pkg/api/handlers/utils"
-	api "github.com/containers/podman/v5/pkg/api/types"
-	"github.com/containers/podman/v5/pkg/bindings/images"
-	"github.com/containers/podman/v5/pkg/channel"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/domain/entities/reports"
-	"github.com/containers/podman/v5/pkg/domain/infra/abi"
-	domainUtils "github.com/containers/podman/v5/pkg/domain/utils"
-	"github.com/containers/podman/v5/pkg/errorhandling"
-	"github.com/containers/podman/v5/pkg/util"
-	utils2 "github.com/containers/podman/v5/utils"
-	"github.com/containers/storage"
-	"github.com/containers/storage/pkg/archive"
-	"github.com/containers/storage/pkg/chrootarchive"
-	"github.com/containers/storage/pkg/idtools"
-	"github.com/docker/docker/pkg/jsonmessage"
 	"github.com/gorilla/schema"
+	"github.com/moby/moby/api/types/jsonstream"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/buildah"
+	"go.podman.io/common/libimage"
+	"go.podman.io/common/pkg/ssh"
+	"go.podman.io/image/v5/manifest"
+	"go.podman.io/image/v5/pkg/shortnames"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/podman/v6/internal/localapi"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/api/handlers"
+	"go.podman.io/podman/v6/pkg/api/handlers/utils"
+	api "go.podman.io/podman/v6/pkg/api/types"
+	"go.podman.io/podman/v6/pkg/bindings/images"
+	"go.podman.io/podman/v6/pkg/channel"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/domain/entities/reports"
+	"go.podman.io/podman/v6/pkg/domain/infra/abi"
+	domainUtils "go.podman.io/podman/v6/pkg/domain/utils"
+	"go.podman.io/podman/v6/pkg/errorhandling"
+	"go.podman.io/podman/v6/pkg/util"
+	utils2 "go.podman.io/podman/v6/utils"
+	"go.podman.io/storage"
+	"go.podman.io/storage/pkg/archive"
+	"go.podman.io/storage/pkg/chrootarchive"
+	"go.podman.io/storage/pkg/idtools"
 )
 
 // Commit
@@ -107,7 +110,7 @@ func GetImage(w http.ResponseWriter, r *http.Request) {
 	options := &libimage.InspectOptions{WithParent: true, WithSize: true}
 	inspect, err := newImage.Inspect(r.Context(), options)
 	if err != nil {
-		utils.Error(w, http.StatusInternalServerError, fmt.Errorf("failed in inspect image %s: %w", inspect.ID, err))
+		utils.Error(w, http.StatusInternalServerError, fmt.Errorf("failed in inspect image %s: %w", name, err))
 		return
 	}
 	utils.WriteResponse(w, http.StatusOK, inspect)
@@ -358,7 +361,7 @@ func ImagesLoad(w http.ResponseWriter, r *http.Request) {
 	_, err = io.Copy(tmpfile, r.Body)
 	tmpfile.Close()
 
-	if err != nil && err != io.EOF {
+	if err != nil && !errors.Is(err, io.EOF) {
 		utils.Error(w, http.StatusInternalServerError, fmt.Errorf("unable to write archive to temporary file: %w", err))
 		return
 	}
@@ -366,6 +369,50 @@ func ImagesLoad(w http.ResponseWriter, r *http.Request) {
 	imageEngine := abi.ImageEngine{Libpod: runtime}
 
 	loadOptions := entities.ImageLoadOptions{Input: tmpfile.Name()}
+	loadReport, err := imageEngine.Load(r.Context(), loadOptions)
+	if err != nil {
+		utils.Error(w, http.StatusInternalServerError, fmt.Errorf("unable to load image: %w", err))
+		return
+	}
+	utils.WriteResponse(w, http.StatusOK, loadReport)
+}
+
+func ImagesLocalLoad(w http.ResponseWriter, r *http.Request) {
+	runtime := r.Context().Value(api.RuntimeKey).(*libpod.Runtime)
+	decoder := r.Context().Value(api.DecoderKey).(*schema.Decoder)
+	query := struct {
+		Path string `schema:"path"`
+	}{}
+
+	if err := decoder.Decode(&query, r.URL.Query()); err != nil {
+		utils.Error(w, http.StatusBadRequest, fmt.Errorf("failed to parse parameters for %s: %w", r.URL.String(), err))
+		return
+	}
+
+	if query.Path == "" {
+		utils.Error(w, http.StatusBadRequest, fmt.Errorf("path query parameter is required"))
+		return
+	}
+
+	cleanPath := filepath.Clean(query.Path)
+	// Check if the path exists on server side.
+	// Note: localapi.ValidatePathForLocalAPI returns nil if the file exists and path is absolute, not an error.
+	switch err := localapi.ValidatePathForLocalAPI(cleanPath); {
+	case err == nil:
+		// no error -> continue
+	case errors.Is(err, localapi.ErrPathNotAbsolute):
+		utils.Error(w, http.StatusBadRequest, err)
+		return
+	case errors.Is(err, fs.ErrNotExist):
+		utils.Error(w, http.StatusNotFound, fmt.Errorf("file does not exist: %q", cleanPath))
+		return
+	default:
+		utils.Error(w, http.StatusInternalServerError, fmt.Errorf("failed to access file: %w", err))
+		return
+	}
+
+	imageEngine := abi.ImageEngine{Libpod: runtime}
+	loadOptions := entities.ImageLoadOptions{Input: cleanPath}
 	loadReport, err := imageEngine.Load(r.Context(), loadOptions)
 	if err != nil {
 		utils.Error(w, http.StatusInternalServerError, fmt.Errorf("unable to load image: %w", err))
@@ -403,14 +450,17 @@ func ImagesImport(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer os.Remove(tmpfile.Name())
-		defer tmpfile.Close()
 
-		if _, err := io.Copy(tmpfile, r.Body); err != nil && err != io.EOF {
+		if _, err := io.Copy(tmpfile, r.Body); err != nil && !errors.Is(err, io.EOF) {
 			utils.Error(w, http.StatusInternalServerError, fmt.Errorf("unable to write archive to temporary file: %w", err))
+			tmpfile.Close()
 			return
 		}
 
-		tmpfile.Close()
+		if err := tmpfile.Close(); err != nil {
+			utils.Error(w, http.StatusInternalServerError, fmt.Errorf("unable to close tempfile: %w", err))
+			return
+		}
 		source = tmpfile.Name()
 	}
 
@@ -437,6 +487,7 @@ func CommitContainer(w http.ResponseWriter, r *http.Request) {
 	var (
 		destImage string
 		mimeType  string
+		err       error
 	)
 	decoder := r.Context().Value(api.DecoderKey).(*schema.Decoder)
 	runtime := r.Context().Value(api.RuntimeKey).(*libpod.Runtime)
@@ -454,22 +505,16 @@ func CommitContainer(w http.ResponseWriter, r *http.Request) {
 		Tag       string   `schema:"tag"`
 	}{
 		Format: "oci",
+		Pause:  true,
 	}
 
 	if err := decoder.Decode(&query, r.URL.Query()); err != nil {
 		utils.Error(w, http.StatusBadRequest, fmt.Errorf("failed to parse parameters for %s: %w", r.URL.String(), err))
 		return
 	}
-	rtc, err := runtime.GetConfig()
-	if err != nil {
-		utils.Error(w, http.StatusInternalServerError, fmt.Errorf("failed to get runtime config: %w", err))
-		return
-	}
 	sc := runtime.SystemContext()
 	tag := "latest"
-	options := libpod.ContainerCommitOptions{
-		Pause: true,
-	}
+	options := libpod.ContainerCommitOptions{}
 	switch query.Format {
 	case "oci":
 		mimeType = buildah.OCIv1ImageManifest
@@ -484,7 +529,6 @@ func CommitContainer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	options.CommitOptions = buildah.CommitOptions{
-		SignaturePolicyPath:   rtc.Engine.SignaturePolicyPath,
 		ReportWriter:          os.Stderr,
 		SystemContext:         sc,
 		PreferredManifestType: mimeType,
@@ -550,8 +594,8 @@ func CommitContainer(w http.ResponseWriter, r *http.Request) {
 	statusWritten := false
 	writeStatusCode := func(code int) {
 		if !statusWritten {
-			w.WriteHeader(code)
 			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(code)
 			flush()
 			statusWritten = true
 		}
@@ -570,7 +614,7 @@ func CommitContainer(w http.ResponseWriter, r *http.Request) {
 			flush()
 		case <-runCtx.Done():
 			if commitErr != nil {
-				m.Error = &jsonmessage.JSONError{
+				m.Error = &jsonstream.Error{
 					Message: commitErr.Error(),
 				}
 			} else {
@@ -665,6 +709,7 @@ func ImagesRemove(w http.ResponseWriter, r *http.Request) {
 	query := struct {
 		Force          bool `schema:"force"`
 		LookupManifest bool `schema:"lookupManifest"`
+		Ignore         bool `schema:"ignore"`
 	}{
 		Force: false,
 	}
@@ -674,7 +719,7 @@ func ImagesRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	opts := entities.ImageRemoveOptions{Force: query.Force, LookupManifest: query.LookupManifest}
+	opts := entities.ImageRemoveOptions{Force: query.Force, LookupManifest: query.LookupManifest, Ignore: query.Ignore}
 	imageEngine := abi.ImageEngine{Libpod: runtime}
 	rmReport, rmErrors := imageEngine.Remove(r.Context(), []string{utils.GetName(r)}, opts)
 
@@ -713,18 +758,21 @@ func ImageScp(w http.ResponseWriter, r *http.Request) {
 
 	sourceArg := utils.GetName(r)
 
-	rep, source, dest, _, err := domainUtils.ExecuteTransfer(sourceArg, query.Destination, []string{}, query.Quiet, ssh.GolangMode)
+	opts := entities.ScpExecuteTransferOptions{}
+	opts.Quiet = query.Quiet
+	opts.SSHMode = ssh.GolangMode
+	report, err := domainUtils.ExecuteTransfer(sourceArg, query.Destination, opts)
 	if err != nil {
 		utils.Error(w, http.StatusInternalServerError, err)
 		return
 	}
 
-	if source != nil || dest != nil {
+	if report.Source != nil || report.Dest != nil {
 		utils.Error(w, http.StatusBadRequest, fmt.Errorf("cannot use the user transfer function on the remote client: %w", define.ErrInvalidArg))
 		return
 	}
 
-	utils.WriteResponse(w, http.StatusOK, &reports.ScpReport{Id: rep.Names[0]})
+	utils.WriteResponse(w, http.StatusOK, &reports.ScpReport{Id: report.LoadReport.Names[0]})
 }
 
 // Resolve the passed (short) name to one more candidates it may resolve to.

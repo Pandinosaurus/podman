@@ -1,12 +1,12 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package abi
 
 import (
 	"testing"
 
-	"github.com/containers/podman/v5/libpod/define"
 	"github.com/stretchr/testify/require"
+	"go.podman.io/podman/v6/libpod/define"
 )
 
 func TestGetSdNotifyMode(t *testing.T) {

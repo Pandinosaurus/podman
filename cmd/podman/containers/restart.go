@@ -6,13 +6,13 @@ import (
 	"os"
 	"strings"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/utils"
-	"github.com/containers/podman/v5/cmd/podman/validate"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/utils"
+	"go.podman.io/podman/v6/cmd/podman/validate"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 var (
@@ -30,7 +30,7 @@ var (
 		},
 		ValidArgsFunction: common.AutocompleteContainers,
 		Example: `podman restart ctrID
-  podman restart ctrID1 ctrID2`,
+podman restart ctrID1 ctrID2`,
 	}
 
 	containerRestartCommand = &cobra.Command{
@@ -41,7 +41,7 @@ var (
 		Args:              restartCommand.Args,
 		ValidArgsFunction: restartCommand.ValidArgsFunction,
 		Example: `podman container restart ctrID
-  podman container restart ctrID1 ctrID2`,
+podman container restart ctrID1 ctrID2`,
 	}
 )
 
@@ -94,9 +94,7 @@ func init() {
 }
 
 func restart(cmd *cobra.Command, args []string) error {
-	var (
-		errs utils.OutputErrors
-	)
+	var errs utils.OutputErrors
 	args = utils.RemoveSlash(args)
 
 	if cmd.Flag("time").Changed {
@@ -109,7 +107,7 @@ func restart(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("reading CIDFile: %w", err)
 		}
-		id := strings.Split(string(content), "\n")[0]
+		id, _, _ := strings.Cut(string(content), "\n")
 		args = append(args, id)
 	}
 

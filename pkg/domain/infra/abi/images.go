@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package abi
 
@@ -13,35 +13,37 @@ import (
 	"os/user"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
-	bdefine "github.com/containers/buildah/define"
-	"github.com/containers/buildah/pkg/volumes"
-	"github.com/containers/common/libimage"
-	"github.com/containers/common/libimage/filter"
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/common/pkg/ssh"
-	"github.com/containers/image/v5/docker"
-	"github.com/containers/image/v5/docker/reference"
-	"github.com/containers/image/v5/manifest"
-	"github.com/containers/image/v5/pkg/compression"
-	"github.com/containers/image/v5/signature"
-	"github.com/containers/image/v5/transports"
-	"github.com/containers/image/v5/transports/alltransports"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/domain/entities/reports"
-	domainUtils "github.com/containers/podman/v5/pkg/domain/utils"
-	"github.com/containers/podman/v5/pkg/errorhandling"
-	"github.com/containers/podman/v5/pkg/rootless"
-	"github.com/containers/storage"
-	"github.com/containers/storage/types"
 	"github.com/opencontainers/go-digest"
 	imgspecv1 "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/sirupsen/logrus"
+	bdefine "go.podman.io/buildah/define"
+	"go.podman.io/buildah/pkg/volumes"
+	"go.podman.io/common/libimage"
+	"go.podman.io/common/libimage/filter"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/image/v5/docker"
+	"go.podman.io/image/v5/docker/reference"
+	"go.podman.io/image/v5/image"
+	"go.podman.io/image/v5/manifest"
+	"go.podman.io/image/v5/pkg/compression"
+	"go.podman.io/image/v5/signature"
+	"go.podman.io/image/v5/transports"
+	"go.podman.io/image/v5/transports/alltransports"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/domain/entities/reports"
+	domainUtils "go.podman.io/podman/v6/pkg/domain/utils"
+	"go.podman.io/podman/v6/pkg/errorhandling"
+	"go.podman.io/podman/v6/pkg/rootless"
+	"go.podman.io/storage"
+	"go.podman.io/storage/pkg/unshare"
+	"go.podman.io/storage/types"
 )
 
 const UnknownDigestSuffix = docker.UnknownDigestSuffix
@@ -56,7 +58,7 @@ func (ir *ImageEngine) Exists(_ context.Context, nameOrID string) (*entities.Boo
 
 func (ir *ImageEngine) Prune(ctx context.Context, opts entities.ImagePruneOptions) ([]*reports.PruneReport, error) {
 	pruneOptions := &libimage.RemoveImagesOptions{
-		RemoveContainerFunc:     ir.Libpod.RemoveContainersForImageCallback(ctx),
+		RemoveContainerFunc:     ir.Libpod.RemoveContainersForImageCallback(ctx, true),
 		IsExternalContainerFunc: ir.Libpod.IsExternalContainerCallback(ctx),
 		ExternalContainers:      opts.External,
 		Filters:                 append(opts.Filter, "readonly=false"),
@@ -132,7 +134,7 @@ func toDomainHistoryLayer(layer *libimage.ImageHistory) entities.ImageHistoryLay
 	return l
 }
 
-func (ir *ImageEngine) History(ctx context.Context, nameOrID string, opts entities.ImageHistoryOptions) (*entities.ImageHistoryReport, error) {
+func (ir *ImageEngine) History(ctx context.Context, nameOrID string, _ entities.ImageHistoryOptions) (*entities.ImageHistoryReport, error) {
 	image, _, err := ir.Libpod.LibimageRuntime().LookupImage(nameOrID, nil)
 	if err != nil {
 		return nil, err
@@ -157,6 +159,28 @@ func (ir *ImageEngine) Mount(ctx context.Context, nameOrIDs []string, opts entit
 	listMountsOnly := false
 	var images []*libimage.Image
 	var err error
+
+	hasCapSysAdmin, err := unshare.HasCapSysAdmin()
+	if err != nil {
+		return nil, err
+	}
+
+	if os.Geteuid() != 0 || !hasCapSysAdmin {
+		if driver := ir.Libpod.StorageConfig().GraphDriverName; driver != "vfs" {
+			// Do not allow to mount a graphdriver that is not vfs if we are creating the userns as part
+			// of the mount command.
+			return nil, fmt.Errorf("cannot mount using driver %s in rootless mode", driver)
+		}
+
+		became, ret, err := rootless.BecomeRootInUserNS("")
+		if err != nil {
+			return nil, err
+		}
+		if became {
+			os.Exit(ret)
+		}
+	}
+
 	switch {
 	case opts.All && len(nameOrIDs) > 0:
 		return nil, errors.New("cannot mix --all with images")
@@ -175,22 +199,6 @@ func (ir *ImageEngine) Mount(ctx context.Context, nameOrIDs []string, opts entit
 		images, err = ir.Libpod.LibimageRuntime().ListImages(ctx, listImagesOptions)
 		if err != nil {
 			return nil, err
-		}
-	}
-
-	if os.Geteuid() != 0 {
-		if driver := ir.Libpod.StorageConfig().GraphDriverName; driver != "vfs" {
-			// Do not allow to mount a graphdriver that is not vfs if we are creating the userns as part
-			// of the mount command.
-			return nil, fmt.Errorf("cannot mount using driver %s in rootless mode", driver)
-		}
-
-		became, ret, err := rootless.BecomeRootInUserNS("")
-		if err != nil {
-			return nil, err
-		}
-		if became {
-			os.Exit(ret)
 		}
 	}
 
@@ -313,7 +321,7 @@ func (ir *ImageEngine) Pull(ctx context.Context, rawImage string, options entiti
 	return &entities.ImagePullReport{Images: pulledIDs}, nil
 }
 
-func (ir *ImageEngine) Inspect(ctx context.Context, namesOrIDs []string, opts entities.InspectOptions) ([]*entities.ImageInspectReport, []error, error) {
+func (ir *ImageEngine) Inspect(ctx context.Context, namesOrIDs []string, _ entities.InspectOptions) ([]*entities.ImageInspectReport, []error, error) {
 	reports := []*entities.ImageInspectReport{}
 	errs := []error{}
 
@@ -375,6 +383,9 @@ func (ir *ImageEngine) Push(ctx context.Context, source string, destination stri
 	pushOptions.OciEncryptLayers = options.OciEncryptLayers
 	pushOptions.CompressionLevel = options.CompressionLevel
 	pushOptions.ForceCompressionFormat = options.ForceCompressionFormat
+	pushOptions.Architecture = options.Arch
+	pushOptions.OS = options.OS
+	pushOptions.Variant = options.Variant
 	pushOptions.MaxRetries = options.Retry
 	if options.RetryDelay != "" {
 		duration, err := time.ParseDuration(options.RetryDelay)
@@ -423,18 +434,20 @@ func (ir *ImageEngine) Push(ctx context.Context, source string, destination stri
 	// If the image could not be found, we may be referring to a manifest
 	// list but could not find a matching image instance in the local
 	// containers storage. In that case, fall back and attempt to push the
-	// (entire) manifest.
-	if _, err := ir.Libpod.LibimageRuntime().LookupManifestList(source); err == nil {
-		pushedManifestString, err := ir.ManifestPush(ctx, source, destination, options)
-		if err != nil {
-			return nil, err
+	// (entire) manifest. Don't fall back if a specific platform was requested.
+	if options.OS == "" && options.Arch == "" && options.Variant == "" {
+		if _, err := ir.Libpod.LibimageRuntime().LookupManifestList(source); err == nil {
+			pushedManifestString, err := ir.ManifestPush(ctx, source, destination, options)
+			if err != nil {
+				return nil, err
+			}
+			return &entities.ImagePushReport{ManifestDigest: pushedManifestString}, nil
 		}
-		return &entities.ImagePushReport{ManifestDigest: pushedManifestString}, nil
 	}
 	return nil, pushError
 }
 
-func (ir *ImageEngine) Tag(ctx context.Context, nameOrID string, tags []string, options entities.ImageTagOptions) error {
+func (ir *ImageEngine) Tag(_ context.Context, nameOrID string, tags []string, _ entities.ImageTagOptions) error {
 	// Allow tagging manifest list instead of resolving instances from manifest
 	lookupOptions := &libimage.LookupImageOptions{ManifestList: true}
 	image, _, err := ir.Libpod.LibimageRuntime().LookupImage(nameOrID, lookupOptions)
@@ -449,7 +462,7 @@ func (ir *ImageEngine) Tag(ctx context.Context, nameOrID string, tags []string, 
 	return nil
 }
 
-func (ir *ImageEngine) Untag(ctx context.Context, nameOrID string, tags []string, options entities.ImageUntagOptions) error {
+func (ir *ImageEngine) Untag(_ context.Context, nameOrID string, tags []string, _ entities.ImageUntagOptions) error {
 	image, _, err := ir.Libpod.LibimageRuntime().LookupImage(nameOrID, nil)
 	if err != nil {
 		return err
@@ -559,9 +572,16 @@ func (ir *ImageEngine) Search(ctx context.Context, term string, opts entities.Im
 		reports[i].Name = searchResults[i].Name
 		reports[i].Description = searchResults[i].Description
 		reports[i].Stars = searchResults[i].Stars
-		reports[i].Official = searchResults[i].Official
-		reports[i].Automated = searchResults[i].Automated
 		reports[i].Tag = searchResults[i].Tag
+
+		// Use the bool methods to make sure
+		// we have a stable string representation.
+		if searchResults[i].IsOfficial() {
+			reports[i].Official = entities.ImageSearchTrue
+		}
+		if searchResults[i].IsAutomated() {
+			reports[i].Automated = entities.ImageSearchTrue
+		}
 	}
 
 	return reports, nil
@@ -589,7 +609,7 @@ func (ir *ImageEngine) Tree(ctx context.Context, nameOrID string, opts entities.
 	if err != nil {
 		return nil, err
 	}
-	tree, err := image.Tree(opts.WhatRequires)
+	tree, err := image.Tree(ctx, opts.WhatRequires)
 	if err != nil {
 		return nil, err
 	}
@@ -631,7 +651,7 @@ func removeErrorsToExitCode(rmErrors []error) int {
 		// One of the specified images has child images or is
 		// being used by a container.
 		return 2
-	case noSuchImageErrors && !(otherErrors || inUseErrors):
+	case noSuchImageErrors && (!otherErrors && !inUseErrors):
 		// One of the specified images did not exist, and no other
 		// failures.
 		return 1
@@ -658,7 +678,7 @@ func (ir *ImageEngine) Remove(ctx context.Context, images []string, opts entitie
 	if !opts.All {
 		libimageOptions.Filters = append(libimageOptions.Filters, "intermediate=false")
 	}
-	libimageOptions.RemoveContainerFunc = ir.Libpod.RemoveContainersForImageCallback(ctx)
+	libimageOptions.RemoveContainerFunc = ir.Libpod.RemoveContainersForImageCallback(ctx, !opts.DisableForceRemoveContainers)
 
 	libimageReport, libimageErrors := ir.Libpod.LibimageRuntime().RemoveImages(ctx, images, libimageOptions)
 
@@ -709,7 +729,7 @@ func (ir *ImageEngine) Sign(ctx context.Context, names []string, options entitie
 					logrus.Errorf("Unable to close %s image source %q", srcRef.DockerReference().Name(), err)
 				}
 			}()
-			topManifestBlob, manifestType, err := rawSource.GetManifest(ctx, nil)
+			topManifestBlob, manifestType, err := image.UnparsedInstance(rawSource, nil).Manifest(ctx)
 			if err != nil {
 				return fmt.Errorf("getting manifest blob: %w", err)
 			}
@@ -750,7 +770,7 @@ func (ir *ImageEngine) Sign(ctx context.Context, names []string, options entitie
 				instanceDigests := list.Instances()
 				for _, instanceDigest := range instanceDigests {
 					digest := instanceDigest
-					man, _, err := rawSource.GetManifest(ctx, &digest)
+					man, _, err := image.UnparsedInstance(rawSource, &digest).Manifest(ctx)
 					if err != nil {
 						return err
 					}
@@ -772,39 +792,47 @@ func (ir *ImageEngine) Sign(ctx context.Context, names []string, options entitie
 	return nil, nil
 }
 
-func (ir *ImageEngine) Scp(ctx context.Context, src, dst string, parentFlags []string, quiet bool, sshMode ssh.EngineMode) error {
-	rep, source, dest, flags, err := domainUtils.ExecuteTransfer(src, dst, parentFlags, quiet, sshMode)
+func (ir *ImageEngine) Scp(ctx context.Context, src, dst string, opts entities.ImageScpOptions) (*entities.ImageScpReport, error) {
+	report, err := domainUtils.ExecuteTransfer(src, dst, opts.ScpExecuteTransferOptions)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if (rep == nil && err == nil) && (source != nil && dest != nil) { // we need to execute the transfer
-		err := Transfer(ctx, *source, *dest, flags)
+	if report.LoadReport == nil && (report.Source != nil && report.Dest != nil) { // we need to execute the transfer
+		transferOpts := entities.ScpTransferOptions{}
+		transferOpts.ParentFlags = report.ParentFlags
+		transferOpts.SaveFormat = report.SaveFormat
+		_, err := Transfer(ctx, *report.Source, *report.Dest, transferOpts)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
-	return nil
+	return &entities.ImageScpReport{}, nil
 }
 
-func Transfer(ctx context.Context, source entities.ImageScpOptions, dest entities.ImageScpOptions, parentFlags []string) error {
+func Transfer(_ context.Context, source entities.ScpTransferImageOptions, dest entities.ScpTransferImageOptions, opts entities.ScpTransferOptions) (*entities.ScpTransferReport, error) {
 	if source.User == "" {
-		return fmt.Errorf("you must define a user when transferring from root to rootless storage: %w", define.ErrInvalidArg)
+		return nil, fmt.Errorf("you must define a user when transferring from root to rootless storage: %w", define.ErrInvalidArg)
 	}
 	podman, err := os.Executable()
 	if err != nil {
-		return err
+		return nil, err
 	}
+	rep := entities.ScpTransferReport{}
 	if rootless.IsRootless() && (len(dest.User) == 0 || dest.User == "root") { // if we are rootless and do not have a destination user we can just use sudo
-		return transferRootless(source, dest, podman, parentFlags)
+		return &rep, transferRootless(source, dest, podman, opts)
 	}
-	return transferRootful(source, dest, podman, parentFlags)
+	return &rep, transferRootful(source, dest, podman, opts)
 }
 
 // TransferRootless creates new podman processes using exec.Command and sudo, transferring images between the given source and destination users
-func transferRootless(source entities.ImageScpOptions, dest entities.ImageScpOptions, podman string, parentFlags []string) error {
+func transferRootless(source entities.ScpTransferImageOptions, dest entities.ScpTransferImageOptions, podman string, opts entities.ScpTransferOptions) error {
 	var cmdSave *exec.Cmd
-	saveCommand, loadCommand := parentFlags, parentFlags
-	saveCommand = append(saveCommand, []string{"save"}...)
+	saveCommand := slices.Clone(opts.ParentFlags)
+	loadCommand := slices.Clone(opts.ParentFlags)
+	saveCommand = append(saveCommand, "save")
+	if opts.SaveFormat != "" {
+		saveCommand = append(saveCommand, "--format", opts.SaveFormat)
+	}
 	loadCommand = append(loadCommand, []string{"load"}...)
 	if source.Quiet {
 		saveCommand = append(saveCommand, "-q")
@@ -842,14 +870,17 @@ func transferRootless(source entities.ImageScpOptions, dest entities.ImageScpOpt
 }
 
 // transferRootful creates new podman processes using exec.Command and a new uid/gid alongside a cleared environment
-func transferRootful(source entities.ImageScpOptions, dest entities.ImageScpOptions, podman string, parentFlags []string) error {
-	basicCommand := make([]string, 0, len(parentFlags)+1)
+func transferRootful(source entities.ScpTransferImageOptions, dest entities.ScpTransferImageOptions, podman string, opts entities.ScpTransferOptions) error {
+	basicCommand := make([]string, 0, len(opts.ParentFlags)+1)
 	basicCommand = append(basicCommand, podman)
-	basicCommand = append(basicCommand, parentFlags...)
+	basicCommand = append(basicCommand, opts.ParentFlags...)
 
-	saveCommand := make([]string, 0, len(basicCommand)+4)
+	saveCommand := make([]string, 0, len(basicCommand)+6)
 	saveCommand = append(saveCommand, basicCommand...)
 	saveCommand = append(saveCommand, "save")
+	if opts.SaveFormat != "" {
+		saveCommand = append(saveCommand, "--format", opts.SaveFormat)
+	}
 
 	loadCommand := make([]string, 0, len(basicCommand)+3)
 	loadCommand = append(loadCommand, basicCommand...)
@@ -866,8 +897,8 @@ func transferRootful(source entities.ImageScpOptions, dest entities.ImageScpOpti
 	var uSave *user.User
 	var uLoad *user.User
 	var err error
-	source.User = strings.Split(source.User, ":")[0] // split in case provided with uid:gid
-	dest.User = strings.Split(dest.User, ":")[0]
+	source.User, _, _ = strings.Cut(source.User, ":") // In case of uid:gid.
+	dest.User, _, _ = strings.Cut(dest.User, ":")
 	uSave, err = lookupUser(source.User)
 	if err != nil {
 		return err
@@ -987,7 +1018,7 @@ func putSignature(manifestBlob []byte, mech signature.SigningMechanism, sigStore
 		return err
 	}
 	signatureDir := fmt.Sprintf("%s@%s=%s", sigStoreDir, instanceDigest.Algorithm(), instanceDigest.Hex())
-	if err := os.MkdirAll(signatureDir, 0751); err != nil {
+	if err := os.MkdirAll(signatureDir, 0o751); err != nil {
 		// The directory is allowed to exist
 		if !errors.Is(err, fs.ErrExist) {
 			return err
@@ -997,5 +1028,5 @@ func putSignature(manifestBlob []byte, mech signature.SigningMechanism, sigStore
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(signatureDir, sigFilename), newSig, 0644)
+	return os.WriteFile(filepath.Join(signatureDir, sigFilename), newSig, 0o644)
 }

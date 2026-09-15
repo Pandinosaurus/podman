@@ -8,9 +8,9 @@ import (
 	"reflect"
 	"strings"
 
-	. "github.com/containers/podman/v5/test/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	. "go.podman.io/podman/v6/test/utils"
 )
 
 var _ = Describe("Common functions test", func() {
@@ -33,27 +33,20 @@ var _ = Describe("Common functions test", func() {
 	})
 
 	DescribeTable("Test GetHostDistributionInfo",
-		func(path, id, ver string, empty bool) {
+		func(path, id, ver string) {
 			txt := fmt.Sprintf("ID=%s\nVERSION_ID=%s", id, ver)
-			if !empty {
-				f, _ := os.Create(path)
-				_, err := f.WriteString(txt)
-				Expect(err).ToNot(HaveOccurred(), "Failed to write data.")
-				f.Close()
-			}
+			f, _ := os.Create(path)
+			_, err := f.WriteString(txt)
+			Expect(err).ToNot(HaveOccurred(), "Failed to write data.")
+			f.Close()
 
 			OSReleasePath = path
 			host := GetHostDistributionInfo()
-			if empty {
-				Expect(host).To(Equal(HostOS{}), "HostOs should be empty.")
-			} else {
-				Expect(host.Distribution).To(Equal(strings.Trim(id, "\"")))
-				Expect(host.Version).To(Equal(strings.Trim(ver, "\"")))
-			}
+			Expect(host.Distribution).To(Equal(strings.Trim(id, "\"")))
+			Expect(host.Version).To(Equal(strings.Trim(ver, "\"")))
 		},
-		Entry("Configure file is not exist.", "/tmp/nonexistent", "", "", true),
-		Entry("Item value with and without \"", "/tmp/os-release.test", "fedora", "\"28\"", false),
-		Entry("Item empty with and without \"", "/tmp/os-release.test", "", "\"\"", false),
+		Entry("Item value with and without \"", "/tmp/os-release.test", "fedora", "\"28\""),
+		Entry("Item empty with and without \"", "/tmp/os-release.test", "", "\"\""),
 	)
 
 	DescribeTable("Test TestIsCommandAvailable",
@@ -140,5 +133,4 @@ var _ = Describe("Common functions test", func() {
 		Expect(err).ToNot(HaveOccurred(), "Cannot find the private key file after we write it.")
 		defer read.Close()
 	})
-
 })

@@ -3,7 +3,10 @@
 package integration
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -16,11 +19,11 @@ import (
 	"strings"
 	"time"
 
-	. "github.com/containers/podman/v5/test/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	. "github.com/onsi/gomega/gbytes"
 	. "github.com/onsi/gomega/gexec"
+	. "go.podman.io/podman/v6/test/utils"
 )
 
 func setupConnectionsConf() {
@@ -35,16 +38,21 @@ func setupConnectionsConf() {
 	os.Setenv("PODMAN_CONNECTIONS_CONF", file)
 }
 
-var systemConnectionListCmd = []string{"system", "connection", "ls", "--format", "{{.Name}} {{.URI}} {{.Identity}} {{.Default}} {{.ReadWrite}}"}
-var farmListCmd = []string{"farm", "ls", "--format", "{{.Name}} {{.Connections}} {{.Default}} {{.ReadWrite}}"}
+var (
+	systemConnectionListCmd                = []string{"system", "connection", "ls", "--format", "{{.Name}} {{.URI}} {{.Identity}} {{.Default}} {{.ReadWrite}}"}
+	systemConnectionListTLSSpecialValueCmd = []string{"system", "connection", "ls", "--format", "tls"}
+	systemConnectionListTLSCmd             = []string{"system", "connection", "ls", "--format", "{{.Name}} {{.URI}} {{.TLSCA}} {{.Default}} {{.ReadWrite}}"}
+	systemConnectionListmTLSCmd            = []string{"system", "connection", "ls", "--format", "{{.Name}} {{.URI}} {{.TLSCA}} {{.TLSCert}} {{.TLSKey}} {{.Default}} {{.ReadWrite}}"}
+	farmListCmd                            = []string{"farm", "ls", "--format", "{{.Name}} {{.Connections}} {{.Default}} {{.ReadWrite}}"}
+)
 
 var _ = Describe("podman system connection", func() {
-
 	BeforeEach(setupConnectionsConf)
 
 	Context("without running API service", func() {
 		It("add ssh://", func() {
-			cmd := []string{"system", "connection", "add",
+			cmd := []string{
+				"system", "connection", "add",
 				"--default",
 				"--identity", "~/.ssh/id_rsa",
 				"QA",
@@ -60,7 +68,8 @@ var _ = Describe("podman system connection", func() {
 			Expect(session).Should(ExitCleanly())
 			Expect(session.OutputToString()).To(Equal("QA ssh://root@podman.test:2222/run/podman/podman.sock ~/.ssh/id_rsa true true"))
 
-			cmd = []string{"system", "connection", "rename",
+			cmd = []string{
+				"system", "connection", "rename",
 				"QA",
 				"QE",
 			}
@@ -75,7 +84,8 @@ var _ = Describe("podman system connection", func() {
 		})
 
 		It("add UDS", func() {
-			cmd := []string{"system", "connection", "add",
+			cmd := []string{
+				"system", "connection", "add",
 				"QA-UDS",
 				"unix:///run/podman/podman.sock",
 			}
@@ -91,7 +101,8 @@ var _ = Describe("podman system connection", func() {
 			Expect(session).Should(ExitCleanly())
 			Expect(session.OutputToString()).To(Equal("QA-UDS unix:///run/podman/podman.sock true true"))
 
-			cmd = []string{"system", "connection", "add",
+			cmd = []string{
+				"system", "connection", "add",
 				"QA-UDS1",
 				"--socket-path", "/run/user/podman/podman.sock",
 				"unix:///run/podman/podman.sock",
@@ -110,7 +121,8 @@ QA-UDS1 unix:///run/user/podman/podman.sock  false true
 		})
 
 		It("add tcp", func() {
-			cmd := []string{"system", "connection", "add",
+			cmd := []string{
+				"system", "connection", "add",
 				"QA-TCP",
 				"tcp://localhost:8888",
 			}
@@ -125,8 +137,52 @@ QA-UDS1 unix:///run/user/podman/podman.sock  false true
 			Expect(session.OutputToString()).To(Equal("QA-TCP tcp://localhost:8888 true true"))
 		})
 
+		It("add tcp w/ TLS", func() {
+			cmd := []string{
+				"system", "connection", "add",
+				"QA-TCP-TLS",
+				"tcp://localhost:8888",
+				"--tls-ca", "ca.pem",
+			}
+			session := podmanTest.Podman(cmd)
+			session.WaitWithDefaultTimeout()
+			Expect(session).Should(ExitCleanly())
+			Expect(session.Out.Contents()).Should(BeEmpty())
+
+			session = podmanTest.Podman(systemConnectionListTLSCmd)
+			session.WaitWithDefaultTimeout()
+			Expect(session).Should(ExitCleanly())
+			Expect(session.OutputToString()).To(Equal("QA-TCP-TLS tcp://localhost:8888 ca.pem true true"))
+		})
+
+		It("add tcp w/ mTLS", func() {
+			cmd := []string{
+				"system", "connection", "add",
+				"QA-TCP-MTLS",
+				"tcp://localhost:8888",
+				"--tls-ca", "ca.pem",
+				"--tls-cert", "tls.crt",
+				"--tls-key", "tls.key",
+			}
+			session := podmanTest.Podman(cmd)
+			session.WaitWithDefaultTimeout()
+			Expect(session).Should(ExitCleanly())
+			Expect(session.Out.Contents()).Should(BeEmpty())
+
+			session = podmanTest.Podman(systemConnectionListmTLSCmd)
+			session.WaitWithDefaultTimeout()
+			Expect(session).Should(ExitCleanly())
+			Expect(session.OutputToString()).To(Equal("QA-TCP-MTLS tcp://localhost:8888 ca.pem tls.crt tls.key true true"))
+
+			session = podmanTest.Podman(systemConnectionListTLSSpecialValueCmd)
+			session.WaitWithDefaultTimeout()
+			Expect(session).Should(ExitCleanly())
+			Expect(session.Out).Should(Say("Name *URI *Identity *TLSCA *TLSCert *TLSKey *Default *ReadWrite\nQA-TCP-MTLS *tcp://localhost:8888 *ca.pem *tls.crt *tls.key *true *true"))
+		})
+
 		It("add tcp to reverse proxy path", func() {
-			cmd := []string{"system", "connection", "add",
+			cmd := []string{
+				"system", "connection", "add",
 				"QA-TCP-RP",
 				"tcp://localhost:8888/reverse/proxy/path/prefix",
 			}
@@ -142,7 +198,8 @@ QA-UDS1 unix:///run/user/podman/podman.sock  false true
 		})
 
 		It("add to new farm", func() {
-			cmd := []string{"system", "connection", "add",
+			cmd := []string{
+				"system", "connection", "add",
 				"--default",
 				"--identity", "~/.ssh/id_rsa",
 				"--farm", "farm1",
@@ -172,7 +229,8 @@ QA-UDS1 unix:///run/user/podman/podman.sock  false true
 			Expect(session).Should(ExitCleanly())
 			Expect(session.Out.Contents()).Should(ContainSubstring("Farm \"empty-farm\" created"))
 
-			cmd = []string{"system", "connection", "add",
+			cmd = []string{
+				"system", "connection", "add",
 				"--default",
 				"--identity", "~/.ssh/id_rsa",
 				"--farm", "empty-farm",
@@ -195,7 +253,8 @@ QA-UDS1 unix:///run/user/podman/podman.sock  false true
 		})
 
 		It("removing connection should remove from farm also", func() {
-			cmd := []string{"system", "connection", "add",
+			cmd := []string{
+				"system", "connection", "add",
 				"--default",
 				"--identity", "~/.ssh/id_rsa",
 				"--farm", "farm1",
@@ -233,7 +292,8 @@ QA-UDS1 unix:///run/user/podman/podman.sock  false true
 		})
 
 		It("remove", func() {
-			session := podmanTest.Podman([]string{"system", "connection", "add",
+			session := podmanTest.Podman([]string{
+				"system", "connection", "add",
 				"--default",
 				"--identity", "~/.ssh/id_rsa",
 				"QA",
@@ -243,7 +303,7 @@ QA-UDS1 unix:///run/user/podman/podman.sock  false true
 			Expect(session).Should(ExitCleanly())
 
 			// two passes to test that removing non-existent connection is not an error
-			for i := 0; i < 2; i++ {
+			for range 2 {
 				session = podmanTest.Podman([]string{"system", "connection", "remove", "QA"})
 				session.WaitWithDefaultTimeout()
 				Expect(session).Should(ExitCleanly())
@@ -257,7 +317,8 @@ QA-UDS1 unix:///run/user/podman/podman.sock  false true
 		})
 
 		It("remove --all", func() {
-			session := podmanTest.Podman([]string{"system", "connection", "add",
+			session := podmanTest.Podman([]string{
+				"system", "connection", "add",
 				"--default",
 				"--identity", "~/.ssh/id_rsa",
 				"QA",
@@ -280,7 +341,8 @@ QA-UDS1 unix:///run/user/podman/podman.sock  false true
 
 		It("default", func() {
 			for _, name := range []string{"devl", "qe"} {
-				cmd := []string{"system", "connection", "add",
+				cmd := []string{
+					"system", "connection", "add",
 					"--default",
 					"--identity", "~/.ssh/id_rsa",
 					name,
@@ -349,20 +411,39 @@ qe ssh://root@podman.test:2222/run/podman/podman.sock ~/.ssh/id_rsa false true
 			proxy := http.NewServeMux()
 			proxy.Handle(pathPrefix+"/", &httputil.ReverseProxy{
 				Rewrite: func(pr *httputil.ProxyRequest) {
+					defer GinkgoRecover()
 					proxyGotUsed = true
 					pr.Out.URL.Path = strings.TrimPrefix(pr.Out.URL.Path, pathPrefix)
 					pr.Out.URL.RawPath = strings.TrimPrefix(pr.Out.URL.RawPath, pathPrefix)
-					baseURL, _ := url.Parse("http://d")
+					scheme := "http"
+					if podmanTest.RemoteTLSServerCAFile != "" {
+						scheme = "https"
+					}
+					baseURL, err := url.Parse(scheme + "://localhost")
+					Expect(err).ToNot(HaveOccurred())
 					pr.SetURL(baseURL)
 				},
 				Transport: &http.Transport{
-					DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+					DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+						defer GinkgoRecover()
 						By("Proxying to " + podmanTest.RemoteSocket)
 						url, err := url.Parse(podmanTest.RemoteSocket)
 						if err != nil {
 							return nil, err
 						}
-						return (&net.Dialer{}).DialContext(ctx, "unix", url.Path)
+						switch podmanTest.RemoteSocketScheme {
+						case "unix":
+							return (&net.Dialer{}).DialContext(ctx, podmanTest.RemoteSocketScheme, url.Path)
+						case "tcp":
+							return (&net.Dialer{}).DialContext(ctx, podmanTest.RemoteSocketScheme, url.Host)
+						default:
+							Fail("Unexpected remote socket scheme")
+							panic("")
+						}
+					},
+					TLSClientConfig: &tls.Config{
+						RootCAs:      podmanTest.RemoteTLSServerCAPool,
+						Certificates: podmanTest.RemoteTLSClientCerts,
 					},
 				},
 			})
@@ -422,8 +503,14 @@ qe ssh://root@podman.test:2222/run/podman/podman.sock ~/.ssh/id_rsa false true
 		})
 	})
 
-	Context("sshd and API services required", func() {
-		BeforeEach(func() {
+	// Using "Ordered" or tests would concurrently access
+	// the ~/.ssh/know_host file with unexpected results
+	Context("sshd and API services required", Ordered, func() {
+		var khCopyPath, khPath string
+		var u *user.User
+
+		BeforeAll(func() {
+			Skip("FIXME: test assumes local ssh key is setup for the own user")
 			// These tests are unique in as much as they require podman, podman-remote, systemd and sshd.
 			// podman-remote commands will be executed by ginkgo directly.
 			SkipIfContainerized("sshd is not available when running in a container")
@@ -431,12 +518,23 @@ qe ssh://root@podman.test:2222/run/podman/podman.sock ~/.ssh/id_rsa false true
 			SkipIfNotRootless(fmt.Sprintf("FIXME: set up ssh keys when root. uid(%d) euid(%d)", os.Getuid(), os.Geteuid()))
 			SkipIfSystemdNotRunning("cannot test connection heuristic if systemd is not running")
 			SkipIfNotActive("sshd", "cannot test connection heuristic if sshd is not running")
+
+			// If the file ~/.ssh/known_host exists, temporarily remove it so that the tests are deterministics
+			var err error
+			u, err = user.Current()
+			Expect(err).ShouldNot(HaveOccurred())
+			khPath = filepath.Join(u.HomeDir, ".ssh", "known_hosts")
+			khCopyPath = khPath + ".copy"
+			err = os.Rename(khPath, khCopyPath)
+			Expect(err == nil || errors.Is(err, os.ErrNotExist)).To(BeTrue(), fmt.Sprintf("failed to rename %s to %s", khPath, khCopyPath))
+		})
+
+		AfterAll(func() { // codespell:ignore afterall
+			err = os.Rename(khCopyPath, khPath)
+			Expect(err == nil || errors.Is(err, os.ErrNotExist)).To(BeTrue(), fmt.Sprintf("failed to rename %s to %s", khCopyPath, khPath))
 		})
 
 		It("add ssh:// socket path using connection heuristic", func() {
-			u, err := user.Current()
-			Expect(err).ShouldNot(HaveOccurred())
-
 			// Ensure that the remote end uses our built podman
 			if os.Getenv("PODMAN_BINARY") == "" {
 				err = os.Setenv("PODMAN_BINARY", podmanTest.PodmanBinary)
@@ -446,7 +544,6 @@ qe ssh://root@podman.test:2222/run/podman/podman.sock ~/.ssh/id_rsa false true
 					os.Unsetenv("PODMAN_BINARY")
 				}()
 			}
-
 			cmd := exec.Command(podmanTest.RemotePodmanBinary,
 				"system", "connection", "add",
 				"--default",
@@ -487,6 +584,120 @@ qe ssh://root@podman.test:2222/run/podman/podman.sock ~/.ssh/id_rsa false true
 			lsSession.Wait(DefaultWaitTimeout)
 			Expect(lsSession).Should(Exit(0))
 			Expect(string(lsSession.Out.Contents())).To(Equal("QA " + uri.String() + " " + filepath.Join(u.HomeDir, ".ssh", "id_ed25519") + " true true\n"))
+		})
+
+		Describe("add ssh:// with known_hosts", func() {
+			var (
+				initialKnownHostFilesLines map[string][]string
+				currentSSHServerHostname   string
+			)
+
+			BeforeAll(func() {
+				currentSSHServerHostname = "localhost"
+
+				// Retrieve current SSH server first two public keys
+				// with the command `ssh-keyscan localhost`
+				cmd := exec.Command("ssh-keyscan", currentSSHServerHostname)
+				session, err := Start(cmd, GinkgoWriter, GinkgoWriter)
+				Expect(err).ToNot(HaveOccurred(), fmt.Sprintf("`ssh-keyscan %s` failed to execute", currentSSHServerHostname))
+				Eventually(session, DefaultWaitTimeout).Should(Exit(0))
+				Expect(session.Out.Contents()).ShouldNot(BeEmpty(), fmt.Sprintf("`ssh-keyscan %s` output is empty", currentSSHServerHostname))
+				serverKeys := bytes.Split(session.Out.Contents(), []byte("\n"))
+				Expect(len(serverKeys)).Should(BeNumerically(">=", 2), fmt.Sprintf("`ssh-keyscan %s` returned less then 2 keys", currentSSHServerHostname))
+
+				initialKnownHostFilesLines = map[string][]string{
+					"serverFirstKey":   {string(serverKeys[0])},
+					"serverSecondKey":  {string(serverKeys[1])},
+					"fakeKey":          {currentSSHServerHostname + " ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGnBlHlwqleAtyzT01mLa+DXQFyxX8T0oa8odcEZ2/07"},
+					"differentHostKey": {"differentserver ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGnBlHlwqleAtyzT01mLa+DXQFyxX8T0oa8odcEZ2/07"},
+					"empty":            {},
+				}
+			})
+
+			DescribeTable("->",
+				func(label string, shouldFail bool, shouldAddKey bool) {
+					initialKhLines, ok := initialKnownHostFilesLines[label]
+					Expect(ok).To(BeTrue(), fmt.Sprintf("label %q not found in kh", label))
+					// Create known_hosts file if needed
+					if len(initialKhLines) > 0 {
+						khFile, err := os.Create(khPath)
+						Expect(err).ToNot(HaveOccurred(), fmt.Sprintf("failed to create %s", khPath))
+						defer khFile.Close()
+						err = os.WriteFile(khPath, []byte(strings.Join(initialKhLines, "\n")), 0o600)
+						Expect(err).ToNot(HaveOccurred(), fmt.Sprintf("failed to write to %s", khPath))
+					}
+					// Ensure that the remote end uses our built podman
+					if os.Getenv("PODMAN_BINARY") == "" {
+						err = os.Setenv("PODMAN_BINARY", podmanTest.PodmanBinary)
+						Expect(err).ShouldNot(HaveOccurred())
+
+						defer func() {
+							os.Unsetenv("PODMAN_BINARY")
+						}()
+					}
+					// Run podman system connection add
+					cmd := exec.Command(podmanTest.RemotePodmanBinary,
+						"system", "connection", "add",
+						"--default",
+						"--identity", filepath.Join(u.HomeDir, ".ssh", "id_ed25519"),
+						"QA",
+						fmt.Sprintf("ssh://%s@%s", u.Username, currentSSHServerHostname))
+					session, err := Start(cmd, GinkgoWriter, GinkgoWriter)
+					Expect(err).ToNot(HaveOccurred(), fmt.Sprintf("%q failed to execute", podmanTest.RemotePodmanBinary))
+					Expect(session.Out.Contents()).Should(BeEmpty())
+					if shouldFail {
+						Eventually(session, DefaultWaitTimeout).Should(Exit(125))
+						Expect(session.Err.Contents()).ShouldNot(BeEmpty())
+					} else {
+						Eventually(session, DefaultWaitTimeout).Should(Exit(0))
+						Expect(session.Err.Contents()).Should(BeEmpty())
+					}
+					// If the known_hosts file didn't exist, it should
+					// have been created
+					if len(initialKhLines) == 0 {
+						Expect(khPath).To(BeAnExistingFile())
+						defer os.Remove(khPath)
+					}
+					// If the known_hosts file didn't contain the SSH server
+					// public key it should have been added
+					if shouldAddKey {
+						khFileContent, err := os.ReadFile(khPath)
+						Expect(err).ToNot(HaveOccurred())
+						khLines := bytes.Split(khFileContent, []byte("\n"))
+						Expect(len(khLines)).To(BeNumerically(">", len(initialKhLines)))
+					}
+				},
+				Entry(
+					"with a public key of the SSH server that matches the SSH server first key",
+					"serverFirstKey",
+					false,
+					false,
+				),
+				Entry(
+					"with a public key of the SSH server that matches SSH server second key",
+					"serverSecondKey",
+					false,
+					false,
+				),
+				Entry(
+					"with a fake public key of the SSH server that doesn't match any of the SSH server keys (should fail)",
+					"fakeKey",
+					true,
+					false,
+				),
+				Entry(
+					"with no public key for the SSH server (new key should be added)",
+					"differentHostKey",
+					false,
+					true,
+				),
+				Entry(
+					"not existing (should be created and a new key should be added)",
+					"empty",
+					false,
+					true,
+				),
+			)
 		})
 	})
 })

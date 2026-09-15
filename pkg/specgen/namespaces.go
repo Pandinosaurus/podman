@@ -7,17 +7,17 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/containers/common/libnetwork/types"
-	"github.com/containers/common/pkg/cgroups"
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/namespaces"
-	"github.com/containers/podman/v5/pkg/util"
-	"github.com/containers/storage/pkg/fileutils"
-	"github.com/containers/storage/pkg/unshare"
-	storageTypes "github.com/containers/storage/types"
 	spec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/opencontainers/runtime-tools/generate"
+	"go.podman.io/common/libnetwork/types"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/namespaces"
+	"go.podman.io/podman/v6/pkg/rootless"
+	"go.podman.io/podman/v6/pkg/util"
+	"go.podman.io/storage/pkg/fileutils"
+	"go.podman.io/storage/pkg/unshare"
+	storageTypes "go.podman.io/storage/types"
 )
 
 type NamespaceMode string
@@ -45,18 +45,14 @@ const (
 	// be joined.  loopback should still exist.
 	// Only used with the network namespace, invalid otherwise.
 	NoNetwork NamespaceMode = "none"
-	// Bridge indicates that the network backend (CNI/netavark)
+	// Bridge indicates that the network backend (netavark)
 	// should be used.
 	// Only used with the network namespace, invalid otherwise.
 	Bridge NamespaceMode = "bridge"
-	// Slirp indicates that a slirp4netns network stack should
-	// be used.
-	// Only used with the network namespace, invalid otherwise.
-	Slirp NamespaceMode = "slirp4netns"
 	// Pasta indicates that a pasta network stack should be used.
 	// Only used with the network namespace, invalid otherwise.
 	Pasta NamespaceMode = "pasta"
-	// KeepId indicates a user namespace to keep the owner uid inside
+	// KeepID indicates a user namespace to keep the owner uid inside
 	// of the namespace itself.
 	// Only used with the user namespace, invalid otherwise.
 	KeepID NamespaceMode = "keep-id"
@@ -158,8 +154,6 @@ func validateNetNS(n *Namespace) error {
 		return nil
 	}
 	switch n.NSMode {
-	case Slirp:
-		break
 	case Pasta:
 		// Check if we run rootless/in a userns. Do not use rootless.IsRootless() here.
 		// Pasta switches to nobody when running as root which causes it to fail while
@@ -181,8 +175,8 @@ func validateNetNS(n *Namespace) error {
 		if len(n.Value) < 1 {
 			return fmt.Errorf("namespace mode %s requires a value", n.NSMode)
 		}
-	} else if n.NSMode != Slirp {
-		// All others except must NOT set a string value
+	} else {
+		// All others must NOT set a string value
 		if len(n.Value) > 0 {
 			return fmt.Errorf("namespace value %s cannot be provided with namespace mode %s", n.Value, n.NSMode)
 		}
@@ -211,7 +205,7 @@ func (n *Namespace) validate() error {
 	switch n.NSMode {
 	case "", Default, Host, Path, FromContainer, FromPod, Private:
 		// Valid, do nothing
-	case NoNetwork, Bridge, Slirp, Pasta:
+	case NoNetwork, Bridge, Pasta:
 		return errors.New("cannot use network modes with non-network namespace")
 	default:
 		return fmt.Errorf("invalid namespace type %s specified", n.NSMode)
@@ -261,37 +255,25 @@ func ParseNamespace(ns string) (Namespace, error) {
 // ParseCgroupNamespace parses a cgroup namespace specification in string
 // form.
 func ParseCgroupNamespace(ns string) (Namespace, error) {
-	toReturn := Namespace{}
-	// Cgroup is host for v1, private for v2.
-	// We can't trust c/common for this, as it only assumes private.
-	cgroupsv2, err := cgroups.IsCgroup2UnifiedMode()
-	if err != nil {
-		return toReturn, err
+	switch ns {
+	case "host":
+		return Namespace{NSMode: Host}, nil
+	case "private", "":
+		return Namespace{NSMode: Private}, nil
+	default:
+		return Namespace{}, fmt.Errorf("unrecognized cgroup namespace mode %s passed", ns)
 	}
-	if cgroupsv2 {
-		switch ns {
-		case "host":
-			toReturn.NSMode = Host
-		case "private", "":
-			toReturn.NSMode = Private
-		default:
-			return toReturn, fmt.Errorf("unrecognized cgroup namespace mode %s passed", ns)
-		}
-	} else {
-		toReturn.NSMode = Host
-	}
-	return toReturn, nil
 }
 
 // ParseIPCNamespace parses an ipc namespace specification in string
 // form.
 func ParseIPCNamespace(ns string) (Namespace, error) {
 	toReturn := Namespace{}
-	switch {
-	case ns == "shareable", ns == "":
+	switch ns {
+	case "shareable", "":
 		toReturn.NSMode = Shareable
 		return toReturn, nil
-	case ns == "none":
+	case "none":
 		toReturn.NSMode = None
 		return toReturn, nil
 	}
@@ -332,14 +314,14 @@ func ParseUserNamespace(ns string) (Namespace, error) {
 
 // ParseNetworkFlag parses a network string slice into the network options
 // If the input is nil or empty it will use the default setting from containers.conf
-func ParseNetworkFlag(networks []string) (Namespace, map[string]types.PerNetworkOptions, map[string][]string, error) {
+func ParseNetworkFlag(networks []string) (Namespace, map[string]types.PerNetworkOptions, []string, map[string][]string, error) {
 	var networkOptions map[string][]string
 	toReturn := Namespace{}
 	// by default we try to use the containers.conf setting
 	// if we get at least one value use this instead
 	cfg, err := config.Default()
 	if err != nil {
-		return toReturn, nil, nil, err
+		return toReturn, nil, nil, nil, err
 	}
 	ns := cfg.Containers.NetNS
 	if len(networks) > 0 {
@@ -347,15 +329,11 @@ func ParseNetworkFlag(networks []string) (Namespace, map[string]types.PerNetwork
 	}
 
 	podmanNetworks := make(map[string]types.PerNetworkOptions)
+	networkOrder := []string{}
 
 	switch {
-	case ns == string(Slirp), strings.HasPrefix(ns, string(Slirp)+":"):
-		key, options, hasOptions := strings.Cut(ns, ":")
-		if hasOptions {
-			networkOptions = make(map[string][]string)
-			networkOptions[key] = strings.Split(options, ",")
-		}
-		toReturn.NSMode = Slirp
+	case ns == "slirp4netns", strings.HasPrefix(ns, "slirp4netns:"):
+		return toReturn, nil, nil, nil, fmt.Errorf("slirp4netns support has been removed, use --network=pasta instead; for existing containers, run `podman system migrate`")
 	case ns == string(FromPod):
 		toReturn.NSMode = FromPod
 	case ns == "" || ns == string(Default) || ns == string(Private):
@@ -368,12 +346,12 @@ func ParseNetworkFlag(networks []string) (Namespace, map[string]types.PerNetwork
 			var err error
 			netOpts, err = parseBridgeNetworkOptions(options)
 			if err != nil {
-				return toReturn, nil, nil, err
+				return toReturn, nil, nil, nil, err
 			}
 		}
 		// we have to set the special default network name here
 		podmanNetworks["default"] = netOpts
-
+		networkOrder = append(networkOrder, "default")
 	case ns == string(NoNetwork):
 		toReturn.NSMode = NoNetwork
 	case ns == string(Host):
@@ -398,17 +376,19 @@ func ParseNetworkFlag(networks []string) (Namespace, map[string]types.PerNetwork
 		name, options, hasOptions := strings.Cut(ns, ":")
 		if hasOptions {
 			if name == "" {
-				return toReturn, nil, nil, errors.New("network name cannot be empty")
+				return toReturn, nil, nil, nil, errors.New("network name cannot be empty")
 			}
 			netOpts, err := parseBridgeNetworkOptions(options)
 			if err != nil {
-				return toReturn, nil, nil, fmt.Errorf("invalid option for network %s: %w", name, err)
+				return toReturn, nil, nil, nil, fmt.Errorf("invalid option for network %s: %w", name, err)
 			}
+			networkOrder = append(networkOrder, name)
 			podmanNetworks[name] = netOpts
 		} else {
 			// Assume we have been given a comma separated list of networks for backwards compat.
-			networkList := strings.Split(ns, ",")
-			for _, net := range networkList {
+			networkList := strings.SplitSeq(ns, ",")
+			for net := range networkList {
+				networkOrder = append(networkOrder, net)
 				podmanNetworks[net] = types.PerNetworkOptions{}
 			}
 		}
@@ -419,31 +399,39 @@ func ParseNetworkFlag(networks []string) (Namespace, map[string]types.PerNetwork
 
 	if len(networks) > 1 {
 		if !toReturn.IsBridge() {
-			return toReturn, nil, nil, fmt.Errorf("cannot set multiple networks without bridge network mode, selected mode %s: %w", toReturn.NSMode, define.ErrInvalidArg)
+			return toReturn, nil, nil, nil, fmt.Errorf("cannot set multiple networks without bridge network mode, selected mode %s: %w", toReturn.NSMode, define.ErrInvalidArg)
 		}
 
 		for _, network := range networks[1:] {
 			name, options, hasOptions := strings.Cut(network, ":")
 			if name == "" {
-				return toReturn, nil, nil, fmt.Errorf("network name cannot be empty: %w", define.ErrInvalidArg)
+				return toReturn, nil, nil, nil, fmt.Errorf("network name cannot be empty: %w", define.ErrInvalidArg)
 			}
-			if slices.Contains([]string{string(Bridge), string(Slirp), string(Pasta), string(FromPod), string(NoNetwork),
-				string(Default), string(Private), string(Path), string(FromContainer), string(Host)}, name) {
-				return toReturn, nil, nil, fmt.Errorf("can only set extra network names, selected mode %s conflicts with bridge: %w", name, define.ErrInvalidArg)
+			if slices.Contains([]string{
+				string(Bridge), string(Pasta), string(FromPod), string(NoNetwork),
+				string(Default), string(Private), string(Path), string(FromContainer), string(Host),
+			}, name) {
+				return toReturn, nil, nil, nil, fmt.Errorf("can only set extra network names, selected mode %s conflicts with bridge: %w", name, define.ErrInvalidArg)
 			}
 			netOpts := types.PerNetworkOptions{}
 			if hasOptions {
 				var err error
 				netOpts, err = parseBridgeNetworkOptions(options)
 				if err != nil {
-					return toReturn, nil, nil, fmt.Errorf("invalid option for network %s: %w", name, err)
+					return toReturn, nil, nil, nil, fmt.Errorf("invalid option for network %s: %w", name, err)
 				}
 			}
+			networkOrder = append(networkOrder, name)
 			podmanNetworks[name] = netOpts
 		}
 	}
 
-	return toReturn, podmanNetworks, networkOptions, nil
+	// Handle default network cases
+	if (len(podmanNetworks) == 0 || len(podmanNetworks) == 1) && len(networkOrder) == 0 {
+		networkOrder = nil
+	}
+
+	return toReturn, podmanNetworks, networkOrder, networkOptions, nil
 }
 
 func parseBridgeNetworkOptions(opts string) (types.PerNetworkOptions, error) {
@@ -451,8 +439,8 @@ func parseBridgeNetworkOptions(opts string) (types.PerNetworkOptions, error) {
 	if len(opts) == 0 {
 		return netOpts, nil
 	}
-	allopts := strings.Split(opts, ",")
-	for _, opt := range allopts {
+	allopts := strings.SplitSeq(opts, ",")
+	for opt := range allopts {
 		name, value, _ := strings.Cut(opt, "=")
 		switch name {
 		case "ip", "ip6":
@@ -482,7 +470,10 @@ func parseBridgeNetworkOptions(opts string) (types.PerNetworkOptions, error) {
 			netOpts.InterfaceName = value
 
 		default:
-			return netOpts, fmt.Errorf("unknown bridge network option: %s", name)
+			if netOpts.Options == nil {
+				netOpts.Options = make(map[string]string)
+			}
+			netOpts.Options[name] = value
 		}
 	}
 	return netOpts, nil
@@ -499,9 +490,6 @@ func SetupUserNS(idmappings *storageTypes.IDMappingOptions, userns Namespace, g 
 		if err := g.AddOrReplaceLinuxNamespace(string(spec.UserNamespace), userns.Value); err != nil {
 			return user, err
 		}
-		// runc complains if no mapping is specified, even if we join another ns.  So provide a dummy mapping
-		g.AddLinuxUIDMapping(uint32(0), uint32(0), uint32(1))
-		g.AddLinuxGIDMapping(uint32(0), uint32(0), uint32(1))
 	case Host:
 		if err := g.RemoveLinuxNamespace(string(spec.UserNamespace)); err != nil {
 			return user, err
@@ -510,6 +498,9 @@ func SetupUserNS(idmappings *storageTypes.IDMappingOptions, userns Namespace, g 
 		opts, err := namespaces.UsernsMode(userns.String()).GetKeepIDOptions()
 		if err != nil {
 			return user, err
+		}
+		if opts.MaxSize != nil && !rootless.IsRootless() {
+			return user, fmt.Errorf("cannot set max size for user namespace when not running rootless")
 		}
 		mappings, uid, gid, err := util.GetKeepIDMapping(opts)
 		if err != nil {

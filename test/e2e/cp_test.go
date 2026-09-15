@@ -3,14 +3,15 @@
 package integration
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"os/user"
 	"path/filepath"
 
-	. "github.com/containers/podman/v5/test/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	. "go.podman.io/podman/v6/test/utils"
 )
 
 // NOTE: Only smoke tests.  The system tests (i.e., "./test/system/*") take
@@ -18,7 +19,6 @@ import (
 // rather than e2e tests.  System tests are used in RHEL gating.
 
 var _ = Describe("Podman cp", func() {
-
 	// Copy a file to the container, then back to the host and make sure
 	// that the contents match.
 	It("podman cp file", func() {
@@ -28,7 +28,7 @@ var _ = Describe("Podman cp", func() {
 		defer os.Remove(srcFile.Name())
 
 		originalContent := []byte("podman cp file test")
-		err = os.WriteFile(srcFile.Name(), originalContent, 0644)
+		err = os.WriteFile(srcFile.Name(), originalContent, 0o644)
 		Expect(err).ToNot(HaveOccurred())
 
 		// Create a container. NOTE that container mustn't be running for copying.
@@ -72,14 +72,13 @@ var _ = Describe("Podman cp", func() {
 
 	// Copy a file to the container, then back to the host in --pid=host
 	It("podman cp --pid=host file", func() {
-		SkipIfRootlessCgroupsV1("Not supported for rootless + CgroupsV1")
 		srcFile, err := os.CreateTemp("", "")
 		Expect(err).ToNot(HaveOccurred())
 		defer srcFile.Close()
 		defer os.Remove(srcFile.Name())
 
 		originalContent := []byte("podman cp file test")
-		err = os.WriteFile(srcFile.Name(), originalContent, 0644)
+		err = os.WriteFile(srcFile.Name(), originalContent, 0o644)
 		Expect(err).ToNot(HaveOccurred())
 
 		// Create a container. NOTE that container mustn't be running for copying.
@@ -124,7 +123,7 @@ var _ = Describe("Podman cp", func() {
 		defer os.Remove(srcFile.Name())
 
 		originalContent := []byte("podman cp symlink test")
-		err = os.WriteFile(srcFile.Name(), originalContent, 0644)
+		err = os.WriteFile(srcFile.Name(), originalContent, 0o644)
 		Expect(err).ToNot(HaveOccurred())
 
 		session := podmanTest.Podman([]string{"run", "-d", ALPINE, "top"})
@@ -163,7 +162,7 @@ var _ = Describe("Podman cp", func() {
 		defer os.Remove(srcFile.Name())
 
 		originalContent := []byte("podman cp volume")
-		err = os.WriteFile(srcFile.Name(), originalContent, 0644)
+		err = os.WriteFile(srcFile.Name(), originalContent, 0o644)
 		Expect(err).ToNot(HaveOccurred())
 		session := podmanTest.Podman([]string{"volume", "create", "data"})
 		session.WaitWithDefaultTimeout()
@@ -260,5 +259,37 @@ var _ = Describe("Podman cp", func() {
 		Expect(lsOutput).To(ContainSubstring("var"))
 		Expect(lsOutput).To(ContainSubstring("bin"))
 		Expect(lsOutput).To(ContainSubstring("usr"))
+	})
+
+	It("podman cp to volume in container that is not running", func() {
+		volName := "testvol"
+		ctrName := "testctr"
+		imgName := "testimg"
+		ctrVolPath := "/test/"
+
+		dockerfile := fmt.Sprintf(`FROM %s
+RUN mkdir %s
+RUN chown 9999:9999 %s`, ALPINE, ctrVolPath, ctrVolPath)
+
+		podmanTest.BuildImage(dockerfile, imgName, "false")
+
+		srcFile, err := os.CreateTemp("", "")
+		Expect(err).ToNot(HaveOccurred())
+		defer srcFile.Close()
+		defer os.Remove(srcFile.Name())
+
+		_ = podmanTest.PodmanExitCleanly("volume", "create", volName)
+		_ = podmanTest.PodmanExitCleanly("create", "--name", ctrName, "-v", fmt.Sprintf("%s:%s", volName, ctrVolPath), imgName, "sh")
+
+		_ = podmanTest.PodmanExitCleanly("cp", srcFile.Name(), fmt.Sprintf("%s:%s", ctrName, ctrVolPath))
+
+		ls := podmanTest.PodmanExitCleanly("run", "-v", fmt.Sprintf("%s:%s", volName, ctrVolPath), ALPINE, "ls", "-al", ctrVolPath)
+		Expect(ls.OutputToString()).To(ContainSubstring("9999 9999"))
+		Expect(ls.OutputToString()).To(ContainSubstring(filepath.Base(srcFile.Name())))
+
+		// Test for #25585
+		_ = podmanTest.PodmanExitCleanly("rm", ctrName)
+		_ = podmanTest.PodmanExitCleanly("create", "--name", ctrName, "-v", fmt.Sprintf("%s:%s", volName, ctrVolPath), imgName, "sh")
+		_ = podmanTest.PodmanExitCleanly("cp", srcFile.Name(), fmt.Sprintf("%s:%sfile2", ctrName, ctrVolPath))
 	})
 })

@@ -3,13 +3,12 @@
 package integration
 
 import (
-	. "github.com/containers/podman/v5/test/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	. "go.podman.io/podman/v6/test/utils"
 )
 
 var _ = Describe("Podman run entrypoint", func() {
-
 	It("podman run no command, entrypoint, or cmd", func() {
 		dockerfile := `FROM quay.io/libpod/alpine:latest
 ENTRYPOINT []
@@ -18,7 +17,12 @@ CMD []
 		podmanTest.BuildImage(dockerfile, "foobar.com/entrypoint:latest", "false")
 		session := podmanTest.Podman([]string{"run", "foobar.com/entrypoint:latest"})
 		session.WaitWithDefaultTimeout()
-		Expect(session).Should(ExitWithError(126, "open executable: Operation not permitted: OCI permission denied"))
+		if session.ExitCode() == 126 {
+			// special case for crun <= 1.20, remove once a new version is out
+			Expect(session).Should(ExitWithError(126, "open executable: Operation not permitted: OCI permission denied"))
+			return
+		}
+		Expect(session).Should(ExitWithErrorRegex(127, ".*(executable file not found in \\$PATH|cannot find `` in \\$PATH).*: OCI runtime attempted to invoke a command that was not found.*"))
 	})
 
 	It("podman run entrypoint == [\"\"]", func() {

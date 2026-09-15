@@ -3,25 +3,47 @@
 package generate
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path"
 	"strings"
+	"sync"
 
-	"github.com/containers/common/libimage"
-	"github.com/containers/common/pkg/cgroups"
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/podman/v5/libpod"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/rootless"
-	"github.com/containers/podman/v5/pkg/specgen"
-	"github.com/docker/go-units"
 	spec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/opencontainers/runtime-tools/generate"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/libimage"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/rootless"
+	"go.podman.io/podman/v6/pkg/specgen"
 	"golang.org/x/sys/unix"
 )
+
+const devMqueue = "/dev/mqueue"
+
+var isMqueueSupported = sync.OnceValue(func() bool {
+	f, err := os.Open("/proc/filesystems")
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) > 0 && fields[len(fields)-1] == "mqueue" {
+			return true
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		logrus.Warnf("Failed to read /proc/filesystems: %v, assuming mqueue is not supported", err)
+	}
+	return false
+})
 
 func setProcOpts(s *specgen.SpecGenerator, g *generate.Generator) {
 	if s.ProcOpts == nil {
@@ -51,7 +73,7 @@ func canMountSys(isRootless, isNewUserns bool, s *specgen.SpecGenerator) bool {
 	}
 	if isNewUserns {
 		switch s.NetNS.NSMode {
-		case specgen.Slirp, specgen.Pasta, specgen.Private, specgen.NoNetwork, specgen.Bridge:
+		case specgen.Pasta, specgen.Private, specgen.NoNetwork, specgen.Bridge:
 			return true
 		default:
 			return false
@@ -64,11 +86,6 @@ func getCgroupPermissions(unmask []string) string {
 	ro := "ro"
 	rw := "rw"
 	cgroup := "/sys/fs/cgroup"
-
-	cgroupv2, _ := cgroups.IsCgroup2UnifiedMode()
-	if !cgroupv2 {
-		return ro
-	}
 
 	if len(unmask) != 0 && unmask[0] == "ALL" {
 		return rw
@@ -83,7 +100,7 @@ func getCgroupPermissions(unmask []string) string {
 }
 
 // SpecGenToOCI returns the base configuration for the container.
-func SpecGenToOCI(ctx context.Context, s *specgen.SpecGenerator, rt *libpod.Runtime, rtc *config.Config, newImage *libimage.Image, mounts []spec.Mount, pod *libpod.Pod, finalCmd []string, compatibleOptions *libpod.InfraInherit) (*spec.Spec, error) {
+func SpecGenToOCI(_ context.Context, s *specgen.SpecGenerator, rt *libpod.Runtime, rtc *config.Config, newImage *libimage.Image, mounts []spec.Mount, pod *libpod.Pod, finalCmd []string, compatibleOptions *libpod.InfraInherit) (*spec.Spec, error) {
 	cgroupPerm := getCgroupPermissions(s.Unmask)
 
 	g, err := generate.New("linux")
@@ -174,12 +191,15 @@ func SpecGenToOCI(ctx context.Context, s *specgen.SpecGenerator, rt *libpod.Runt
 
 	inUserNS := isRootless || isNewUserns
 
-	if inUserNS && s.IpcNS.IsHost() {
-		g.RemoveMount("/dev/mqueue")
+	// Check /proc/filesystems to see if the kernel supports mqueue.
+	if !isMqueueSupported() {
+		g.RemoveMount(devMqueue)
+	} else if inUserNS && s.IpcNS.IsHost() {
+		g.RemoveMount(devMqueue)
 		devMqueue := spec.Mount{
-			Destination: "/dev/mqueue",
-			Type:        define.TypeBind, // constant ?
-			Source:      "/dev/mqueue",
+			Destination: devMqueue,
+			Type:        define.TypeBind,
+			Source:      devMqueue,
 			Options:     []string{define.TypeBind, "nosuid", "noexec", "nodev"},
 		}
 		g.AddMount(devMqueue)
@@ -256,7 +276,7 @@ func SpecGenToOCI(ctx context.Context, s *specgen.SpecGenerator, rt *libpod.Runt
 	var userDevices []spec.LinuxDevice
 	// add default devices from containers.conf
 	for _, device := range rtc.Containers.Devices.Get() {
-		if err = DevicesFromPath(&g, device); err != nil {
+		if err = DevicesFromPath(&g, device, rtc); err != nil {
 			return nil, err
 		}
 	}
@@ -267,7 +287,7 @@ func SpecGenToOCI(ctx context.Context, s *specgen.SpecGenerator, rt *libpod.Runt
 	}
 	// add default devices specified by caller
 	for _, device := range userDevices {
-		if err = DevicesFromPath(&g, device.Path); err != nil {
+		if err = DevicesFromPath(&g, device.Path, rtc); err != nil {
 			return nil, err
 		}
 	}
@@ -362,44 +382,10 @@ func WeightDevices(wtDevices map[string]spec.LinuxWeightDevice) ([]spec.LinuxWei
 			return nil, fmt.Errorf("failed to inspect '%s' in --blkio-weight-device: %w", k, err)
 		}
 		dev := new(spec.LinuxWeightDevice)
-		dev.Major = (int64(unix.Major(uint64(statT.Rdev)))) //nolint: unconvert
-		dev.Minor = (int64(unix.Minor(uint64(statT.Rdev)))) //nolint: unconvert
+		dev.Major = int64(unix.Major(uint64(statT.Rdev))) //nolint: unconvert
+		dev.Minor = int64(unix.Minor(uint64(statT.Rdev))) //nolint: unconvert
 		dev.Weight = v.Weight
 		devs = append(devs, *dev)
 	}
 	return devs, nil
-}
-
-// subNegativeOne translates Hard or soft limits of -1 to the current
-// processes Max limit
-func subNegativeOne(u spec.POSIXRlimit) spec.POSIXRlimit {
-	if !rootless.IsRootless() ||
-		(int64(u.Hard) != -1 && int64(u.Soft) != -1) {
-		return u
-	}
-
-	ul, err := units.ParseUlimit(fmt.Sprintf("%s=%d:%d", u.Type, int64(u.Soft), int64(u.Hard)))
-	if err != nil {
-		logrus.Warnf("Failed to check %s ulimit %q", u.Type, err)
-		return u
-	}
-	rl, err := ul.GetRlimit()
-	if err != nil {
-		logrus.Warnf("Failed to check %s ulimit %q", u.Type, err)
-		return u
-	}
-
-	var rlimit unix.Rlimit
-
-	if err := unix.Getrlimit(rl.Type, &rlimit); err != nil {
-		logrus.Warnf("Failed to return RLIMIT_NOFILE ulimit %q", err)
-		return u
-	}
-	if int64(u.Hard) == -1 {
-		u.Hard = rlimit.Max
-	}
-	if int64(u.Soft) == -1 {
-		u.Soft = rlimit.Max
-	}
-	return u
 }

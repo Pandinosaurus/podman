@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package infra
 
@@ -8,21 +8,19 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"os/signal"
 	"strings"
 	"sync"
-	"syscall"
 
-	"github.com/containers/common/pkg/cgroups"
-	"github.com/containers/podman/v5/libpod"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/namespaces"
-	"github.com/containers/podman/v5/pkg/rootless"
-	"github.com/containers/podman/v5/pkg/util"
-	"github.com/containers/storage/pkg/idtools"
-	"github.com/containers/storage/types"
 	"github.com/sirupsen/logrus"
 	flag "github.com/spf13/pflag"
+	"go.podman.io/image/v5/pkg/cli/basetls/tlsdetails"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/namespaces"
+	"go.podman.io/podman/v6/pkg/rootless"
+	"go.podman.io/podman/v6/pkg/util"
+	"go.podman.io/storage/pkg/idtools"
+	"go.podman.io/storage/types"
 )
 
 var (
@@ -34,20 +32,22 @@ var (
 )
 
 type engineOpts struct {
-	withFDS  bool
-	reset    bool
-	renumber bool
-	config   *entities.PodmanConfig
+	withFDS     bool
+	reset       bool
+	renumber    bool
+	noBoltError bool
+	config      *entities.PodmanConfig
 }
 
 // GetRuntime generates a new libpod runtime configured by command line options
 func GetRuntime(ctx context.Context, flags *flag.FlagSet, cfg *entities.PodmanConfig) (*libpod.Runtime, error) {
 	runtimeSync.Do(func() {
 		runtimeLib, runtimeErr = getRuntime(ctx, flags, &engineOpts{
-			withFDS:  true,
-			reset:    cfg.IsReset,
-			renumber: cfg.IsRenumber,
-			config:   cfg,
+			withFDS:     true,
+			reset:       cfg.IsReset,
+			renumber:    cfg.IsRenumber,
+			noBoltError: cfg.IsMigrateDB,
+			config:      cfg,
 		})
 	})
 	return runtimeLib, runtimeErr
@@ -134,6 +134,9 @@ func getRuntime(ctx context.Context, fs *flag.FlagSet, opts *engineOpts) (*libpo
 	if opts.renumber {
 		options = append(options, libpod.WithRenumber())
 	}
+	if opts.noBoltError {
+		options = append(options, libpod.WithNoBoltError())
+	}
 
 	if len(cfg.RuntimeFlags) > 0 {
 		runtimeFlags := []string{}
@@ -151,10 +154,6 @@ func getRuntime(ctx context.Context, fs *flag.FlagSet, opts *engineOpts) (*libpo
 	// TODO CLI flags for image config?
 	// TODO CLI flag for signature policy?
 
-	if len(cfg.ContainersConf.Engine.Namespace) > 0 {
-		options = append(options, libpod.WithNamespace(cfg.ContainersConf.Engine.Namespace))
-	}
-
 	if fs.Changed("runtime") {
 		options = append(options, libpod.WithOCIRuntime(cfg.RuntimePath))
 	}
@@ -164,12 +163,6 @@ func getRuntime(ctx context.Context, fs *flag.FlagSet, opts *engineOpts) (*libpo
 	}
 	if fs.Changed("tmpdir") {
 		options = append(options, libpod.WithTmpDir(cfg.ContainersConf.Engine.TmpDir))
-	}
-	if fs.Changed("network-cmd-path") {
-		options = append(options, libpod.WithNetworkCmdPath(cfg.ContainersConf.Engine.NetworkCmdPath))
-	}
-	if fs.Changed("network-backend") {
-		options = append(options, libpod.WithNetworkBackend(cfg.ContainersConf.Network.NetworkBackend))
 	}
 
 	if fs.Changed("events-backend") {
@@ -182,14 +175,6 @@ func getRuntime(ctx context.Context, fs *flag.FlagSet, opts *engineOpts) (*libpo
 
 	if fs.Changed("cgroup-manager") {
 		options = append(options, libpod.WithCgroupManager(cfg.ContainersConf.Engine.CgroupManager))
-	} else {
-		unified, err := cgroups.IsCgroup2UnifiedMode()
-		if err != nil {
-			return nil, err
-		}
-		if rootless.IsRootless() && !unified {
-			options = append(options, libpod.WithCgroupManager("cgroupfs"))
-		}
 	}
 
 	// TODO flag to set libpod static dir?
@@ -207,9 +192,14 @@ func getRuntime(ctx context.Context, fs *flag.FlagSet, opts *engineOpts) (*libpo
 	if fs.Changed("registries-conf") {
 		options = append(options, libpod.WithRegistriesConf(cfg.RegistriesConf))
 	}
+	baseTLSConfig, err := tlsdetails.BaseTLSFromOptionalFile(cfg.TLSDetailsFile)
+	if err != nil {
+		return nil, err
+	}
+	options = append(options, libpod.WithBaseTLSConfig(baseTLSConfig))
 
-	if fs.Changed("db-backend") {
-		options = append(options, libpod.WithDatabaseBackend(cfg.ContainersConf.Engine.DBBackend))
+	if cfg.CdiSpecDirs != nil {
+		options = append(options, libpod.WithCDISpecDirs(cfg.CdiSpecDirs))
 	}
 
 	if cfg.Syslog {
@@ -219,8 +209,6 @@ func getRuntime(ctx context.Context, fs *flag.FlagSet, opts *engineOpts) (*libpo
 	if opts.config.ContainersConfDefaultsRO.Engine.StaticDir != "" {
 		options = append(options, libpod.WithStaticDir(opts.config.ContainersConfDefaultsRO.Engine.StaticDir))
 	}
-
-	// TODO flag to set CNI plugins dir?
 
 	if !opts.withFDS {
 		options = append(options, libpod.WithEnableSDNotify())
@@ -303,25 +291,4 @@ func ParseIDMapping(mode namespaces.UsernsMode, uidMapSlice, gidMapSlice []strin
 		options.HostGIDMapping = false
 	}
 	return &options, nil
-}
-
-// StartWatcher starts a new SIGHUP go routine for the current config.
-func StartWatcher(rt *libpod.Runtime) {
-	// Set up the signal notifier
-	ch := make(chan os.Signal, 1)
-	signal.Notify(ch, syscall.SIGHUP)
-
-	go func() {
-		for {
-			// Block until the signal is received
-			logrus.Debugf("waiting for SIGHUP to reload configuration")
-			<-ch
-			if err := rt.Reload(); err != nil {
-				logrus.Errorf("Unable to reload configuration: %v", err)
-				continue
-			}
-		}
-	}()
-
-	logrus.Debugf("registered SIGHUP watcher for config")
 }

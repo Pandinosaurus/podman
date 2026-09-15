@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package libpod
 
@@ -7,21 +7,23 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
-	"github.com/containers/common/libnetwork/pasta"
-	"github.com/containers/common/libnetwork/types"
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/common/pkg/secrets"
-	"github.com/containers/image/v5/manifest"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/libpod/lock"
-	"github.com/containers/storage"
 	spec "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/libnetwork/pasta"
+	"go.podman.io/common/libnetwork/types"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/common/pkg/secrets"
+	"go.podman.io/image/v5/manifest"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/libpod/lock"
+	"go.podman.io/storage"
 	"golang.org/x/sys/unix"
 )
 
@@ -47,44 +49,38 @@ const (
 	// InvalidNS is an invalid namespace
 	InvalidNS LinuxNS = iota
 	// IPCNS is the IPC namespace
-	IPCNS LinuxNS = iota
+	IPCNS
 	// MountNS is the mount namespace
-	MountNS LinuxNS = iota
+	MountNS
 	// NetNS is the network namespace
-	NetNS LinuxNS = iota
+	NetNS
 	// PIDNS is the PID namespace
-	PIDNS LinuxNS = iota
+	PIDNS
 	// UserNS is the user namespace
-	UserNS LinuxNS = iota
+	UserNS
 	// UTSNS is the UTS namespace
-	UTSNS LinuxNS = iota
+	UTSNS
 	// CgroupNS is the Cgroup namespace
-	CgroupNS LinuxNS = iota
+	CgroupNS
 )
 
 // String returns a string representation of a Linux namespace
 // It is guaranteed to be the name of the namespace in /proc for valid ns types
 func (ns LinuxNS) String() string {
-	switch ns {
-	case InvalidNS:
-		return "invalid"
-	case IPCNS:
-		return "ipc"
-	case MountNS:
-		return "mnt"
-	case NetNS:
-		return "net"
-	case PIDNS:
-		return "pid"
-	case UserNS:
-		return "user"
-	case UTSNS:
-		return "uts"
-	case CgroupNS:
-		return "cgroup"
-	default:
-		return "unknown"
+	s := [...]string{
+		InvalidNS: "invalid",
+		IPCNS:     "ipc",
+		MountNS:   "mnt",
+		NetNS:     "net",
+		PIDNS:     "pid",
+		UserNS:    "user",
+		UTSNS:     "uts",
+		CgroupNS:  "cgroup",
 	}
+	if ns >= 0 && int(ns) < len(s) {
+		return s[ns]
+	}
+	return "unknown"
 }
 
 // Container is a single OCI container.
@@ -112,9 +108,6 @@ type Container struct {
 	runtime    *Runtime
 	ociRuntime OCIRuntime
 
-	rootlessSlirpSyncR *os.File
-	rootlessSlirpSyncW *os.File
-
 	rootlessPortSyncR *os.File
 	rootlessPortSyncW *os.File
 
@@ -126,13 +119,12 @@ type Container struct {
 	// options when calling network setup/teardown. This should be used for
 	// container restore or network reload for example. Leave this nil if
 	// the settings from the container config should be used.
-	perNetworkOpts map[string]types.PerNetworkOptions
+	perNetworkOpts []types.NamedPerNetworkOptions
 
 	// This is true if a container is restored from a checkpoint.
 	restoreFromCheckpoint bool
 
-	slirp4netnsSubnet *net.IPNet
-	pastaResult       *pasta.SetupResult
+	pastaResult *pasta.SetupResult
 }
 
 // ContainerState contains the current state of the container
@@ -151,9 +143,9 @@ type ContainerState struct {
 	// by containers/storage.
 	Mountpoint string `json:"mountPoint,omitempty"`
 	// StartedTime is the time the container was started
-	StartedTime time.Time `json:"startedTime,omitempty"`
+	StartedTime time.Time `json:"startedTime"`
 	// FinishedTime is the time the container finished executing
-	FinishedTime time.Time `json:"finishedTime,omitempty"`
+	FinishedTime time.Time `json:"finishedTime"`
 	// ExitCode is the exit code returned when the container stopped
 	ExitCode int32 `json:"exitCode,omitempty"`
 	// Exited is whether the container has exited
@@ -173,10 +165,6 @@ type ContainerState struct {
 	// ExecSessions contains all exec sessions that are associated with this
 	// container.
 	ExecSessions map[string]*ExecSession `json:"newExecSessions,omitempty"`
-	// LegacyExecSessions are legacy exec sessions from older versions of
-	// Podman.
-	// These are DEPRECATED and will be removed in a future release.
-	LegacyExecSessions map[string]*legacyExecSession `json:"execSessions,omitempty"`
 	// NetNS is the path or name of the NetNS
 	NetNS string `json:"netns,omitempty"`
 	// NetworkStatus contains the network Status for all networks
@@ -194,6 +182,7 @@ type ContainerState struct {
 	BindMounts map[string]string `json:"bindMounts,omitempty"`
 	// StoppedByUser indicates whether the container was stopped by an
 	// explicit call to the Stop() API.
+	// Warning: This field does persist across system reboots.
 	StoppedByUser bool `json:"stoppedByUser,omitempty"`
 	// RestartPolicyMatch indicates whether the conditions for restart
 	// policy have been met.
@@ -221,8 +210,8 @@ type ContainerState struct {
 	// and not delegated to the OCI runtime.
 	ExtensionStageHooks map[string][]spec.Hook `json:"extensionStageHooks,omitempty"`
 
-	// NetInterfaceDescriptions describe the relationship between a CNI
-	// network and an interface names
+	// NetInterfaceDescriptions describe the relationship between a
+	// network and an interface name
 	NetInterfaceDescriptions ContainerNetworkDescriptions `json:"networkDescriptions,omitempty"`
 
 	// Service indicates that container is the service container of a
@@ -235,8 +224,8 @@ type ContainerState struct {
 
 	// Following checkpoint/restore related information is displayed
 	// if the container has been checkpointed or restored.
-	CheckpointedTime time.Time `json:"checkpointedTime,omitempty"`
-	RestoredTime     time.Time `json:"restoredTime,omitempty"`
+	CheckpointedTime time.Time `json:"checkpointedTime"`
+	RestoredTime     time.Time `json:"restoredTime"`
 	CheckpointLog    string    `json:"checkpointLog,omitempty"`
 	CheckpointPath   string    `json:"checkpointPath,omitempty"`
 	RestoreLog       string    `json:"restoreLog,omitempty"`
@@ -257,7 +246,10 @@ type ContainerNamedVolume struct {
 	// This is used for emptyDir volumes from a kube yaml
 	IsAnonymous bool `json:"setAnonymous,omitempty"`
 	// SubPath determines which part of the Source will be mounted in the container
-	SubPath string
+	SubPath string `json:",omitempty"`
+	// NoCreate indicates that the volume must already exist and should not
+	// be created automatically if it doesn't exist.
+	NoCreate bool `json:"noCreate,omitempty"`
 }
 
 // ContainerOverlayVolume is an overlay volume that will be mounted into the
@@ -286,6 +278,33 @@ type ContainerImageVolume struct {
 	SubPath string `json:"subPath,omitempty"`
 }
 
+// ContainerArtifactVolume is a volume based on a artifact. The artifact blobs will
+// be bind mounted directly as files and must always be read only.
+type ContainerArtifactVolume struct {
+	// Source is the name or digest of the artifact that should be mounted
+	Source string `json:"source"`
+	// Dest is the absolute path of the mount in the container.
+	// If path is a file in the container, then the artifact must consist of a single blob.
+	// Otherwise if it is a directory or does not exists all artifact blobs will be mounted
+	// into this path as files. As name the "org.opencontainers.image.title" will be used if
+	// available otherwise the digest is used as name.
+	Dest string `json:"dest"`
+	// Title can be used for multi blob artifacts to only mount the one specific blob that
+	// matches the "org.opencontainers.image.title" annotation.
+	// Optional. Conflicts with Digest.
+	Title string `json:"title"`
+	// Digest can be used to filter a single blob from a multi blob artifact by the given digest.
+	// When this option is set the file name in the container defaults to the digest even when
+	// the title annotation exist.
+	// Optional. Conflicts with Title.
+	Digest string `json:"digest"`
+	// Name is the name that should be used for the path inside the container. When a single blob
+	// is mounted the name is used as is. If multiple blobs are mounted then mount them as
+	// "<name>-x" where x is a 0 indexed integer based on the layer order.
+	// Optional.
+	Name string `json:"name,omitempty"`
+}
+
 // ContainerSecret is a secret that is mounted in a container
 type ContainerSecret struct {
 	// Secret is the secret
@@ -300,7 +319,7 @@ type ContainerSecret struct {
 	Target string
 }
 
-// ContainerNetworkDescriptions describes the relationship between the CNI
+// ContainerNetworkDescriptions describes the relationship between the
 // network and the ethN where N is an integer
 type ContainerNetworkDescriptions map[string]int
 
@@ -370,6 +389,7 @@ func (c *Container) specFromState() (*spec.Spec, error) {
 	returnSpec := c.config.Spec
 
 	if f, err := os.Open(c.state.ConfigPath); err == nil {
+		defer f.Close()
 		returnSpec = new(spec.Spec)
 		content, err := io.ReadAll(f)
 		if err != nil {
@@ -380,7 +400,7 @@ func (c *Container) specFromState() (*spec.Spec, error) {
 			logrus.Warnf("Error unmarshalling container %s config: %v", c.ID(), err)
 			return c.config.Spec, nil
 		}
-	} else if !os.IsNotExist(err) {
+	} else if !errors.Is(err, os.ErrNotExist) {
 		// ignore when the file does not exist
 		return nil, fmt.Errorf("opening container config: %w", err)
 	}
@@ -440,7 +460,7 @@ func (c *Container) StaticDir() string {
 // The name of each is guaranteed to point to a valid libpod Volume present in
 // the state.
 func (c *Container) NamedVolumes() []*ContainerNamedVolume {
-	volumes := []*ContainerNamedVolume{}
+	volumes := make([]*ContainerNamedVolume, 0, len(c.config.NamedVolumes))
 	for _, vol := range c.config.NamedVolumes {
 		newVol := new(ContainerNamedVolume)
 		newVol.Name = vol.Name
@@ -518,12 +538,7 @@ func (c *Container) Dependencies() []string {
 		return []string{}
 	}
 
-	depends := make([]string, 0, len(dependsCtrs))
-	for ctr := range dependsCtrs {
-		depends = append(depends, ctr)
-	}
-
-	return depends
+	return slices.Collect(maps.Keys(dependsCtrs))
 }
 
 // NewNetNS returns whether the container will create a new network namespace
@@ -606,9 +621,7 @@ func (c *Container) Stdin() bool {
 // Labels returns the container's labels
 func (c *Container) Labels() map[string]string {
 	labels := make(map[string]string)
-	for key, value := range c.config.Labels {
-		labels[key] = value
-	}
+	maps.Copy(labels, c.config.Labels)
 	return labels
 }
 
@@ -648,6 +661,19 @@ func (c *Container) LogTag() string {
 	return c.config.LogTag
 }
 
+// LogSizeMax returns the maximum size of the container's log file.
+func (c *Container) LogSizeMax() int64 {
+	if c.config.LogSize > 0 {
+		return c.config.LogSize
+	}
+	return c.runtime.config.Containers.LogSizeMax
+}
+
+// LogLabels returns the labels added to the container's log file
+func (c *Container) LogLabels() map[string]string {
+	return c.config.LogLabels
+}
+
 // RestartPolicy returns the container's restart policy.
 func (c *Container) RestartPolicy() string {
 	return c.config.RestartPolicy
@@ -672,8 +698,12 @@ func (c *Container) RuntimeName() string {
 // Runtime spec accessors
 // Unlocked
 
-// Hostname gets the container's hostname
-func (c *Container) Hostname() string {
+// hostname determines the container's hostname.
+// If 'network' is true and the container isn't running in a
+// private UTS namespoace, an empty string will be returned
+// instead of the host's hostname because we never want to
+// send the host's hostname to a DHCP or DNS server.
+func (c *Container) hostname(network bool) string {
 	if c.config.UTSNsCtr != "" {
 		utsNsCtr, err := c.runtime.GetContainer(c.config.UTSNsCtr)
 		if err != nil {
@@ -683,23 +713,64 @@ func (c *Container) Hostname() string {
 		}
 		return utsNsCtr.Hostname()
 	}
+
 	if c.config.Spec.Hostname != "" {
 		return c.config.Spec.Hostname
 	}
 
-	// if the container is not running in a private UTS namespace,
-	// return the host's hostname.
+	// If the container is not running in a private UTS namespace,
+	// return the host's hostname unless 'network' is true in which
+	// case we return an empty string.
 	privateUTS := c.hasPrivateUTS()
 	if !privateUTS {
 		hostname, err := os.Hostname()
 		if err == nil {
+			if network {
+				return ""
+			}
 			return hostname
 		}
+		logrus.Errorf("unable to get host's hostname for container %s: %v", c.ID(), err)
+		return ""
 	}
+
+	// If container_name_as_hostname is set in the CONTAINERS table in
+	// containers.conf, use a sanitized version of the container's name
+	// as the hostname.  Since the container name must already match
+	// the set '[a-zA-Z0-9][a-zA-Z0-9_.-]*', we can just remove any
+	// underscores and limit it to 64 characters to make it a valid
+	// hostname.
+	if c.runtime.config.Containers.ContainerNameAsHostName {
+		sanitizedHostname := strings.ReplaceAll(c.Name(), "_", "")
+		if len(sanitizedHostname) <= 64 {
+			return sanitizedHostname
+		}
+		return sanitizedHostname[:64]
+	}
+
+	// Otherwise use the container's short ID as the hostname.
 	if len(c.ID()) < 11 {
 		return c.ID()
 	}
 	return c.ID()[:12]
+}
+
+// Hostname gets the container's hostname
+func (c *Container) Hostname() string {
+	return c.hostname(false)
+}
+
+// If the container isn't running in a private UTS namespace, Hostname()
+// will return the host's hostname as the container's hostname. If netavark
+// were to try and obtain a DHCP lease with the host's hostname in an environment
+// where DDNS was active, bad things could happen. NetworkHostname() on the
+// other hand, will return an empty string if the container isn't running
+// in a private UTS namespace.
+//
+// This function should only be used to populate the ContainerHostname member
+// of the common.libnetwork.types.NetworkOptions struct.
+func (c *Container) NetworkHostname() string {
+	return c.hostname(true)
 }
 
 // WorkingDir returns the containers working dir
@@ -966,9 +1037,7 @@ func (c *Container) BindMounts() (map[string]string, error) {
 
 	newMap := make(map[string]string, len(c.state.BindMounts))
 
-	for key, val := range c.state.BindMounts {
-		newMap[key] = val
-	}
+	maps.Copy(newMap, c.state.BindMounts)
 
 	return newMap, nil
 }
@@ -1007,7 +1076,7 @@ func (c *Container) StartupHCPassed() (bool, error) {
 
 // NamespacePath returns the path of one of the container's namespaces
 // If the container is not running, an error will be returned
-func (c *Container) NamespacePath(linuxNS LinuxNS) (string, error) { //nolint:interfacer
+func (c *Container) NamespacePath(linuxNS LinuxNS) (string, error) {
 	if !c.batched {
 		c.lock.Lock()
 		defer c.lock.Unlock()
@@ -1021,7 +1090,7 @@ func (c *Container) NamespacePath(linuxNS LinuxNS) (string, error) { //nolint:in
 
 // namespacePath returns the path of one of the container's namespaces
 // If the container is not running, an error will be returned
-func (c *Container) namespacePath(linuxNS LinuxNS) (string, error) { //nolint:interfacer
+func (c *Container) namespacePath(linuxNS LinuxNS) (string, error) {
 	if c.state.State != define.ContainerStateRunning && c.state.State != define.ContainerStatePaused {
 		return "", fmt.Errorf("cannot get namespace path unless container %s is running: %w", c.ID(), define.ErrCtrStopped)
 	}
@@ -1056,53 +1125,23 @@ func (c *Container) CgroupPath() (string, error) {
 	return c.cGroupPath()
 }
 
-// cGroupPath returns a cgroups "path" for the given container.
-// Note that the container must be running.  Otherwise, an error
-// is returned.
-// NOTE: only call this when owning the container's lock.
-func (c *Container) cGroupPath() (string, error) {
-	if c.config.NoCgroups || c.config.CgroupsMode == "disabled" {
-		return "", fmt.Errorf("this container is not creating cgroups: %w", define.ErrNoCgroups)
-	}
-	if c.state.State != define.ContainerStateRunning && c.state.State != define.ContainerStatePaused {
-		return "", fmt.Errorf("cannot get cgroup path unless container %s is running: %w", c.ID(), define.ErrCtrStopped)
-	}
-
-	// Read /proc/{PID}/cgroup and find the *longest* cgroup entry.  That's
-	// needed to account for hacks in cgroups v1, where each line in the
-	// file could potentially point to a cgroup.  The longest one, however,
-	// is the libpod-specific one we're looking for.
-	//
-	// See #8397 on the need for the longest-path look up.
-	//
-	// And another workaround for containers running systemd as the payload.
-	// containers running systemd moves themselves into a child subgroup of
-	// the named systemd cgroup hierarchy.  Ignore any named cgroups during
-	// the lookup.
-	// See #10602 for more details.
-	procPath := fmt.Sprintf("/proc/%d/cgroup", c.state.PID)
-	lines, err := os.ReadFile(procPath)
-	if err != nil {
-		// If the file doesn't exist, it means the container could have been terminated
-		// so report it.  Also check for ESRCH, which means the container could have been
-		// terminated after the file under /proc was opened but before it was read.
-		if errors.Is(err, os.ErrNotExist) || errors.Is(err, unix.ESRCH) {
-			return "", fmt.Errorf("cannot get cgroup path unless container %s is running: %w", c.ID(), define.ErrCtrStopped)
-		}
-		return "", err
-	}
-
+// parseCgroupPath parses the contents of a /proc/<pid>/cgroup file and returns
+// the longest cgroup path found.  The longest path is used to account for
+// cgroups v1 hierarchies (see #8397).  Named cgroups (e.g., name=systemd) are
+// ignored to work around containers running systemd as payload (see #10602).
+func parseCgroupPath(procCgroupData []byte) (string, error) {
 	var cgroupPath string
-	for _, line := range bytes.Split(lines, []byte("\n")) {
+
+	for line := range bytes.SplitSeq(procCgroupData, []byte("\n")) {
 		// skip last empty line
 		if len(line) == 0 {
 			continue
 		}
 		// cgroups(7) nails it down to three fields with the 3rd
 		// pointing to the cgroup's path which works both on v1 and v2.
-		fields := bytes.Split(line, []byte(":"))
+		fields := bytes.SplitN(line, []byte(":"), 3)
 		if len(fields) != 3 {
-			logrus.Debugf("Error parsing cgroup: expected 3 fields but got %d: %s", len(fields), procPath)
+			logrus.Debugf("Error parsing cgroup: expected 3 fields but got %d: %q", len(fields), line)
 			continue
 		}
 		// Ignore named cgroups like name=systemd.
@@ -1116,7 +1155,40 @@ func (c *Container) cGroupPath() (string, error) {
 	}
 
 	if len(cgroupPath) == 0 {
-		return "", fmt.Errorf("could not find any cgroup in %q", procPath)
+		return "", fmt.Errorf("could not find any cgroup path")
+	}
+	return cgroupPath, nil
+}
+
+// cGroupPath returns a cgroups "path" for the given container.
+// Note that the container must be running.  Otherwise, an error
+// is returned.
+// NOTE: only call this when owning the container's lock.
+func (c *Container) cGroupPath() (string, error) {
+	if c.config.NoCgroups || c.config.CgroupsMode == "disabled" {
+		return "", fmt.Errorf("this container is not creating cgroups: %w", define.ErrNoCgroups)
+	}
+	if c.state.State != define.ContainerStateRunning && c.state.State != define.ContainerStatePaused {
+		return "", fmt.Errorf("cannot get cgroup path unless container %s is running: %w", c.ID(), define.ErrCtrStopped)
+	}
+
+	// Parse the cgroup file to find the container's cgroup path.
+	// See parseCgroupPath for details on the lookup heuristics.
+	procPath := fmt.Sprintf("/proc/%d/cgroup", c.state.PID)
+	lines, err := os.ReadFile(procPath)
+	if err != nil {
+		// If the file doesn't exist, it means the container could have been terminated
+		// so report it.  Also check for ESRCH, which means the container could have been
+		// terminated after the file under /proc was opened but before it was read.
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, unix.ESRCH) {
+			return "", fmt.Errorf("cannot get cgroup path unless container %s is running: %w", c.ID(), define.ErrCtrStopped)
+		}
+		return "", err
+	}
+
+	cgroupPath, err := parseCgroupPath(lines)
+	if err != nil {
+		return "", fmt.Errorf("%w in %q", err, procPath)
 	}
 
 	cgroupManager := c.CgroupManager()
@@ -1205,6 +1277,11 @@ func (c *Container) IsInfra() bool {
 	return c.config.IsInfra
 }
 
+// IsDefaultInfra returns whether the container is a default infra container generated directly by podman
+func (c *Container) IsDefaultInfra() bool {
+	return c.config.IsDefaultInfra
+}
+
 // IsInitCtr returns whether the container is an init container
 func (c *Container) IsInitCtr() bool {
 	return len(c.config.InitContainerType) > 0
@@ -1228,7 +1305,16 @@ func (c *Container) NetworkDisabled() (bool, error) {
 }
 
 func (c *Container) HostNetwork() bool {
-	if c.config.CreateNetNS || c.config.NetNsCtr != "" {
+	// If container shares network namespace with another container, check that container
+	if c.config.NetNsCtr != "" {
+		netNsCtr, err := c.runtime.state.Container(c.config.NetNsCtr)
+		if err != nil {
+			return false
+		}
+		return netNsCtr.HostNetwork()
+	}
+
+	if c.config.CreateNetNS {
 		return false
 	}
 	if c.config.Spec.Linux != nil {
@@ -1244,12 +1330,46 @@ func (c *Container) HostNetwork() bool {
 // HasHealthCheck returns bool as to whether there is a health check
 // defined for the container
 func (c *Container) HasHealthCheck() bool {
-	return c.config.HealthCheckConfig != nil
+	// Consider a healthcheck present only when a HealthCheckConfig exists
+	// and the Test field contains a meaningful command. Treat an empty
+	// Test slice or the special ["NONE"] sentinel as "no healthcheck".
+	if c.config.HealthCheckConfig == nil {
+		return false
+	}
+	test := c.config.HealthCheckConfig.Test
+	if len(test) == 0 {
+		return false
+	}
+	if len(test) == 1 && strings.ToUpper(test[0]) == define.HealthConfigTestNone {
+		return false
+	}
+	return true
 }
 
 // HealthCheckConfig returns the command and timing attributes of the health check
 func (c *Container) HealthCheckConfig() *manifest.Schema2HealthConfig {
 	return c.config.HealthCheckConfig
+}
+
+func (c *Container) HealthCheckLogDestination() string {
+	if c.config.HealthLogDestination == nil {
+		return define.DefaultHealthCheckLocalDestination
+	}
+	return *c.config.HealthLogDestination
+}
+
+func (c *Container) HealthCheckMaxLogCount() uint {
+	if c.config.HealthMaxLogCount == nil {
+		return define.DefaultHealthMaxLogCount
+	}
+	return *c.config.HealthMaxLogCount
+}
+
+func (c *Container) HealthCheckMaxLogSize() uint {
+	if c.config.HealthMaxLogSize == nil {
+		return define.DefaultHealthMaxLogSize
+	}
+	return *c.config.HealthMaxLogSize
 }
 
 // AutoRemove indicates whether the container will be removed after it is executed
@@ -1309,8 +1429,8 @@ func (c *Container) Networks() ([]string, error) {
 
 	names := make([]string, 0, len(networks))
 
-	for name := range networks {
-		names = append(names, name)
+	for _, net := range networks {
+		names = append(names, net.Name)
 	}
 
 	return names, nil
@@ -1325,7 +1445,7 @@ func (c *Container) NetworkMode() string {
 	switch {
 	case c.config.CreateNetNS:
 		// We actually store the network
-		// mode for Slirp and Bridge, so
+		// mode for Pasta and Bridge, so
 		// we can just use that
 		networkMode = string(c.config.NetMode)
 	case c.config.NetNsCtr != "":
@@ -1335,18 +1455,20 @@ func (c *Container) NetworkMode() string {
 		// If there is none, it's host networking.
 		// If there is one and it has a path, it's "ns:".
 		foundNetNS := false
-		for _, ns := range ctrSpec.Linux.Namespaces {
-			if ns.Type == spec.NetworkNamespace {
-				foundNetNS = true
-				if ns.Path != "" {
-					networkMode = fmt.Sprintf("ns:%s", ns.Path)
-				} else {
-					// We're making a network ns,  but not
-					// configuring with Slirp or CNI. That
-					// means it's --net=none
-					networkMode = "none"
+		if ctrSpec.Linux != nil {
+			for _, ns := range ctrSpec.Linux.Namespaces {
+				if ns.Type == spec.NetworkNamespace {
+					foundNetNS = true
+					if ns.Path != "" {
+						networkMode = fmt.Sprintf("ns:%s", ns.Path)
+					} else {
+						// We're making a network ns, but not
+						// configuring networking. That means
+						// it's --net=none
+						networkMode = "none"
+					}
+					break
 				}
-				break
 			}
 		}
 		if !foundNetNS {
@@ -1357,18 +1479,8 @@ func (c *Container) NetworkMode() string {
 }
 
 // Unlocked accessor for networks
-func (c *Container) networks() (map[string]types.PerNetworkOptions, error) {
+func (c *Container) networks() ([]types.NamedPerNetworkOptions, error) {
 	return c.runtime.state.GetNetworks(c)
-}
-
-// getInterfaceByName returns a formatted interface name for a given
-// network along with a bool as to whether the network existed
-func (d ContainerNetworkDescriptions) getInterfaceByName(networkName string) (string, bool) {
-	val, exists := d[networkName]
-	if !exists {
-		return "", exists
-	}
-	return fmt.Sprintf("eth%d", val), exists
 }
 
 // GetNetworkStatus returns the current network status for this container.

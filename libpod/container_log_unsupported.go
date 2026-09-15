@@ -1,4 +1,4 @@
-//go:build !remote && (!linux || !systemd)
+//go:build !remote && ((linux && !systemd) || freebsd)
 
 package libpod
 
@@ -6,8 +6,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/libpod/logs"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/libpod/logs"
 )
 
 func (c *Container) readFromJournal(_ context.Context, _ *logs.LogOptions, _ chan *logs.LogLine, _ int64, _ string) error {

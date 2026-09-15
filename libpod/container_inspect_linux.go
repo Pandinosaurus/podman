@@ -7,14 +7,13 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/util"
+	"github.com/moby/sys/capability"
 	spec "github.com/opencontainers/runtime-spec/specs-go"
-	"github.com/opencontainers/runtime-tools/generate"
-	"github.com/opencontainers/runtime-tools/validate/capabilities"
 	"github.com/sirupsen/logrus"
-	"github.com/syndtr/gocapability/capability"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/util"
+	"go.podman.io/storage/types"
 )
 
 func (c *Container) platformInspectContainerHostConfig(ctrSpec *spec.Spec, hostConfig *define.InspectContainerHostConfig) error {
@@ -62,17 +61,15 @@ func (c *Container) platformInspectContainerHostConfig(ctrSpec *spec.Spec, hostC
 					hostConfig.MemorySwap = *ctrSpec.Linux.Resources.Memory.Swap
 				}
 				if ctrSpec.Linux.Resources.Memory.Swappiness != nil {
-					hostConfig.MemorySwappiness = int64(*ctrSpec.Linux.Resources.Memory.Swappiness)
-				} else {
-					// Swappiness has a default of -1
-					hostConfig.MemorySwappiness = -1
+					swappiness := int64(*ctrSpec.Linux.Resources.Memory.Swappiness)
+					hostConfig.MemorySwappiness = &swappiness
 				}
 				if ctrSpec.Linux.Resources.Memory.DisableOOMKiller != nil {
 					hostConfig.OomKillDisable = *ctrSpec.Linux.Resources.Memory.DisableOOMKiller
 				}
 			}
-			if ctrSpec.Linux.Resources.Pids != nil {
-				hostConfig.PidsLimit = ctrSpec.Linux.Resources.Pids.Limit
+			if ctrSpec.Linux.Resources.Pids != nil && ctrSpec.Linux.Resources.Pids.Limit != nil {
+				hostConfig.PidsLimit = *ctrSpec.Linux.Resources.Pids.Limit
 			}
 			hostConfig.CgroupConf = ctrSpec.Linux.Resources.Unified
 			if ctrSpec.Linux.Resources.BlockIO != nil {
@@ -90,7 +87,7 @@ func (c *Container) platformInspectContainerHostConfig(ctrSpec *spec.Spec, hostC
 						continue
 					}
 					if deviceNodes == nil {
-						nodes, err := util.FindDeviceNodes()
+						nodes, err := util.FindDeviceNodes(true)
 						if err != nil {
 							return err
 						}
@@ -152,15 +149,8 @@ func (c *Container) platformInspectContainerHostConfig(ctrSpec *spec.Spec, hostC
 				boundingCaps[cap] = true
 			}
 		} else {
-			g, err := generate.New("linux")
-			if err != nil {
-				return err
-			}
 			// If we are privileged, use all caps.
-			for _, cap := range capability.List() {
-				if g.HostSpecific && cap > capabilities.LastCap() {
-					continue
-				}
+			for _, cap := range capability.ListKnown() {
 				boundingCaps[fmt.Sprintf("CAP_%s", strings.ToUpper(cap.String()))] = true
 			}
 		}
@@ -302,6 +292,13 @@ func (c *Container) platformInspectContainerHostConfig(ctrSpec *spec.Spec, hostC
 				}
 			}
 		}
+
+		// If userns=auto, setting up the namespace is deferred until the container
+		// is created. If the container is configured, check if it is going to have a
+		// private userns and return accordingly
+		if c.state.State == define.ContainerStateConfigured && c.config.IDMappings.AutoUserNs {
+			usernsMode = "private"
+		}
 	}
 	hostConfig.UsernsMode = usernsMode
 	if c.config.IDMappings.UIDMap != nil && c.config.IDMappings.GIDMap != nil {
@@ -317,4 +314,38 @@ func (c *Container) platformInspectContainerHostConfig(ctrSpec *spec.Spec, hostC
 	}
 
 	return nil
+}
+
+func generateIDMappings(idMappings types.IDMappingOptions) *define.InspectIDMappings {
+	var inspectMappings define.InspectIDMappings
+	for _, uid := range idMappings.UIDMap {
+		inspectMappings.UIDMap = append(inspectMappings.UIDMap, fmt.Sprintf("%d:%d:%d", uid.ContainerID, uid.HostID, uid.Size))
+	}
+	for _, gid := range idMappings.GIDMap {
+		inspectMappings.GIDMap = append(inspectMappings.GIDMap, fmt.Sprintf("%d:%d:%d", gid.ContainerID, gid.HostID, gid.Size))
+	}
+	return &inspectMappings
+}
+
+// Return true if the container is running in the host's PID NS.
+func (c *Container) inHostPidNS() (bool, error) {
+	if c.config.PIDNsCtr != "" {
+		return false, nil
+	}
+	ctrSpec, err := c.specFromState()
+	if err != nil {
+		return false, err
+	}
+	if ctrSpec.Linux != nil {
+		// Locate the spec's PID namespace.
+		// If there is none, it's pid=host.
+		// If there is one and it has a path, it's "ns:".
+		// If there is no path, it's default - the empty string.
+		for _, ns := range ctrSpec.Linux.Namespaces {
+			if ns.Type == spec.PIDNamespace {
+				return false, nil
+			}
+		}
+	}
+	return true, nil
 }

@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package generate
 
@@ -7,21 +7,23 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/containers/common/libimage"
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/podman/v5/libpod"
-	"github.com/containers/podman/v5/libpod/define"
-	ann "github.com/containers/podman/v5/pkg/annotations"
-	envLib "github.com/containers/podman/v5/pkg/env"
-	"github.com/containers/podman/v5/pkg/signal"
-	"github.com/containers/podman/v5/pkg/specgen"
 	"github.com/openshift/imagebuilder"
-	"github.com/sirupsen/logrus"
+	"go.podman.io/common/libimage"
+	"go.podman.io/common/libnetwork/types"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/image/v5/manifest"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/libpod/define"
+	ann "go.podman.io/podman/v6/pkg/annotations"
+	envLib "go.podman.io/podman/v6/pkg/env"
+	"go.podman.io/podman/v6/pkg/signal"
+	"go.podman.io/podman/v6/pkg/specgen"
 )
 
 func getImageFromSpec(ctx context.Context, r *libpod.Runtime, s *specgen.SpecGenerator) (*libimage.Image, string, *libimage.ImageData, error) {
@@ -61,6 +63,81 @@ func getImageFromSpec(ctx context.Context, r *libpod.Runtime, s *specgen.SpecGen
 	return image, resolvedName, inspectData, err
 }
 
+func applyHealthCheckOverrides(s *specgen.SpecGenerator, healthCheckFromImage *manifest.Schema2HealthConfig) error {
+	overrideHealthCheckConfig := s.HealthConfig
+	s.HealthConfig = healthCheckFromImage
+
+	if s.HealthConfig == nil {
+		return nil
+	}
+
+	if overrideHealthCheckConfig != nil {
+		if overrideHealthCheckConfig.Interval != 0 {
+			s.HealthConfig.Interval = overrideHealthCheckConfig.Interval
+		}
+		if overrideHealthCheckConfig.Retries != 0 {
+			s.HealthConfig.Retries = overrideHealthCheckConfig.Retries
+		}
+		if overrideHealthCheckConfig.Timeout != 0 {
+			s.HealthConfig.Timeout = overrideHealthCheckConfig.Timeout
+		}
+		if overrideHealthCheckConfig.StartPeriod != 0 {
+			s.HealthConfig.StartPeriod = overrideHealthCheckConfig.StartPeriod
+		}
+		if overrideHealthCheckConfig.StartInterval != 0 {
+			s.HealthConfig.StartInterval = overrideHealthCheckConfig.StartInterval
+		}
+	}
+
+	disableInterval := false
+	if s.HealthConfig.Interval < 0 {
+		s.HealthConfig.Interval = 0
+		disableInterval = true
+	}
+
+	// NOTE: Zero means inherit.
+	if s.HealthConfig.Timeout == 0 {
+		hct, err := time.ParseDuration(define.DefaultHealthCheckTimeout)
+		if err != nil {
+			return err
+		}
+		s.HealthConfig.Timeout = hct
+	}
+	if s.HealthConfig.Interval == 0 && !disableInterval {
+		hct, err := time.ParseDuration(define.DefaultHealthCheckInterval)
+		if err != nil {
+			return err
+		}
+		s.HealthConfig.Interval = hct
+	}
+
+	if s.HealthConfig.Retries == 0 {
+		s.HealthConfig.Retries = int(define.DefaultHealthCheckRetries)
+	}
+
+	if s.HealthConfig.StartPeriod == 0 {
+		hct, err := time.ParseDuration(define.DefaultHealthCheckStartPeriod)
+		if err != nil {
+			return err
+		}
+		s.HealthConfig.StartPeriod = hct
+	}
+
+	return nil
+}
+
+func ParseImageEnvs(imageEnvs []string) (map[string]string, error) {
+	envs := make(map[string]string, len(imageEnvs))
+	for _, env := range imageEnvs {
+		key, val, hasValue := strings.Cut(env, "=")
+		if !hasValue || key == "" {
+			return nil, fmt.Errorf("invalid image env variable %q", env)
+		}
+		envs[key] = val
+	}
+	return envs, nil
+}
+
 // Fill any missing parts of the spec generator (e.g. from the image).
 // Returns a set of warnings or any fatal error that occurred.
 func CompleteSpec(ctx context.Context, r *libpod.Runtime, s *specgen.SpecGenerator) ([]string, error) {
@@ -70,25 +147,9 @@ func CompleteSpec(ctx context.Context, r *libpod.Runtime, s *specgen.SpecGenerat
 		return nil, err
 	}
 	if inspectData != nil {
-		if s.HealthConfig == nil {
-			// NOTE: the health check is only set for Docker images
-			// but inspect will take care of it.
-			s.HealthConfig = inspectData.HealthCheck
-			if s.HealthConfig != nil {
-				if s.HealthConfig.Timeout == 0 {
-					hct, err := time.ParseDuration(define.DefaultHealthCheckTimeout)
-					if err != nil {
-						return nil, err
-					}
-					s.HealthConfig.Timeout = hct
-				}
-				if s.HealthConfig.Interval == 0 {
-					hct, err := time.ParseDuration(define.DefaultHealthCheckInterval)
-					if err != nil {
-						return nil, err
-					}
-					s.HealthConfig.Interval = hct
-				}
+		if s.HealthConfig == nil || len(s.HealthConfig.Test) == 0 {
+			if err := applyHealthCheckOverrides(s, inspectData.HealthCheck); err != nil {
+				return nil, err
 			}
 		}
 
@@ -122,15 +183,14 @@ func CompleteSpec(ctx context.Context, r *libpod.Runtime, s *specgen.SpecGenerat
 	if err != nil {
 		return nil, fmt.Errorf("parsing fields in containers.conf: %w", err)
 	}
-	var envs map[string]string
 
 	// Image Environment defaults
 	if inspectData != nil {
 		// Image envs from the image if they don't exist
 		// already, overriding the default environments
-		envs, err = envLib.ParseSlice(inspectData.Config.Env)
+		envs, err := ParseImageEnvs(inspectData.Config.Env)
 		if err != nil {
-			return nil, fmt.Errorf("env fields from image failed to parse: %w", err)
+			return nil, err
 		}
 		defaultEnvs = envLib.Join(envLib.DefaultEnvVariables(), envLib.Join(defaultEnvs, envs))
 	}
@@ -249,9 +309,7 @@ func CompleteSpec(ctx context.Context, r *libpod.Runtime, s *specgen.SpecGenerat
 		annotations[k] = v
 	}
 	// now pass in the values from client
-	for k, v := range s.Annotations {
-		annotations[k] = v
-	}
+	maps.Copy(annotations, s.Annotations)
 	s.Annotations = annotations
 
 	if len(s.SeccompProfilePath) < 1 {
@@ -262,7 +320,7 @@ func CompleteSpec(ctx context.Context, r *libpod.Runtime, s *specgen.SpecGenerat
 		s.SeccompProfilePath = p
 	}
 
-	if len(s.User) == 0 && inspectData != nil {
+	if len(s.User) == 0 && inspectData != nil && !s.UserNS.IsKeepID() {
 		s.User = inspectData.Config.User
 	}
 	// Unless already set via the CLI, check if we need to disable process
@@ -287,15 +345,15 @@ func CompleteSpec(ctx context.Context, r *libpod.Runtime, s *specgen.SpecGenerat
 	if len(s.LogConfiguration.Driver) < 1 {
 		s.LogConfiguration.Driver = rtc.Containers.LogDriver
 	}
+	if len(s.LogConfiguration.Path) < 1 {
+		s.LogConfiguration.Path = rtc.Containers.LogPath
+	}
 	if len(rtc.Containers.LogTag) > 0 {
-		if s.LogConfiguration.Driver != define.JSONLogging {
-			if s.LogConfiguration.Options == nil {
-				s.LogConfiguration.Options = make(map[string]string)
-			}
-
+		if s.LogConfiguration.Options == nil {
+			s.LogConfiguration.Options = make(map[string]string)
+		}
+		if _, exists := s.LogConfiguration.Options["tag"]; !exists {
 			s.LogConfiguration.Options["tag"] = rtc.Containers.LogTag
-		} else {
-			logrus.Warnf("log_tag %q is not allowed with %q log_driver", rtc.Containers.LogTag, define.JSONLogging)
 		}
 	}
 
@@ -304,11 +362,13 @@ func CompleteSpec(ctx context.Context, r *libpod.Runtime, s *specgen.SpecGenerat
 		return warnings, err
 	}
 
-	// Warn on net=host/container/pod/none and port mappings.
-	if (s.NetNS.NSMode == specgen.Host || s.NetNS.NSMode == specgen.FromContainer ||
-		s.NetNS.NSMode == specgen.FromPod || s.NetNS.NSMode == specgen.NoNetwork) &&
-		len(s.PortMappings) > 0 {
-		warnings = append(warnings, "Port mappings have been discarded as one of the Host, Container, Pod, and None network modes are in use")
+	// Warn if NetNS mode is not compatible with PorMappings
+	if len(s.PortMappings) > 0 {
+		nsMode := s.NetNS.NSMode
+		if nsMode != "" && !isPortMappingCompatibleNetNSMode(nsMode) {
+			warnings = append(warnings,
+				fmt.Sprintf("Port mappings have been discarded because \"%s\" network namespace mode does not support them", nsMode))
+		}
 	}
 
 	if len(s.ImageVolumeMode) == 0 {
@@ -331,9 +391,11 @@ func ConfigToSpec(rt *libpod.Runtime, specg *specgen.SpecGenerator, containerID 
 
 	tmpSystemd := conf.Systemd
 	tmpMounts := conf.Mounts
+	tmpEnvSecrets := conf.EnvSecrets
 
 	conf.Systemd = nil
 	conf.Mounts = []string{}
+	conf.EnvSecrets = nil
 
 	if specg == nil {
 		specg = &specgen.SpecGenerator{}
@@ -353,6 +415,7 @@ func ConfigToSpec(rt *libpod.Runtime, specg *specgen.SpecGenerator, containerID 
 
 	conf.Systemd = tmpSystemd
 	conf.Mounts = tmpMounts
+	conf.EnvSecrets = tmpEnvSecrets
 
 	if conf.Spec != nil {
 		if conf.Spec.Linux != nil && conf.Spec.Linux.Resources != nil {
@@ -395,21 +458,6 @@ func ConfigToSpec(rt *libpod.Runtime, specg *specgen.SpecGenerator, containerID 
 					specg.Expose = toExpose
 					specg.PortMappings = conf.PortMappings
 					specg.NetNS = specgen.Namespace{NSMode: specgen.Bridge}
-				case conf.NetMode.IsSlirp4netns():
-					toExpose := make(map[uint16]string, len(conf.ExposedPorts))
-					for _, expose := range []map[uint16][]string{conf.ExposedPorts} {
-						for port, proto := range expose {
-							toExpose[port] = strings.Join(proto, ",")
-						}
-					}
-					specg.Expose = toExpose
-					specg.PortMappings = conf.PortMappings
-					netMode := strings.Split(string(conf.NetMode), ":")
-					var val string
-					if len(netMode) > 1 {
-						val = netMode[1]
-					}
-					specg.NetNS = specgen.Namespace{NSMode: specgen.Slirp, Value: val}
 				case conf.NetMode.IsPrivate():
 					specg.NetNS = specgen.Namespace{NSMode: specgen.Private}
 				case conf.NetMode.IsDefault():
@@ -444,9 +492,35 @@ func ConfigToSpec(rt *libpod.Runtime, specg *specgen.SpecGenerator, containerID 
 		}
 	}
 
-	specg.HealthLogDestination = conf.HealthLogDestination
-	specg.HealthMaxLogCount = conf.HealthMaxLogCount
-	specg.HealthMaxLogSize = conf.HealthMaxLogSize
+	if conf.HealthLogDestination != nil {
+		specg.HealthLogDestination = *conf.HealthLogDestination
+	} else {
+		specg.HealthLogDestination = define.DefaultHealthCheckLocalDestination
+	}
+
+	if conf.HealthMaxLogCount != nil {
+		specg.HealthMaxLogCount = *conf.HealthMaxLogCount
+	} else {
+		specg.HealthMaxLogCount = define.DefaultHealthMaxLogCount
+	}
+
+	if conf.HealthMaxLogSize != nil {
+		specg.HealthMaxLogSize = *conf.HealthMaxLogSize
+	} else {
+		specg.HealthMaxLogSize = define.DefaultHealthMaxLogSize
+	}
+
+	specg.HealthConfig = conf.HealthCheckConfig
+	specg.StartupHealthConfig = conf.StartupHealthCheckConfig
+	specg.HealthCheckOnFailureAction = conf.HealthCheckOnFailureAction
+
+	if len(tmpEnvSecrets) > 0 {
+		envSecrets := make(map[string]string, len(tmpEnvSecrets))
+		for target, secret := range tmpEnvSecrets {
+			envSecrets[target] = secret.Name
+		}
+		specg.EnvSecrets = envSecrets
+	}
 
 	specg.IDMappings = &conf.IDMappings
 	specg.ContainerCreateCommand = conf.CreateCommand
@@ -492,9 +566,20 @@ func ConfigToSpec(rt *libpod.Runtime, specg *specgen.SpecGenerator, containerID 
 	_, mounts := c.SortUserVolumes(c.ConfigNoCopy().Spec)
 	specg.Mounts = mounts
 	specg.HostDeviceList = conf.DeviceHostSrc
-	specg.Networks = conf.Networks
 	specg.ShmSize = &conf.ShmSize
 	specg.ShmSizeSystemd = &conf.ShmSizeSystemd
+	specg.UseImageHostname = &conf.UseImageHostname
+	specg.UseImageHosts = &conf.UseImageHosts
+
+	finalNetworks := make(map[string]types.PerNetworkOptions, len(conf.Networks))
+	finalNetworkOrder := make([]string, 0, len(conf.Networks))
+	for _, network := range conf.Networks {
+		finalNetworkOrder = append(finalNetworkOrder, network.Name)
+		finalNetworks[network.Name] = network.PerNetworkOptions
+	}
+
+	specg.Networks = finalNetworks
+	specg.NetworkOrder = finalNetworkOrder
 
 	mapSecurityConfig(conf, specg)
 
@@ -556,4 +641,16 @@ func CheckName(rt *libpod.Runtime, n string, kind bool) string {
 		n += "-clone"
 	}
 	return n
+}
+
+// isPortMappingCompatibleNetNSMode validates if mode of the provided
+// Namespace mode is compatible with port mappings.
+// Note: Update `podman run --publish | -p` docs when modifying this function.
+func isPortMappingCompatibleNetNSMode(nsMode specgen.NamespaceMode) bool {
+	switch nsMode {
+	case specgen.Bridge, specgen.Pasta:
+		return true
+	default:
+		return false
+	}
 }

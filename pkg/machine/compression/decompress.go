@@ -6,10 +6,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/containers/podman/v5/pkg/machine/define"
-	"github.com/containers/podman/v5/utils"
-	"github.com/containers/storage/pkg/archive"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/podman/v6/pkg/machine/define"
+	"go.podman.io/podman/v6/utils"
+	"go.podman.io/storage/pkg/archive"
 )
 
 const (
@@ -81,7 +81,11 @@ func runDecompression(d decompressor, decompressedFilePath string) (retErr error
 		// Wait for bars to complete and then shut down the bars container
 		defer p.Wait()
 
-		compressedFileReader = bar.ProxyReader(compressedFileReader)
+		compressedFileReader, err = bar.ProxyReader(compressedFileReader)
+		if err != nil {
+			logrus.Errorf("Error creating progress bar %q", err)
+			return err
+		}
 		// Interrupts the bar goroutine. It's important that
 		// bar.Abort(false) is called before p.Wait(), otherwise
 		// can hang.
@@ -90,13 +94,18 @@ func runDecompression(d decompressor, decompressedFilePath string) (retErr error
 
 	var decompressedFileWriter *os.File
 
-	if decompressedFileWriter, err = os.OpenFile(decompressedFilePath, decompressedFileFlag, d.compressedFileMode()); err != nil {
+	mode := d.compressedFileMode()
+
+	// Ensure the owner always has write permission.
+	mode |= 0o200
+
+	if decompressedFileWriter, err = os.OpenFile(decompressedFilePath, decompressedFileFlag, mode); err != nil {
 		logrus.Errorf("Unable to open destination file %s for writing: %q", decompressedFilePath, err)
 		return err
 	}
 	defer func() {
 		if err := decompressedFileWriter.Close(); err != nil {
-			logrus.Warnf("Unable to to close destination file %s: %q", decompressedFilePath, err)
+			logrus.Warnf("Unable to close destination file %s: %q", decompressedFilePath, err)
 			if retErr == nil {
 				retErr = err
 			}

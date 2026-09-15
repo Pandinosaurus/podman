@@ -1,10 +1,10 @@
 package images
 
 import (
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 var (
@@ -16,8 +16,8 @@ var (
 		Args:              cobra.MinimumNArgs(1),
 		ValidArgsFunction: common.AutocompleteImages,
 		Example: `podman untag 0e3bbc2
-  podman untag imageID:latest otherImageName:latest
-  podman untag httpd myregistryhost:5000/fedora/httpd:v2`,
+podman untag imageID:latest otherImageName:latest
+podman untag httpd myregistryhost:5000/fedora/httpd:v2`,
 	}
 
 	imageUntagCmd = &cobra.Command{
@@ -28,8 +28,8 @@ var (
 		RunE:              untagCmd.RunE,
 		ValidArgsFunction: untagCmd.ValidArgsFunction,
 		Example: `podman image untag 0e3bbc2
-  podman image untag imageID:latest otherImageName:latest
-  podman image untag httpd myregistryhost:5000/fedora/httpd:v2`,
+podman image untag imageID:latest otherImageName:latest
+podman image untag httpd myregistryhost:5000/fedora/httpd:v2`,
 	}
 )
 
@@ -43,6 +43,6 @@ func init() {
 	})
 }
 
-func untag(cmd *cobra.Command, args []string) error {
-	return registry.ImageEngine().Untag(registry.GetContext(), args[0], args[1:], entities.ImageUntagOptions{})
+func untag(_ *cobra.Command, args []string) error {
+	return registry.ImageEngine().Untag(registry.Context(), args[0], args[1:], entities.ImageUntagOptions{})
 }

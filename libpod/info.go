@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package libpod
 
@@ -14,16 +14,16 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/containers/buildah"
-	"github.com/containers/buildah/pkg/parse"
-	"github.com/containers/buildah/pkg/util"
-	"github.com/containers/common/pkg/version"
-	"github.com/containers/image/v5/pkg/sysregistriesv2"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/libpod/linkmode"
-	"github.com/containers/storage"
-	"github.com/containers/storage/pkg/system"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/buildah"
+	"go.podman.io/buildah/pkg/parse"
+	"go.podman.io/buildah/pkg/util"
+	"go.podman.io/common/pkg/version"
+	"go.podman.io/image/v5/pkg/sysregistriesv2"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/libpod/linkmode"
+	"go.podman.io/storage/pkg/system"
+	"tags.cncf.io/container-device-interface/pkg/cdi"
 )
 
 // Info returns the store and host information
@@ -47,7 +47,7 @@ func (r *Runtime) info() (*define.Info, error) {
 		return nil, fmt.Errorf("getting store info: %w", err)
 	}
 	info.Store = storeInfo
-	registries := make(map[string]interface{})
+	registries := make(map[string]any)
 
 	sys := r.SystemContext()
 	data, err := sysregistriesv2.GetRegistries(sys)
@@ -109,27 +109,30 @@ func (r *Runtime) hostInfo() (*define.HostInfo, error) {
 	}
 
 	info := define.HostInfo{
-		Arch:               runtime.GOARCH,
-		BuildahVersion:     buildah.Version,
-		DatabaseBackend:    r.config.Engine.DBBackend,
-		Linkmode:           linkmode.Linkmode(),
-		CPUs:               runtime.NumCPU(),
-		CPUUtilization:     cpuUtil,
-		Distribution:       hostDistributionInfo,
-		LogDriver:          r.config.Containers.LogDriver,
-		EventLogger:        r.eventer.String(),
-		FreeLocks:          locksFree,
-		Hostname:           host,
-		Kernel:             kv,
-		MemFree:            mi.MemFree,
-		MemTotal:           mi.MemTotal,
-		NetworkBackend:     r.config.Network.NetworkBackend,
-		NetworkBackendInfo: r.network.NetworkInfo(),
-		OS:                 runtime.GOOS,
-		RootlessNetworkCmd: r.config.Network.DefaultRootlessNetworkCmd,
-		SwapFree:           mi.SwapFree,
-		SwapTotal:          mi.SwapTotal,
+		Arch:                  runtime.GOARCH,
+		BuildahVersion:        buildah.Version,
+		DatabaseBackend:       r.state.Name(),
+		Linkmode:              linkmode.Linkmode(),
+		CPUs:                  runtime.NumCPU(),
+		CPUUtilization:        cpuUtil,
+		Distribution:          hostDistributionInfo,
+		LogDriver:             r.config.Containers.LogDriver,
+		EventLogger:           r.eventer.String(),
+		FreeLocks:             locksFree,
+		Hostname:              host,
+		Kernel:                kv,
+		MemFree:               mi.MemFree,
+		MemAvailable:          mi.MemAvailable,
+		MemTotal:              mi.MemTotal,
+		NetworkBackend:        r.config.Network.NetworkBackend,
+		NetworkBackendInfo:    r.network.NetworkInfo(),
+		OS:                    runtime.GOOS,
+		RootlessNetworkCmd:    r.config.Network.DefaultRootlessNetworkCmd,
+		RootlessPortForwarder: r.config.Network.RootlessPortForwarder,
+		SwapFree:              mi.SwapFree,
+		SwapTotal:             mi.SwapTotal,
 	}
+	info.CDISpecDirs, info.DiscoveredDevices = r.cdiInfo()
 	platform := parse.DefaultPlatform()
 	pArr := strings.Split(platform, "/")
 	if len(pArr) == 3 {
@@ -164,17 +167,44 @@ func (r *Runtime) hostInfo() (*define.HostInfo, error) {
 
 	// Could not find a humanize-formatter for time.Duration
 	var buffer bytes.Buffer
-	buffer.WriteString(fmt.Sprintf("%.0fh %.0fm %.2fs",
+	fmt.Fprintf(&buffer, "%.0fh %.0fm %.2fs",
 		uptime.hours,
-		math.Mod(uptime.seconds, 3600)/60,
+		math.Mod(uptime.minutes, 60),
 		math.Mod(uptime.seconds, 60),
-	))
+	)
 	if int64(uptime.hours) > 0 {
-		buffer.WriteString(fmt.Sprintf(" (Approximately %.2f days)", uptime.hours/24))
+		fmt.Fprintf(&buffer, " (Approximately %.2f days)", uptime.hours/24)
 	}
 	info.Uptime = buffer.String()
 
 	return &info, nil
+}
+
+func (r *Runtime) cdiInfo() ([]string, []define.DeviceInfo) {
+	registry, err := cdi.NewCache(
+		cdi.WithSpecDirs(r.config.Engine.CdiSpecDirs.Get()...),
+		cdi.WithAutoRefresh(false),
+	)
+	if err != nil {
+		logrus.Debugf("Creating CDI registry for info: %v", err)
+		return r.config.Engine.CdiSpecDirs.Get(), nil
+	}
+	if err := registry.Refresh(); err != nil {
+		logrus.Debugf("The following error was triggered when refreshing the CDI registry for info: %v", err)
+	}
+
+	return registry.GetSpecDirectories(), cdiDeviceInfo(registry.ListDevices())
+}
+
+func cdiDeviceInfo(deviceNames []string) []define.DeviceInfo {
+	devices := make([]define.DeviceInfo, 0, len(deviceNames))
+	for _, device := range deviceNames {
+		devices = append(devices, define.DeviceInfo{
+			Source: "cdi",
+			ID:     device,
+		})
+	}
+	return devices
 }
 
 func (r *Runtime) getContainerStoreInfo() (define.ContainerStore, error) {
@@ -213,10 +243,6 @@ func (r *Runtime) getContainerStoreInfo() (define.ContainerStore, error) {
 // top-level "store" info
 func (r *Runtime) storeInfo() (*define.StoreInfo, error) {
 	// let's say storage driver in use, number of images, number of containers
-	configFile, err := storage.DefaultConfigFile()
-	if err != nil {
-		return nil, err
-	}
 	images, err := r.store.Images()
 	if err != nil {
 		return nil, fmt.Errorf("getting number of images: %w", err)
@@ -231,36 +257,47 @@ func (r *Runtime) storeInfo() (*define.StoreInfo, error) {
 	if err := syscall.Statfs(r.store.GraphRoot(), &grStats); err != nil {
 		return nil, fmt.Errorf("unable to collect graph root usage for %q: %w", r.store.GraphRoot(), err)
 	}
-	allocated := uint64(grStats.Bsize) * grStats.Blocks
+	bsize := uint64(grStats.Bsize) //nolint:unconvert,nolintlint // Bsize is not always uint64 on Linux.
+	allocated := bsize * grStats.Blocks
 	info := define.StoreInfo{
 		ImageStore:         imageInfo,
 		ImageCopyTmpDir:    os.Getenv("TMPDIR"),
 		ContainerStore:     conInfo,
 		GraphRoot:          r.store.GraphRoot(),
 		GraphRootAllocated: allocated,
-		GraphRootUsed:      allocated - (uint64(grStats.Bsize) * grStats.Bfree),
+		GraphRootUsed:      allocated - (bsize * grStats.Bfree),
 		RunRoot:            r.store.RunRoot(),
 		GraphDriverName:    r.store.GraphDriverName(),
 		GraphOptions:       nil,
 		VolumePath:         r.config.Engine.VolumePath,
-		ConfigFile:         configFile,
 		TransientStore:     r.store.TransientStore(),
 	}
 
-	graphOptions := map[string]interface{}{}
+	graphOptions := map[string]any{}
 	for _, o := range r.store.GraphOptions() {
 		split := strings.SplitN(o, "=", 2)
-		if strings.HasSuffix(split[0], "mount_program") {
+		switch {
+		case strings.HasSuffix(split[0], "mount_program"):
 			ver, err := version.Program(split[1])
 			if err != nil {
 				logrus.Warnf("Failed to retrieve program version for %s: %v", split[1], err)
 			}
-			program := map[string]interface{}{}
+			program := map[string]any{}
 			program["Executable"] = split[1]
 			program["Version"] = ver
 			program["Package"] = version.Package(split[1])
 			graphOptions[split[0]] = program
-		} else {
+		case strings.HasSuffix(split[0], "imagestore"):
+			key := strings.ReplaceAll(split[0], "imagestore", "additionalImageStores")
+			if graphOptions[key] == nil {
+				graphOptions[key] = []string{split[1]}
+			} else {
+				graphOptions[key] = append(graphOptions[key].([]string), split[1])
+			}
+			// Fallthrough to include the `imagestore` key to avoid breaking
+			// Podman v5 API. Should be removed in Podman v6.0.0.
+			fallthrough
+		default:
 			graphOptions[split[0]] = split[1]
 		}
 	}
@@ -294,18 +331,22 @@ func (r *Runtime) GetHostDistributionInfo() define.DistributionInfo {
 
 	l := bufio.NewScanner(f)
 	for l.Scan() {
-		if strings.HasPrefix(l.Text(), "ID=") {
-			dist.Distribution = strings.Trim(strings.TrimPrefix(l.Text(), "ID="), "\"")
+		if after, ok := strings.CutPrefix(l.Text(), "ID="); ok {
+			dist.Distribution = strings.Trim(after, "\"")
 		}
-		if strings.HasPrefix(l.Text(), "VARIANT_ID=") {
-			dist.Variant = strings.Trim(strings.TrimPrefix(l.Text(), "VARIANT_ID="), "\"")
+		if after, ok := strings.CutPrefix(l.Text(), "VARIANT_ID="); ok {
+			dist.Variant = strings.Trim(after, "\"")
 		}
-		if strings.HasPrefix(l.Text(), "VERSION_ID=") {
-			dist.Version = strings.Trim(strings.TrimPrefix(l.Text(), "VERSION_ID="), "\"")
+		if after, ok := strings.CutPrefix(l.Text(), "VERSION_ID="); ok {
+			dist.Version = strings.Trim(after, "\"")
 		}
-		if strings.HasPrefix(l.Text(), "VERSION_CODENAME=") {
-			dist.Codename = strings.Trim(strings.TrimPrefix(l.Text(), "VERSION_CODENAME="), "\"")
+		if after, ok := strings.CutPrefix(l.Text(), "VERSION_CODENAME="); ok {
+			dist.Codename = strings.Trim(after, "\"")
 		}
+	}
+	if err := l.Err(); err != nil {
+		// Not much we can do here, log a warning, no need to full fail info over this anyway.
+		logrus.Warnf("Failed to read /etc/os-release: %v", err)
 	}
 	return dist
 }

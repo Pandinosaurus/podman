@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/validate"
-	"github.com/containers/podman/v5/pkg/domain/entities/types"
 	multierror "github.com/hashicorp/go-multierror"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/validate"
+	"go.podman.io/podman/v6/pkg/domain/entities/types"
 )
 
 var (
@@ -46,7 +46,7 @@ func init() {
 	_ = checkCommand.RegisterFlagCompletionFunc("max", completion.AutocompleteNone)
 }
 
-func check(cmd *cobra.Command, args []string) error {
+func check(cmd *cobra.Command, _ []string) error {
 	flags := cmd.Flags()
 	if flags.Changed("max") {
 		maxAge, err := flags.GetDuration("max")
@@ -64,8 +64,11 @@ func check(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if !checkOptions.Repair && !checkOptions.RepairLossy && response.Errors {
-		return errors.New("damage detected in local storage")
+	if !checkOptions.Repair && !checkOptions.RepairLossy {
+		if response.Errors {
+			return errors.New("damage detected in local storage")
+		}
+		return nil
 	}
 
 	recheckOptions := checkOptions

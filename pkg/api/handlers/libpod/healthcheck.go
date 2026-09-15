@@ -1,14 +1,14 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package libpod
 
 import (
 	"net/http"
 
-	"github.com/containers/podman/v5/libpod"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/api/handlers/utils"
-	api "github.com/containers/podman/v5/pkg/api/types"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/api/handlers/utils"
+	api "go.podman.io/podman/v6/pkg/api/types"
 )
 
 func RunHealthCheck(w http.ResponseWriter, r *http.Request) {
@@ -31,14 +31,8 @@ func RunHealthCheck(w http.ResponseWriter, r *http.Request) {
 		utils.InternalServerError(w, err)
 		return
 	}
-	hcStatus := define.HealthCheckUnhealthy
-	if status == define.HealthCheckSuccess {
-		hcStatus = define.HealthCheckHealthy
-	} else if status == define.HealthCheckStartup {
-		hcStatus = define.HealthCheckStarting
-	}
 	report := define.HealthCheckResults{
-		Status: hcStatus,
+		Status: status.String(),
 	}
 	utils.WriteResponse(w, http.StatusOK, report)
 }

@@ -3,15 +3,14 @@ package e2e_test
 import (
 	"strconv"
 
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	jsoniter "github.com/json-iterator/go"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	. "github.com/onsi/gomega/gexec"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 var _ = Describe("podman machine info", func() {
-
 	It("machine info", func() {
 		info := new(infoMachine)
 		infoSession, err := mb.setCmd(info).run()
@@ -28,7 +27,7 @@ var _ = Describe("podman machine info", func() {
 
 		// Create a machine and check if info has been updated
 		i := new(initMachine)
-		initSession, err := mb.setCmd(i.withImage(mb.imagePath)).run()
+		initSession, err := mb.setCmd(i.withFakeImage(mb)).run()
 		Expect(err).ToNot(HaveOccurred())
 		Expect(initSession).To(Exit(0))
 

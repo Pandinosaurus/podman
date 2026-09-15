@@ -1,25 +1,24 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package compat
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"strings"
 
-	"errors"
-
-	"github.com/containers/podman/v5/libpod"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/api/handlers/utils"
-	api "github.com/containers/podman/v5/pkg/api/types"
-	"github.com/containers/podman/v5/pkg/copy"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/domain/infra/abi"
 	"github.com/gorilla/schema"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/api/handlers/utils"
+	api "go.podman.io/podman/v6/pkg/api/types"
+	"go.podman.io/podman/v6/pkg/copy"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/domain/infra/abi"
 )
 
 func Archive(w http.ResponseWriter, r *http.Request) {
@@ -132,7 +131,7 @@ func handlePut(w http.ResponseWriter, r *http.Request, decoder *schema.Decoder, 
 		})
 	if err != nil {
 		switch {
-		case errors.Is(err, define.ErrNoSuchCtr) || os.IsNotExist(err):
+		case errors.Is(err, define.ErrNoSuchCtr) || errors.Is(err, os.ErrNotExist):
 			// 404 is returned for an absent container and path.  The
 			// clients must deal with it accordingly.
 			utils.Error(w, http.StatusNotFound, fmt.Errorf("the container does not exist: %w", err))

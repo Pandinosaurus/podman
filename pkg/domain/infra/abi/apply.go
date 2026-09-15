@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package abi
 
@@ -14,12 +14,12 @@ import (
 	"os"
 	"strings"
 
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	k8sAPI "github.com/containers/podman/v5/pkg/k8s.io/api/core/v1"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	k8sAPI "go.podman.io/podman/v6/pkg/k8s.io/api/core/v1"
 	"sigs.k8s.io/yaml"
 )
 
-func (ic *ContainerEngine) KubeApply(ctx context.Context, body io.Reader, options entities.ApplyOptions) error {
+func (ic *ContainerEngine) KubeApply(_ context.Context, body io.Reader, options entities.ApplyOptions) error {
 	// Read the yaml file
 	content, err := io.ReadAll(body)
 	if err != nil {
@@ -121,7 +121,7 @@ func setUpClusterClient(kconfig k8sAPI.Config, applyOptions entities.ApplyOption
 	caCertPool := x509.NewCertPool()
 
 	// Be insecure if user sets ca-cert-file flag to insecure
-	if strings.ToLower(caCertFile) == "insecure" {
+	if strings.EqualFold(caCertFile, "insecure") {
 		insecureSkipVerify = true
 	} else if caCertFile == "" {
 		caCertFile = kconfig.Clusters[0].Cluster.CertificateAuthority

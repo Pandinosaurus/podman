@@ -232,23 +232,6 @@ check_result "$found" "16700" "random_free_port"
 
 # END   random_free_port
 ###############################################################################
-# BEGIN ipv6_to_procfs
-
-# Table of IPv6 short forms and their procfs equivalents. For readability,
-# spaces separate each 16-bit word. Spaces are removed when testing.
-table="
-2b06::1     | 2B06 0000 0000 0000 0000 0000 0000 0001
-::1         | 0000 0000 0000 0000 0000 0000 0000 0001
-0::1        | 0000 0000 0000 0000 0000 0000 0000 0001
-"
-
-while read shortform expect; do
-    actual=$(ipv6_to_procfs $shortform)
-    check_result "$actual" "${expect// }" "ipv6_to_procfs $shortform"
-done < <(parse_table "$table")
-
-# END   ipv6_to_procfs
-###############################################################################
 # BEGIN subnet_in_use  ...  because that's complicated
 
 # Override ip command
@@ -441,6 +424,24 @@ check_assert "0123456789abcdeff"  =~ "^[0-9a-f]{16}\$" "
 #|   actual:    0123456789abcdeff"
 
 # END   check_assert
+###############################################################################
+# BEGIN random_rfc1918_subnet
+
+# The whole point of the helper is to stay inside 172.16/12, so the middle
+# octet must land in 16..31. Operator precedence got this wrong once already:
+# in bash, + binds tighter than &, so "16 + $RANDOM & 15" is (16+RANDOM)&15,
+# which is 0..15 and not in the range at all.
+lo=255
+hi=0
+for i in $(seq 1 20); do
+    n2=$(random_rfc1918_subnet | cut -d. -f2)
+    if [[ $n2 -lt $lo ]]; then lo=$n2; fi
+    if [[ $n2 -gt $hi ]]; then hi=$n2; fi
+done
+check_result "$(( lo >= 16 && hi <= 31 ))" "1" \
+             "random_rfc1918_subnet second octet in 16..31 (saw $lo..$hi)"
+
+# END   random_rfc1918_subnet
 ###############################################################################
 
 exit $rc

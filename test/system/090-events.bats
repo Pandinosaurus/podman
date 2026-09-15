@@ -6,7 +6,7 @@
 load helpers
 load helpers.network
 
-# bats test_tags=distro-integration, ci:parallel
+# bats test_tags=ci:parallel
 @test "events with a filter by label and --no-trunc option" {
     cname=test-$(safename)
     labelname=labelname-$(safename)
@@ -27,6 +27,10 @@ load helpers.network
     # Now filter just by container name, no label
     run_podman events --since "$before" --filter type=container --filter container=$cname --filter event=start --stream=false
     is "$output" "$expect" "filtering just by container"
+
+    # Filter just by label key (without value)
+    run_podman events --since "$before" --filter type=container --filter label=${labelname} --filter event=start --stream=false
+    is "$output" "$expect" "filtering by label key only"
 
     # check --no-trunc=false
     truncID=${id:0:12}
@@ -157,7 +161,7 @@ function _events_disjunctive_filters() {
     _events_disjunctive_filters ""
 }
 
-# bats test_tags=distro-integration, ci:parallel
+# bats test_tags=ci:parallel
 @test "events with events_logfile_path in containers.conf" {
     skip_if_remote "remote does not support --events-backend"
     events_file=$PODMAN_TMPDIR/events.log
@@ -179,7 +183,7 @@ function _populate_events_file() {
     done
 }
 
-# bats test_tags=distro-integration, ci:parallel
+# bats test_tags=ci:parallel
 @test "events log-file rotation" {
     skip_if_remote "setting CONTAINERS_CONF_OVERRIDE logger options does not affect remote client"
 
@@ -334,6 +338,24 @@ EOF
     assert "$output" = "$lvalue" "podman-events output includes container label"
 }
 
+@test "events - died event contains OOMKilled attribute" {
+    local cname=c-$(safename)
+
+    run_podman run -d --rm \
+                --name $cname \
+                --memory 20m \
+                --cgroup-conf=memory.oom.group=1 \
+                $IMAGE sh -c "x=a; while :; do x=\$x\$x\$x\$x; done"
+    run_podman wait $cname
+    run_podman events \
+               --filter container=$cname \
+               --filter event=died \
+               --stream=false \
+               --format "{{.OOMKilled}}"
+
+    assert "$output" = "true" "OOMKilled attribute should be present and set to true"
+}
+
 # bats test_tags=ci:parallel
 @test "events - backend none should error" {
     skip_if_remote "remote does not support --events-backend"
@@ -355,7 +377,15 @@ EOF
     local cname=c-$1-$(safename)
     t0=$(date --iso-8601=seconds)
 
-    CONTAINERS_CONF_OVERRIDE=$containersConf run_podman create --name=$cname $IMAGE
+    # Create a base image, airgapped from $IMAGE so this test is
+    # isolated from tag/label changes.
+    baseimage=i-$1-$(safename)
+    run_podman create -q $IMAGE true
+    local tmpcid=$output
+    run_podman commit -q $tmpcid $baseimage
+    run_podman rm $tmpcid
+
+    CONTAINERS_CONF_OVERRIDE=$containersConf run_podman create --name=$cname $baseimage
     CONTAINERS_CONF_OVERRIDE=$containersConf run_podman container inspect --size=true $cname
     inspect_json=$(jq -r --tab . <<< "$output")
 
@@ -379,6 +409,7 @@ EOF
     assert "$output" != ".*EffectiveCaps.*"
 
     run_podman rm $cname
+    run_podman rmi $baseimage
 }
 
 # bats test_tags=ci:parallel
@@ -412,7 +443,9 @@ EOF
 # bats test_tags=ci:parallel
 @test "events - volume events" {
     local vname=v-$(safename)
-    run_podman volume create $vname
+    local lname=label$(safename | tr -d -)
+    local lvalue="labelvalue-$(safename) $(random_string 5)"
+    run_podman volume create --label="$lname=$lvalue" $vname
     run_podman volume rm $vname
 
     run_podman events --since=1m --stream=false --filter volume=$vname
@@ -423,10 +456,49 @@ EOF
     # Prefix test
     run_podman events --since=1m --stream=false --filter volume=${vname:0:9}
     assert "$output" = "$notrunc_results"
+
+    # Labels test
+    run_podman events --since=1m --stream=false --filter volume=$vname --filter event=create --format "{{.Attributes}}"
+    assert "$output" =~ "${lname}:${lvalue}" "podman-events output includes volume label"
 }
 
 # bats test_tags=ci:parallel
 @test "events - invalid filter" {
     run_podman 125 events --since="the dawn of time...ish"
     assert "$output" =~ "failed to parse event filters"
+}
+
+# bats test_tags=ci:parallel
+@test "events - pod labels in event attributes" {
+    local pname=p-$(safename)
+    local lname=label$(safename | tr -d -)
+    local lvalue="labelvalue-$(safename) $(random_string 5)"
+
+    run_podman pod create --name $pname --label "$lname=$lvalue"
+
+    run_podman events --since=1m --stream=false --filter type=pod --filter event=create --format "{{.Name}} {{.Attributes}}"
+    assert "$output" =~ "$pname .*${lname}:${lvalue}" "podman-events output includes pod label"
+
+    run_podman pod rm -f $pname
+}
+
+# bats test_tags=ci:parallel
+@test "events - network filter" {
+    local netname=net-$(safename)
+
+    # Create and immediately remove a network so we have events to filter.
+    run_podman network create $netname
+    run_podman network rm $netname
+
+    # --filter network=<name> must return both create and remove events.
+    run_podman events --since=1m --stream=false --filter network=$netname
+    assert "${lines[0]}" =~ ".* network create .*name=$netname," \
+        "network create event returned by --filter network="
+    assert "${lines[1]}" =~ ".* network remove .*name=$netname," \
+        "network remove event returned by --filter network="
+    assert "${#lines[@]}" = "2" "exactly two network events for $netname"
+
+    # A different name must not match.
+    run_podman events --since=1m --stream=false --filter network=nosuchnetwork-$(safename)
+    assert "$output" = "" "no events for a non-existent network name"
 }

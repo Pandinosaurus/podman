@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/stretchr/testify/assert"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 func TestPodOptions(t *testing.T) {
@@ -16,20 +16,20 @@ func TestPodOptions(t *testing.T) {
 
 	podOptions := entities.PodCreateOptions{}
 	err := common.ContainerToPodOptions(&exampleOptions, &podOptions)
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 
 	cc := reflect.ValueOf(&exampleOptions).Elem()
 	pc := reflect.ValueOf(&podOptions).Elem()
 
-	pcType := reflect.TypeOf(podOptions)
+	pcType := reflect.TypeFor[entities.PodCreateOptions]()
 	for i := 0; i < pc.NumField(); i++ {
 		podField := pc.FieldByIndex([]int{i})
 		podType := pcType.Field(i)
 		for j := 0; j < cc.NumField(); j++ {
 			containerField := cc.FieldByIndex([]int{j})
-			containerType := reflect.TypeOf(exampleOptions).Field(j)
-			tagPod := strings.Split(podType.Tag.Get("json"), ",")[0]
-			tagContainer := strings.Split(containerType.Tag.Get("json"), ",")[0]
+			containerType := reflect.TypeFor[entities.ContainerCreateOptions]().Field(j)
+			tagPod, _, _ := strings.Cut(podType.Tag.Get("json"), ",")
+			tagContainer, _, _ := strings.Cut(containerType.Tag.Get("json"), ",")
 			if tagPod == tagContainer && (tagPod != "" && tagContainer != "") {
 				areEqual := true
 				if containerField.Kind() == podField.Kind() {
@@ -42,7 +42,7 @@ func TestPodOptions(t *testing.T) {
 						areEqual = podField.String() == containerField.String()
 					case reflect.Bool:
 						areEqual = podField.Bool() == containerField.Bool()
-					case reflect.Ptr:
+					case reflect.Pointer:
 						areEqual = reflect.DeepEqual(podField.Elem().Interface(), containerField.Elem().Interface())
 					}
 				}

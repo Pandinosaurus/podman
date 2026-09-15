@@ -6,8 +6,8 @@
 	function set. (except boolean, hidden and deprecated flags)
 
 	Shell completion functions are defined in:
-	- "github.com/containers/podman/v5/cmd/podman/common/completion.go"
-	- "github.com/containers/common/pkg/completion"
+	- "go.podman.io/podman/v6/cmd/podman/common/completion.go"
+	- "go.podman.io/common/pkg/completion"
 	and are called Autocomplete...
 
 	To apply such function to a command use the ValidArgsFunction field.
@@ -19,6 +19,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -43,10 +44,20 @@ func checkCommand(t *testing.T, cmd *cobra.Command) {
 		t.Errorf("%s command has no shell completion function set", cmd.CommandPath())
 	}
 
+	// Verify Example strings are flush-left (no leading whitespace).
+	// The indentExamples template function adds the 2-space indent at
+	// render time, so source examples must not contain their own indentation.
+	for i, line := range strings.Split(cmd.Example, "\n") {
+		if line != "" && line != strings.TrimLeft(line, " \t") {
+			t.Errorf("%s: Example line %d has leading whitespace: %q",
+				cmd.CommandPath(), i+1, line)
+		}
+	}
+
 	// loop over all local flags
 	cmd.LocalFlags().VisitAll(func(flag *pflag.Flag) {
 		// an error means that there is a completion function for this flag
-		err := cmd.RegisterFlagCompletionFunc(flag.Name, func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		err := cmd.RegisterFlagCompletionFunc(flag.Name, func(_ *cobra.Command, _ []string, _ string) ([]string, cobra.ShellCompDirective) {
 			return nil, cobra.ShellCompDirectiveDefault
 		})
 

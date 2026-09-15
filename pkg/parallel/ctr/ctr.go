@@ -1,13 +1,13 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package ctr
 
 import (
 	"context"
 
-	"github.com/containers/podman/v5/libpod"
-	"github.com/containers/podman/v5/pkg/parallel"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/pkg/parallel"
 )
 
 // ContainerOp performs the given function on the given set of
@@ -19,9 +19,8 @@ func ContainerOp(ctx context.Context, ctrs []*libpod.Container, applyFunc func(*
 	// just use a lock on a normal map...
 	// The expectation is that most of the time is spent in applyFunc
 	// anyways.
-	var (
-		errMap = make(map[*libpod.Container]<-chan error)
-	)
+
+	errMap := make(map[*libpod.Container]<-chan error)
 
 	for _, ctr := range ctrs {
 		c := ctr

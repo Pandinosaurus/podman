@@ -4,12 +4,12 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/utils"
-	"github.com/containers/podman/v5/cmd/podman/validate"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/utils"
+	"go.podman.io/podman/v6/cmd/podman/validate"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 var (
@@ -26,13 +26,11 @@ var (
 		},
 		ValidArgsFunction: common.AutocompletePodsRunning,
 		Example: `podman pod pause podID1 podID2
-  podman pod pause --all`,
+podman pod pause --all`,
 	}
 )
 
-var (
-	pauseOptions entities.PodPauseOptions
-)
+var pauseOptions entities.PodPauseOptions
 
 func init() {
 	registry.Commands = append(registry.Commands, registry.CliCommand{
@@ -43,10 +41,9 @@ func init() {
 	flags.BoolVarP(&pauseOptions.All, "all", "a", false, "Pause all running pods")
 	validate.AddLatestFlag(pauseCommand, &pauseOptions.Latest)
 }
+
 func pause(_ *cobra.Command, args []string) error {
-	var (
-		errs utils.OutputErrors
-	)
+	var errs utils.OutputErrors
 	responses, err := registry.ContainerEngine().PodPause(context.Background(), args, pauseOptions)
 	if err != nil {
 		return err

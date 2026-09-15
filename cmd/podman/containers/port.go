@@ -6,12 +6,12 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/validate"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/validate"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 var (
@@ -27,7 +27,7 @@ var (
 		},
 		ValidArgsFunction: common.AutocompleteContainerOneArg,
 		Example: `podman port --all
-  podman port ctrID 80/tcp`,
+podman port ctrID 80/tcp`,
 	}
 
 	containerPortCommand = &cobra.Command{
@@ -40,13 +40,11 @@ var (
 		},
 		ValidArgsFunction: portCommand.ValidArgsFunction,
 		Example: `podman container port --all
-  podman container port CTRID 80`,
+podman container port CTRID 80`,
 	}
 )
 
-var (
-	portOpts entities.ContainerPortOptions
-)
+var portOpts entities.ContainerPortOptions
 
 func portFlags(flags *pflag.FlagSet) {
 	flags.BoolVarP(&portOpts.All, "all", "a", false, "Display port information for all containers")
@@ -108,7 +106,7 @@ func port(_ *cobra.Command, args []string) error {
 		userProto = fields[1]
 	}
 
-	reports, err := registry.ContainerEngine().ContainerPort(registry.GetContext(), container, portOpts)
+	reports, err := registry.ContainerEngine().ContainerPort(registry.Context(), container, portOpts)
 	if err != nil {
 		return err
 	}
@@ -125,8 +123,7 @@ func port(_ *cobra.Command, args []string) error {
 			if hostIP == "" {
 				hostIP = "0.0.0.0"
 			}
-			protocols := strings.Split(v.Protocol, ",")
-			for _, protocol := range protocols {
+			for protocol := range strings.SplitSeq(v.Protocol, ",") {
 				// If not searching by port or port/proto, then dump what we see
 				if port == "" {
 					for i := uint16(0); i < v.Range; i++ {

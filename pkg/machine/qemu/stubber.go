@@ -1,4 +1,4 @@
-//go:build linux || freebsd
+//go:build linux || freebsd || windows
 
 package qemu
 
@@ -10,19 +10,18 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
-	"strings"
 	"time"
 
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/common/pkg/strongunits"
 	gvproxy "github.com/containers/gvisor-tap-vsock/pkg/types"
-	"github.com/containers/podman/v5/pkg/machine"
-	"github.com/containers/podman/v5/pkg/machine/define"
-	"github.com/containers/podman/v5/pkg/machine/ignition"
-	"github.com/containers/podman/v5/pkg/machine/qemu/command"
-	"github.com/containers/podman/v5/pkg/machine/sockets"
-	"github.com/containers/podman/v5/pkg/machine/vmconfigs"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/common/pkg/strongunits"
+	"go.podman.io/podman/v6/pkg/machine"
+	"go.podman.io/podman/v6/pkg/machine/define"
+	"go.podman.io/podman/v6/pkg/machine/ignition"
+	"go.podman.io/podman/v6/pkg/machine/qemu/command"
+	"go.podman.io/podman/v6/pkg/machine/sockets"
+	"go.podman.io/podman/v6/pkg/machine/vmconfigs"
 )
 
 type QEMUStubber struct {
@@ -39,15 +38,15 @@ var (
 	gvProxyMaxBackoffAttempts = 6
 )
 
-func (q QEMUStubber) UserModeNetworkEnabled(*vmconfigs.MachineConfig) bool {
+func (q *QEMUStubber) UserModeNetworkEnabled(*vmconfigs.MachineConfig) bool {
 	return true
 }
 
-func (q QEMUStubber) UseProviderNetworkSetup() bool {
+func (q *QEMUStubber) UseProviderNetworkSetup() bool {
 	return false
 }
 
-func (q QEMUStubber) RequireExclusiveActive() bool {
+func (q *QEMUStubber) RequireExclusiveActive() bool {
 	return true
 }
 
@@ -89,7 +88,7 @@ func (q *QEMUStubber) setQEMUCommandLine(mc *vmconfigs.MachineConfig) error {
 	return nil
 }
 
-func (q *QEMUStubber) CreateVM(opts define.CreateVMOpts, mc *vmconfigs.MachineConfig, builder *ignition.IgnitionBuilder) error {
+func (q *QEMUStubber) CreateVM(opts define.CreateVMOpts, mc *vmconfigs.MachineConfig, ignBuilder *ignition.IgnitionBuilder) error {
 	monitor, err := command.NewQMPMonitor(opts.Name, opts.Dirs.RuntimeDir)
 	if err != nil {
 		return err
@@ -110,6 +109,17 @@ func (q *QEMUStubber) CreateVM(opts define.CreateVMOpts, mc *vmconfigs.MachineCo
 
 	mc.QEMUHypervisor = &qemuConfig
 	mc.QEMUHypervisor.QEMUPidPath = qemuPidPath
+
+	virtiofsMounts := make([]machine.VirtIoFs, 0, len(mc.Mounts))
+	for _, mnt := range mc.Mounts {
+		virtiofsMounts = append(virtiofsMounts, machine.MountToVirtIOFs(mnt))
+	}
+	virtIOIgnitionMounts, err := machine.GenerateSystemDFilesForVirtiofsMounts(virtiofsMounts)
+	if err != nil {
+		return err
+	}
+	ignBuilder.WithUnit(virtIOIgnitionMounts...)
+
 	return q.resizeDisk(mc.Resources.DiskSize, mc.ImagePath)
 }
 
@@ -137,7 +147,7 @@ func runStartVMCommand(cmd *exec.Cmd) error {
 
 func (q *QEMUStubber) StartVM(mc *vmconfigs.MachineConfig) (func() error, func() error, error) {
 	if err := q.setQEMUCommandLine(mc); err != nil {
-		return nil, nil, fmt.Errorf("unable to generate qemu command line: %q", err)
+		return nil, nil, fmt.Errorf("unable to generate qemu command line: %w", err)
 	}
 
 	readySocket, err := mc.ReadySocket()
@@ -243,7 +253,7 @@ func waitForReady(readySocket *define.VMFile, pid int, stdErrBuffer *bytes.Buffe
 	return err
 }
 
-func (q *QEMUStubber) Exists(name string) (bool, error) {
+func (q *QEMUStubber) Exists(_ string) (bool, error) {
 	return false, nil
 }
 
@@ -273,7 +283,7 @@ func (q *QEMUStubber) resizeDisk(newSize strongunits.GiB, diskPath *define.VMFil
 	resize.Stdout = os.Stdout
 	resize.Stderr = os.Stderr
 	if err := resize.Run(); err != nil {
-		return fmt.Errorf("resizing image: %q", err)
+		return fmt.Errorf("resizing image: %w", err)
 	}
 
 	return nil
@@ -334,45 +344,8 @@ func (q *QEMUStubber) RemoveAndCleanMachines(_ *define.MachineDirs) error {
 	return nil
 }
 
-// mountVolumesToVM iterates through the machine's volumes and mounts them to the
-// machine
-// TODO this should probably be temporary; mount code should probably be its own package and shared completely
-func (q *QEMUStubber) MountVolumesToVM(mc *vmconfigs.MachineConfig, quiet bool) error {
-	for _, mount := range mc.Mounts {
-		if !quiet {
-			fmt.Printf("Mounting volume... %s:%s\n", mount.Source, mount.Target)
-		}
-		// create mountpoint directory if it doesn't exist
-		// because / is immutable, we have to monkey around with permissions
-		// if we dont mount in /home or /mnt
-		var args []string
-		if !strings.HasPrefix(mount.Target, "/home") && !strings.HasPrefix(mount.Target, "/mnt") {
-			args = append(args, "sudo", "chattr", "-i", "/", ";")
-		}
-		args = append(args, "sudo", "mkdir", "-p", mount.Target)
-		if !strings.HasPrefix(mount.Target, "/home") && !strings.HasPrefix(mount.Target, "/mnt") {
-			args = append(args, ";", "sudo", "chattr", "+i", "/", ";")
-		}
-		err := machine.CommonSSH(mc.SSH.RemoteUsername, mc.SSH.IdentityPath, mc.Name, mc.SSH.Port, args)
-		if err != nil {
-			return err
-		}
-		// NOTE: The mount type q.Type was previously serialized as 9p for older Linux versions,
-		// but we ignore it now because we want the mount type to be dynamic, not static.  Or
-		// in other words we don't want to make people unnecessarily reprovision their machines
-		// to upgrade from 9p to virtiofs.
-		mountOptions := []string{"-t", "virtiofs"}
-		mountOptions = append(mountOptions, []string{mount.Tag, mount.Target}...)
-		mountFlags := fmt.Sprintf("context=\"%s\"", machine.NFSSELinuxContext)
-		if mount.ReadOnly {
-			mountFlags += ",ro"
-		}
-		mountOptions = append(mountOptions, "-o", mountFlags)
-		err = machine.CommonSSH(mc.SSH.RemoteUsername, mc.SSH.IdentityPath, mc.Name, mc.SSH.Port, append([]string{"sudo", "mount"}, mountOptions...))
-		if err != nil {
-			return err
-		}
-	}
+func (q *QEMUStubber) MountVolumesToVM(_ *vmconfigs.MachineConfig, _ bool) error {
+	// virtiofs: mounts are handled by systemd units baked into ignition at init time
 	return nil
 }
 
@@ -380,15 +353,15 @@ func (q *QEMUStubber) MountType() vmconfigs.VolumeMountType {
 	return vmconfigs.VirtIOFS
 }
 
-func (q *QEMUStubber) PostStartNetworking(mc *vmconfigs.MachineConfig, noInfo bool) error {
+func (q *QEMUStubber) PostStartNetworking(_ *vmconfigs.MachineConfig, _ bool) error {
 	return nil
 }
 
-func (q *QEMUStubber) UpdateSSHPort(mc *vmconfigs.MachineConfig, port int) error {
+func (q *QEMUStubber) UpdateSSHPort(_ *vmconfigs.MachineConfig, _ int) error {
 	// managed by gvproxy on this backend, so nothing to do
 	return nil
 }
 
-func (q *QEMUStubber) GetRosetta(mc *vmconfigs.MachineConfig) (bool, error) {
+func (q *QEMUStubber) GetRosetta(_ *vmconfigs.MachineConfig) (bool, error) {
 	return false, nil
 }

@@ -2,49 +2,31 @@ package utils
 
 import (
 	"bufio"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
+	"io"
 	"math/rand"
 	"os"
 	"os/exec"
-	"runtime"
 	"strings"
 	"syscall"
 	"time"
 
 	crypto_rand "crypto/rand"
-	"crypto/rsa"
-	"crypto/x509"
-	"encoding/pem"
 
-	"github.com/sirupsen/logrus"
-
-	. "github.com/onsi/ginkgo/v2"    //nolint:revive,stylecheck
-	. "github.com/onsi/gomega"       //nolint:revive,stylecheck
-	. "github.com/onsi/gomega/gexec" //nolint:revive,stylecheck
+	. "github.com/onsi/ginkgo/v2"    //nolint:staticcheck // ST1001: should not use dot imports
+	. "github.com/onsi/gomega"       //nolint:staticcheck // ST1001: should not use dot imports
+	. "github.com/onsi/gomega/gexec" //nolint:staticcheck // ST1001: should not use dot imports
 )
 
-type NetworkBackend int
-
 const (
-	// Container Networking backend
-	CNI NetworkBackend = iota
-	// Netavark network backend
-	Netavark NetworkBackend = iota
 	// Env variable for creating time files.
 	EnvTimeDir = "_PODMAN_TIME_DIR"
 )
-
-func (n NetworkBackend) ToString() string {
-	switch n {
-	case CNI:
-		return "cni"
-	case Netavark:
-		return "netavark"
-	}
-	logrus.Errorf("unknown network backend: %q", n)
-	return ""
-}
 
 var (
 	DefaultWaitTimeout   = 90
@@ -55,26 +37,35 @@ var (
 // PodmanTestCommon contains common functions will be updated later in
 // the inheritance structs
 type PodmanTestCommon interface {
-	MakeOptions(args []string, noEvents, noCache bool) []string
-	WaitForContainer() bool
+	MakeOptions(args []string, options PodmanExecOptions) []string
 	WaitContainerReady(id string, expStr string, timeout int, step int) bool
 }
 
 // PodmanTest struct for command line options
 type PodmanTest struct {
-	ImageCacheDir      string
-	ImageCacheFS       string
-	NetworkBackend     NetworkBackend
-	DatabaseBackend    string
-	PodmanBinary       string
-	PodmanMakeOptions  func(args []string, noEvents, noCache bool) []string
-	RemoteCommand      *exec.Cmd
-	RemotePodmanBinary string
-	RemoteSession      *os.Process
-	RemoteSocket       string
-	RemoteSocketLock   string // If not "", should be removed _after_ RemoteSocket is removed
-	RemoteTest         bool
-	TempDir            string
+	ImageCacheDir           string
+	ImageCacheFS            string
+	DatabaseBackend         string
+	PodmanBinary            string
+	PodmanMakeOptions       func(args []string, options PodmanExecOptions) []string
+	RemoteCommand           *exec.Cmd
+	RemotePodmanBinary      string
+	RemoteSession           *os.Process
+	RemoteSocket            string
+	RemoteSocketScheme      string
+	RemoteSocketLock        string // If not "", should be removed _after_ RemoteSocket is removed
+	RemoteTLSClientCAFile   string
+	RemoteTLSClientCAPool   *x509.CertPool
+	RemoteTLSClientCerts    []tls.Certificate
+	RemoteTLSServerCertFile string
+	RemoteTLSServerKeyFile  string
+	RemoteTLSServerCAFile   string
+	RemoteTLSServerCAPool   *x509.CertPool
+	RemoteTLSClientCertFile string
+	RemoteTLSClientKeyFile  string
+	RemoteTLSDetails        string
+	RemoteTest              bool
+	TempDir                 string // TempDir is a unique per test directory.
 }
 
 // PodmanSession wraps the gexec.session so we can extend it
@@ -86,24 +77,35 @@ type PodmanSession struct {
 type HostOS struct {
 	Distribution string
 	Version      string
-	Arch         string
 }
 
 // MakeOptions assembles all podman options
-func (p *PodmanTest) MakeOptions(args []string, noEvents, noCache bool) []string {
-	return p.PodmanMakeOptions(args, noEvents, noCache)
+func (p *PodmanTest) MakeOptions(args []string, options PodmanExecOptions) []string {
+	return p.PodmanMakeOptions(args, options)
 }
 
-// PodmanAsUserBase exec podman as user. uid and gid is set for credentials usage. env is used
-// to record the env for debugging
-func (p *PodmanTest) PodmanAsUserBase(args []string, uid, gid uint32, cwd string, env []string, noEvents, noCache bool, wrapper []string, extraFiles []*os.File) *PodmanSession {
+// PodmanExecOptions modify behavior of PodmanTest.PodmanExecBaseWithOptions and its callers.
+// Users should typically leave most fields default-initialized, and only set those that are relevant to them.
+type PodmanExecOptions struct {
+	CWD              string   // default: inherited form the current process
+	Env              []string // default: inherited form the current process
+	NoEvents         bool
+	NoCache          bool
+	Wrapper          []string  // A command to run, receiving the Podman command line. default: none
+	FullOutputWriter io.Writer // Receives the full output (stdout+stderr) of the command, in _approximately_ correct order. default: GinkgoWriter
+	ExtraFiles       []*os.File
+}
+
+// PodmanExecBaseWithOptions execs podman with the specified args, and in an environment defined by options
+func (p *PodmanTest) PodmanExecBaseWithOptions(args []string, options PodmanExecOptions) *PodmanSession {
 	var command *exec.Cmd
-	podmanOptions := p.MakeOptions(args, noEvents, noCache)
+	podmanOptions := p.MakeOptions(args, options)
 	podmanBinary := p.PodmanBinary
 	if p.RemoteTest {
 		podmanBinary = p.RemotePodmanBinary
 	}
 
+	runCmd := options.Wrapper
 	if timeDir := os.Getenv(EnvTimeDir); timeDir != "" {
 		timeFile, err := os.CreateTemp(timeDir, ".time")
 		if err != nil {
@@ -111,63 +113,45 @@ func (p *PodmanTest) PodmanAsUserBase(args []string, uid, gid uint32, cwd string
 		}
 		timeArgs := []string{"-f", "%M", "-o", timeFile.Name()}
 		timeCmd := append([]string{"/usr/bin/time"}, timeArgs...)
-		wrapper = append(timeCmd, wrapper...)
+		runCmd = append(timeCmd, runCmd...)
 	}
-	runCmd := wrapper
 	runCmd = append(runCmd, podmanBinary)
 
-	if env == nil {
+	if options.Env == nil {
 		GinkgoWriter.Printf("Running: %s %s\n", strings.Join(runCmd, " "), strings.Join(podmanOptions, " "))
 	} else {
-		GinkgoWriter.Printf("Running: (env: %v) %s %s\n", env, strings.Join(runCmd, " "), strings.Join(podmanOptions, " "))
-	}
-	if uid != 0 || gid != 0 {
-		pythonCmd := fmt.Sprintf("import os; import sys; uid = %d; gid = %d; cwd = '%s'; os.setgid(gid); os.setuid(uid); os.chdir(cwd) if len(cwd)>0 else True; os.execv(sys.argv[1], sys.argv[1:])", gid, uid, cwd)
-		runCmd = append(runCmd, podmanOptions...)
-		nsEnterOpts := append([]string{"-c", pythonCmd}, runCmd...)
-		command = exec.Command("python", nsEnterOpts...)
-	} else {
-		runCmd = append(runCmd, podmanOptions...)
-		command = exec.Command(runCmd[0], runCmd[1:]...)
-	}
-	if env != nil {
-		command.Env = env
-	}
-	if cwd != "" {
-		command.Dir = cwd
+		GinkgoWriter.Printf("Running: (env: %v) %s %s\n", options.Env, strings.Join(runCmd, " "), strings.Join(podmanOptions, " "))
 	}
 
-	command.ExtraFiles = extraFiles
+	runCmd = append(runCmd, podmanOptions...)
+	command = exec.Command(runCmd[0], runCmd[1:]...)
+	if options.Env != nil {
+		command.Env = options.Env
+	}
+	if options.CWD != "" {
+		command.Dir = options.CWD
+	}
 
-	session, err := Start(command, GinkgoWriter, GinkgoWriter)
+	command.ExtraFiles = options.ExtraFiles
+
+	var fullOutputWriter io.Writer = GinkgoWriter
+	if options.FullOutputWriter != nil {
+		fullOutputWriter = options.FullOutputWriter
+	}
+	session, err := Start(command, fullOutputWriter, fullOutputWriter)
 	if err != nil {
 		Fail(fmt.Sprintf("unable to run podman command: %s\n%v", strings.Join(podmanOptions, " "), err))
 	}
 	return &PodmanSession{session}
 }
 
-// PodmanBase exec podman with default env.
-func (p *PodmanTest) PodmanBase(args []string, noEvents, noCache bool) *PodmanSession {
-	return p.PodmanAsUserBase(args, 0, 0, "", nil, noEvents, noCache, nil, nil)
-}
-
-// WaitForContainer waits on a started container
-func (p *PodmanTest) WaitForContainer() bool {
-	for i := 0; i < 10; i++ {
-		if p.NumberOfContainersRunning() > 0 {
-			return true
-		}
-		time.Sleep(1 * time.Second)
-	}
-	GinkgoWriter.Printf("WaitForContainer(): timed out\n")
-	return false
-}
-
 // NumberOfContainersRunning returns an int of how many
 // containers are currently running.
 func (p *PodmanTest) NumberOfContainersRunning() int {
 	var containers []string
-	ps := p.PodmanBase([]string{"ps", "-q"}, false, true)
+	ps := p.PodmanExecBaseWithOptions([]string{"ps", "-q"}, PodmanExecOptions{
+		NoCache: true,
+	})
 	ps.WaitWithDefaultTimeout()
 	Expect(ps).Should(Exit(0))
 	for _, i := range ps.OutputToStringArray() {
@@ -182,7 +166,9 @@ func (p *PodmanTest) NumberOfContainersRunning() int {
 // containers are currently defined.
 func (p *PodmanTest) NumberOfContainers() int {
 	var containers []string
-	ps := p.PodmanBase([]string{"ps", "-aq"}, false, true)
+	ps := p.PodmanExecBaseWithOptions([]string{"ps", "-aq"}, PodmanExecOptions{
+		NoCache: true,
+	})
 	ps.WaitWithDefaultTimeout()
 	Expect(ps.ExitCode()).To(Equal(0))
 	for _, i := range ps.OutputToStringArray() {
@@ -197,7 +183,9 @@ func (p *PodmanTest) NumberOfContainers() int {
 // pods are currently defined.
 func (p *PodmanTest) NumberOfPods() int {
 	var pods []string
-	ps := p.PodmanBase([]string{"pod", "ps", "-q"}, false, true)
+	ps := p.PodmanExecBaseWithOptions([]string{"pod", "ps", "-q"}, PodmanExecOptions{
+		NoCache: true,
+	})
 	ps.WaitWithDefaultTimeout()
 	Expect(ps.ExitCode()).To(Equal(0))
 	for _, i := range ps.OutputToStringArray() {
@@ -211,9 +199,10 @@ func (p *PodmanTest) NumberOfPods() int {
 // GetContainerStatus returns the containers state.
 // This function assumes only one container is active.
 func (p *PodmanTest) GetContainerStatus() string {
-	var podmanArgs = []string{"ps"}
-	podmanArgs = append(podmanArgs, "--all", "--format={{.Status}}")
-	session := p.PodmanBase(podmanArgs, false, true)
+	podmanArgs := []string{"ps", "--all", "--format={{.Status}}"}
+	session := p.PodmanExecBaseWithOptions(podmanArgs, PodmanExecOptions{
+		NoCache: true,
+	})
 	session.WaitWithDefaultTimeout()
 	return session.OutputToString()
 }
@@ -221,7 +210,9 @@ func (p *PodmanTest) GetContainerStatus() string {
 // WaitContainerReady waits process or service inside container start, and ready to be used.
 func (p *PodmanTest) WaitContainerReady(id string, expStr string, timeout int, step int) bool {
 	startTime := time.Now()
-	s := p.PodmanBase([]string{"logs", id}, false, true)
+	s := p.PodmanExecBaseWithOptions([]string{"logs", id}, PodmanExecOptions{
+		NoCache: true,
+	})
 	s.WaitWithDefaultTimeout()
 
 	for {
@@ -234,17 +225,14 @@ func (p *PodmanTest) WaitContainerReady(id string, expStr string, timeout int, s
 			return false
 		}
 		time.Sleep(time.Duration(step) * time.Second)
-		s = p.PodmanBase([]string{"logs", id}, false, true)
+		s = p.PodmanExecBaseWithOptions([]string{"logs", id}, PodmanExecOptions{
+			NoCache: true,
+		})
 		s.WaitWithDefaultTimeout()
 	}
 }
 
-// WaitForContainer is a wrapper function for accept inheritance PodmanTest struct.
-func WaitForContainer(p PodmanTestCommon) bool {
-	return p.WaitForContainer()
-}
-
-// WaitForContainerReady is a wrapper function for accept inheritance PodmanTest struct.
+// WaitContainerReady is a wrapper function for accept inheritance PodmanTest struct.
 func WaitContainerReady(p PodmanTestCommon, id string, expStr string, timeout int, step int) bool {
 	return p.WaitContainerReady(id, expStr, timeout, step)
 }
@@ -264,7 +252,7 @@ func (s *PodmanSession) OutputToString() string {
 func (s *PodmanSession) OutputToStringArray() []string {
 	var results []string
 	output := string(s.Out.Contents())
-	for _, line := range strings.Split(output, "\n") {
+	for line := range strings.SplitSeq(output, "\n") {
 		if line != "" {
 			results = append(results, line)
 		}
@@ -281,83 +269,14 @@ func (s *PodmanSession) ErrorToString() string {
 // ErrorToStringArray returns the stderr output as a []string
 // where each array item is a line split by newline
 func (s *PodmanSession) ErrorToStringArray() []string {
+	var results []string
 	output := string(s.Err.Contents())
-	return strings.Split(output, "\n")
-}
-
-// GrepString takes session output and behaves like grep. it returns a bool
-// if successful and an array of strings on positive matches
-func (s *PodmanSession) GrepString(term string) (bool, []string) {
-	var (
-		greps   []string
-		matches bool
-	)
-
-	for _, line := range s.OutputToStringArray() {
-		if strings.Contains(line, term) {
-			matches = true
-			greps = append(greps, line)
+	for line := range strings.SplitSeq(output, "\n") {
+		if line != "" {
+			results = append(results, line)
 		}
 	}
-	return matches, greps
-}
-
-// ErrorGrepString takes session stderr output and behaves like grep. it returns a bool
-// if successful and an array of strings on positive matches
-func (s *PodmanSession) ErrorGrepString(term string) (bool, []string) {
-	var (
-		greps   []string
-		matches bool
-	)
-
-	for _, line := range s.ErrorToStringArray() {
-		if strings.Contains(line, term) {
-			matches = true
-			greps = append(greps, line)
-		}
-	}
-	return matches, greps
-}
-
-// LineInOutputStartsWith returns true if a line in a
-// session output starts with the supplied string
-func (s *PodmanSession) LineInOutputStartsWith(term string) bool {
-	for _, i := range s.OutputToStringArray() {
-		if strings.HasPrefix(i, term) {
-			return true
-		}
-	}
-	return false
-}
-
-// LineInOutputContains returns true if a line in a
-// session output contains the supplied string
-func (s *PodmanSession) LineInOutputContains(term string) bool {
-	for _, i := range s.OutputToStringArray() {
-		if strings.Contains(i, term) {
-			return true
-		}
-	}
-	return false
-}
-
-// LineInOutputContainsTag returns true if a line in the
-// session's output contains the repo-tag pair as returned
-// by podman-images(1).
-func (s *PodmanSession) LineInOutputContainsTag(repo, tag string) bool {
-	tagMap := tagOutputToMap(s.OutputToStringArray())
-	return tagMap[repo][tag]
-}
-
-// IsJSONOutputValid attempts to unmarshal the session buffer
-// and if successful, returns true, else false
-func (s *PodmanSession) IsJSONOutputValid() bool {
-	var i interface{}
-	if err := json.Unmarshal(s.Out.Contents(), &i); err != nil {
-		GinkgoWriter.Println(err)
-		return false
-	}
-	return true
+	return results
 }
 
 // WaitWithDefaultTimeout waits for process finished with DefaultWaitTimeout
@@ -405,44 +324,14 @@ func StartSystemExec(command string, args []string) *PodmanSession {
 	return &PodmanSession{session}
 }
 
-// tagOutPutToMap parses each string in imagesOutput and returns
-// a map whose key is a repo, and value is another map whose keys
-// are the tags found for that repo. Notice, the first array item will
-// be skipped as it's considered to be the header.
-func tagOutputToMap(imagesOutput []string) map[string]map[string]bool {
-	m := make(map[string]map[string]bool)
-	// iterate over output but skip the header
-	for _, i := range imagesOutput[1:] {
-		tmp := []string{}
-		for _, x := range strings.Split(i, " ") {
-			if x != "" {
-				tmp = append(tmp, x)
-			}
-		}
-		// podman-images(1) return a list like output
-		// in the format of "Repository Tag [...]"
-		if len(tmp) < 2 {
-			continue
-		}
-		if m[tmp[0]] == nil {
-			m[tmp[0]] = map[string]bool{}
-		}
-		m[tmp[0]][tmp[1]] = true
-	}
-	return m
-}
-
 // GetHostDistributionInfo returns a struct with its distribution Name and version
 func GetHostDistributionInfo() HostOS {
 	f, err := os.Open(OSReleasePath)
-	if err != nil {
-		return HostOS{}
-	}
+	Expect(err).ToNot(HaveOccurred(), "open %s", OSReleasePath)
 	defer f.Close()
 
 	l := bufio.NewScanner(f)
 	host := HostOS{}
-	host.Arch = runtime.GOARCH
 	for l.Scan() {
 		if strings.HasPrefix(l.Text(), "ID=") {
 			host.Distribution = strings.ReplaceAll(strings.TrimSpace(strings.Join(strings.Split(l.Text(), "=")[1:], "")), "\"", "")
@@ -451,6 +340,8 @@ func GetHostDistributionInfo() HostOS {
 			host.Version = strings.ReplaceAll(strings.TrimSpace(strings.Join(strings.Split(l.Text(), "=")[1:], "")), "\"", "")
 		}
 	}
+	err = l.Err()
+	Expect(err).ToNot(HaveOccurred(), "read %s", OSReleasePath)
 	return host
 }
 
@@ -463,7 +354,7 @@ func IsCommandAvailable(command string) bool {
 
 // WriteJSONFile write json format data to a json file
 func WriteJSONFile(data []byte, filePath string) error {
-	var jsonData map[string]interface{}
+	var jsonData map[string]any
 	if err := json.Unmarshal(data, &jsonData); err != nil {
 		return err
 	}
@@ -471,7 +362,7 @@ func WriteJSONFile(data []byte, filePath string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filePath, formatJSON, 0644)
+	return os.WriteFile(filePath, formatJSON, 0o644)
 }
 
 // Containerized check the podman command run inside container
@@ -518,7 +409,7 @@ func savePublicKey(fileName string, publicKey *rsa.PublicKey) (string, error) {
 
 	// Write public key to file
 	publicKeyFileName := fileName + ".rsa.pub"
-	if err := os.WriteFile(publicKeyFileName, pubPEM, 0600); err != nil {
+	if err := os.WriteFile(publicKeyFileName, pubPEM, 0o600); err != nil {
 		return "", err
 	}
 
@@ -540,7 +431,7 @@ func savePrivateKey(fileName string, privateKey *rsa.PrivateKey) (string, error)
 
 	// Write private key to file
 	privateKeyFileName := fileName + ".rsa"
-	if err := os.WriteFile(privateKeyFileName, keyPEM, 0600); err != nil {
+	if err := os.WriteFile(privateKeyFileName, keyPEM, 0o600); err != nil {
 		return "", err
 	}
 

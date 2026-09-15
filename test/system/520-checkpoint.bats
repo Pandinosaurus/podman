@@ -22,23 +22,20 @@ function setup() {
         skip "checkpoint does not work rootless"
     fi
 
+    basic_setup
+
+    # Note basic_setup defines $PODMAN_RUNTIME so this must be after it
+
     # As of 2024-05, crun on Debian is not built with criu support:
     # https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1008249
-    runtime=$(podman_runtime)
+    runtime="$PODMAN_RUNTIME"
     run $runtime checkpoint --help
     if [[ $status -ne 0 ]]; then
         skip "runtime $runtime does not support checkpoint/restore"
     fi
-
-    basic_setup
 }
 
-function teardown() {
-    run_podman '?' volume rm myvol
-
-    basic_teardown
-}
-
+# bats test_tags=ci:parallel
 @test "podman checkpoint - basic test" {
     run_podman run -d $IMAGE sh -c 'while :;do cat /proc/uptime; sleep 0.1;done'
     local cid="$output"
@@ -114,6 +111,7 @@ function teardown() {
     run_podman rm -t 0 -f $cid
 }
 
+# CANNOT BE PARALLELIZED: checkpoint -a
 @test "podman checkpoint/restore print IDs or raw input" {
     # checkpoint/restore -a must print the IDs
     run_podman run -d $IMAGE top
@@ -124,7 +122,7 @@ function teardown() {
     is "$output" "$ctrID"
 
     # checkpoint/restore $input must print $input
-    cname=$(random_string)
+    cname=c-$(safename)
     run_podman run -d --name $cname $IMAGE top
     run_podman container checkpoint $cname
     is "$output" $cname
@@ -134,21 +132,26 @@ function teardown() {
     run_podman rm -t 0 -f $ctrID $cname
 }
 
+# bats test_tags=ci:parallel
 @test "podman checkpoint --export, with volumes" {
+    skip_if_aarch64 "FIXME #28576: selinux problem only on aarch64"
     skip_if_remote "Test uses --root/--runroot, which are N/A over remote"
 
-    # To avoid network pull, copy $IMAGE straight to temp root
     local p_opts="$(podman_isolation_opts ${PODMAN_TMPDIR}) --events-backend file"
-    run_podman         save -o $PODMAN_TMPDIR/image.tar $IMAGE
-    run_podman $p_opts load -i $PODMAN_TMPDIR/image.tar
+    # prefetch image to avoid registry pulls because this is using a
+    # unique root which does not have the image already present.
+    # _PODMAN_TEST_OPTS is used to overwrite the podman options to
+    # make the function aware of the custom --root.
+    _PODMAN_TEST_OPTS="$p_opts --storage-driver $(podman_storage_driver)" _prefetch $IMAGE
 
     # Create a volume, find unused network port, and create a webserv container
-    run_podman $p_opts volume create myvol
-    local cname=c_$(random_string 10)
+    volname=v-$(safename)
+    run_podman $p_opts volume create $volname
+    local cname=c-$(safename)
     local host_port=$(random_free_port)
     local server=http://127.0.0.1:$host_port
 
-    run_podman $p_opts run -d --name $cname --volume myvol:/myvol \
+    run_podman $p_opts run -d --name $cname --volume $volname:/myvol \
                -p $host_port:80 \
                -w /myvol \
                $IMAGE sh -c "/bin/busybox-extras httpd -p 80;echo $cname >cname;echo READY;while :;do cat /proc/uptime >mydate.tmp;mv -f mydate.tmp mydate;sleep 0.1;done"
@@ -192,11 +195,12 @@ function teardown() {
     is "$output" "$cname" "volume transferred fine"
 
     run_podman rm -t 0 -f $cid
-    run_podman volume rm -f myvol
+    run_podman volume rm -f $volname
 }
 
 # FIXME: test --leave-running
 
+# bats test_tags=ci:parallel
 @test "podman checkpoint --file-locks" {
     action='flock test.lock sh -c "while [ -e /wait ];do sleep 0.5;done;for i in 1 2 3;do echo \$i;sleep 0.5;done"'
     run_podman run -d $IMAGE sh -c "touch /wait; touch test.lock; echo READY; $action & $action & wait"
@@ -232,10 +236,17 @@ function teardown() {
     run_podman rm $cid
 }
 
+# bats test_tags=ci:parallel
 @test "podman checkpoint/restore ip and mac handling" {
+    # Broken only debian as it seems the host's /etc/hosts file keeps changing
+    # which causes false positives in the before/after restore comparison.
+    OS_RELEASE_ID="${OS_RELEASE_ID:-$(source /etc/os-release; echo $ID)}"
+    if [[ "$OS_RELEASE_ID" == "debian" ]]; then
+        skip "Test flakes on debian in CI"
+    fi
     # Refer to https://github.com/containers/podman/issues/16666#issuecomment-1337860545
     # for the correct behavior, this should cover all cases listed there.
-    local netname=net-$(random_string)
+    local netname="net-$(safename)"
     local subnet="$(random_rfc1918_subnet)"
     run_podman network create --subnet "$subnet.0/24" $netname
 
@@ -246,6 +257,11 @@ function teardown() {
     ip1="$output"
     run_podman inspect $cid --format "{{(index .NetworkSettings.Networks \"$netname\").MacAddress}}"
     mac1="$output"
+
+    # There is a weird flake, where the hosts content changed after restore and I don't know why.
+    # Because we start from a /etc/hosts base on the host print that.
+    echo "hosts file on the host"
+    cat /etc/hosts
 
     run_podman exec $cid cat /etc/hosts /etc/resolv.conf
     pre_hosts_resolv_conf_output="$output"
@@ -319,7 +335,8 @@ function teardown() {
     # now restore it again but with --name this time, it should not keep the
     # mac and ip to allow restoring the same container with different names
     # at the same time
-    run_podman container restore --import "$archive" --name "newcon"
+    newname="newc-$(safename)"
+    run_podman container restore --import "$archive" --name $newname
     cid="$output"
 
     run_podman inspect $cid --format "{{(index .NetworkSettings.Networks \"$netname\").IPAddress}}"
@@ -422,6 +439,7 @@ function teardown() {
 }
 
 # rhbz#2177611 : podman breaks checkpoint/restore
+# CANNOT BE PARALLELIZED: --latest
 @test "podman checkpoint/restore the latest container" {
     skip_if_remote "podman-remote does not support --latest option"
     # checkpoint/restore -l must print the IDs
@@ -442,6 +460,33 @@ function teardown() {
     is "$output" "running:true:false:false" "State. Status:Running:Pause:Checkpointed"
 
     run_podman rm -t 0 -f $ctrID
+}
+
+@test "podman checkpoint/restore - publish with default_host_ips" {
+    skip_if_remote "CONTAINERS_CONF_OVERRIDE redirect does not work on remote"
+
+    local port=$(random_free_port)
+    local archive=$PODMAN_TMPDIR/checkpoint.tar.gz
+    containersconf=$PODMAN_TMPDIR/containers.conf
+    cat >$containersconf <<EOF
+[network]
+  default_host_ips = ["127.0.0.1"]
+EOF
+
+    run_podman run -d $IMAGE top
+    local cid="$output"
+
+    run_podman container checkpoint --export "$archive" $cid
+    is "$output" "$cid" "podman container checkpoint"
+    run_podman rm -t 0 -f $cid
+
+    CONTAINERS_CONF_OVERRIDE=$containersconf run_podman container restore --import "$archive" --publish $port:80
+    local newcid="$output"
+
+    CONTAINERS_CONF_OVERRIDE=$containersconf run_podman inspect $newcid --format "{{.HostConfig.PortBindings}}"
+    assert "$output" =~ "127.0.0.1" "HostIP should be 127.0.0.1 from config"
+
+    run_podman rm -t 0 -f $newcid
 }
 
 # vim: filetype=sh

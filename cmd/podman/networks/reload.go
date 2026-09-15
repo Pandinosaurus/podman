@@ -3,13 +3,13 @@ package network
 import (
 	"fmt"
 
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/utils"
-	"github.com/containers/podman/v5/cmd/podman/validate"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/utils"
+	"go.podman.io/podman/v6/cmd/podman/validate"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 var (
@@ -25,13 +25,11 @@ var (
 		},
 		ValidArgsFunction: common.AutocompleteContainers,
 		Example: `podman network reload 3c13ef6dd843
-  podman network reload test1 test2`,
+podman network reload test1 test2`,
 	}
 )
 
-var (
-	reloadOptions entities.NetworkReloadOptions
-)
+var reloadOptions entities.NetworkReloadOptions
 
 func reloadFlags(flags *pflag.FlagSet) {
 	flags.BoolVarP(&reloadOptions.All, "all", "a", false, "Reload network configuration of all containers")
@@ -46,7 +44,7 @@ func init() {
 	validate.AddLatestFlag(networkReloadCommand, &reloadOptions.Latest)
 }
 
-func networkReload(cmd *cobra.Command, args []string) error {
+func networkReload(_ *cobra.Command, args []string) error {
 	responses, err := registry.ContainerEngine().NetworkReload(registry.Context(), args, reloadOptions)
 	if err != nil {
 		return err

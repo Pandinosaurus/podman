@@ -5,10 +5,8 @@ package criu
 import (
 	"fmt"
 
-	"github.com/checkpoint-restore/go-criu/v7"
-	"github.com/checkpoint-restore/go-criu/v7/rpc"
-
-	"google.golang.org/protobuf/proto"
+	"github.com/checkpoint-restore/go-criu/v8"
+	"github.com/checkpoint-restore/go-criu/v8/rpc"
 )
 
 // CheckForCriu uses CRIU's go bindings to check if the CRIU
@@ -29,7 +27,7 @@ func CheckForCriu(version int) error {
 func MemTrack() bool {
 	features, err := criu.MakeCriu().FeatureCheck(
 		&rpc.CriuFeatures{
-			MemTrack: proto.Bool(true),
+			MemTrack: new(true),
 		},
 	)
 	if err != nil {

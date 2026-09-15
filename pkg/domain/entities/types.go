@@ -3,25 +3,16 @@ package entities
 import (
 	"net"
 
-	"github.com/containers/common/libnetwork/types"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/libpod/events"
-	entitiesTypes "github.com/containers/podman/v5/pkg/domain/entities/types"
-	"github.com/containers/podman/v5/pkg/specgen"
-	"github.com/containers/storage/pkg/archive"
-	dockerAPI "github.com/docker/docker/api/types"
+	"go.podman.io/common/libnetwork/types"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/libpod/events"
+	entitiesTypes "go.podman.io/podman/v6/pkg/domain/entities/types"
+	"go.podman.io/podman/v6/pkg/specgen"
+	"go.podman.io/storage/pkg/archive"
 )
 
-type Container struct {
-	IDOrNamed
-}
-
-type Volume struct {
-	Identifier
-}
-
 type Report struct {
-	Id  []string //nolint:revive,stylecheck
+	Id  []string
 	Err map[string]error
 }
 
@@ -40,6 +31,7 @@ type NetFlags struct {
 	MacAddr      string   `json:"mac-address,omitempty"`
 	Publish      []string `json:"publish,omitempty"`
 	IP           string   `json:"ip,omitempty"`
+	NoHostname   bool     `json:"no-hostname,omitempty"`
 	NoHosts      bool     `json:"no-hosts,omitempty"`
 	Network      string   `json:"network,omitempty"`
 	NetworkAlias []string `json:"network-alias,omitempty"`
@@ -51,11 +43,14 @@ type NetOptions struct {
 	AddHosts           []string                           `json:"hostadd,omitempty"`
 	Aliases            []string                           `json:"network_alias,omitempty"`
 	Networks           map[string]types.PerNetworkOptions `json:"networks,omitempty"`
+	NetworkOrder       []string                           `json:"network_order,omitempty"`
 	UseImageResolvConf bool                               `json:"no_manage_resolv_conf,omitempty"`
 	DNSOptions         []string                           `json:"dns_option,omitempty"`
 	DNSSearch          []string                           `json:"dns_search,omitempty"`
 	DNSServers         []net.IP                           `json:"dns_server,omitempty"`
-	Network            specgen.Namespace                  `json:"netns,omitempty"`
+	HostsFile          string                             `json:"hosts_file,omitempty"`
+	Network            specgen.Namespace                  `json:"netns"`
+	NoHostname         bool                               `json:"no_manage_hostname,omitempty"`
 	NoHosts            bool                               `json:"no_manage_hosts,omitempty"`
 	PublishPorts       []types.PortMapping                `json:"portmappings,omitempty"`
 	// NetworkOptions are additional options for each network
@@ -90,7 +85,7 @@ type DiffReport struct {
 
 type EventsOptions struct {
 	FromStart bool
-	EventChan chan *events.Event
+	EventChan chan events.ReadResult
 	Filter    []string
 	Stream    bool
 	Since     string
@@ -114,5 +109,4 @@ type IDOrNameResponse struct {
 	IDOrName string
 }
 
-// swagger:model
-type IDResponse dockerAPI.IDResponse
+type IDResponse = entitiesTypes.IDResponse

@@ -3,10 +3,13 @@
 package integration
 
 import (
-	. "github.com/containers/podman/v5/test/utils"
+	"os"
+	"path/filepath"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	. "github.com/onsi/gomega/gexec"
+	. "go.podman.io/podman/v6/test/utils"
 )
 
 var _ = Describe("Podman container clone", func() {
@@ -15,7 +18,6 @@ var _ = Describe("Podman container clone", func() {
 	})
 
 	It("podman container clone basic test", func() {
-		SkipIfRootlessCgroupsV1("starting a container with the memory limits not supported")
 		create := podmanTest.Podman([]string{"create", ALPINE})
 		create.WaitWithDefaultTimeout()
 		Expect(create).To(ExitCleanly())
@@ -41,14 +43,14 @@ var _ = Describe("Podman container clone", func() {
 		create := podmanTest.Podman([]string{"create", ALPINE})
 		create.WaitWithDefaultTimeout()
 		Expect(create).To(ExitCleanly())
-		clone := podmanTest.Podman([]string{"container", "clone", create.OutputToString(), "new_name", fedoraMinimal})
+		clone := podmanTest.Podman([]string{"container", "clone", create.OutputToString(), "new_name", FEDORA_MINIMAL})
 		clone.WaitWithDefaultTimeout()
 		Expect(clone).To(ExitCleanly())
 
 		ctrInspect := podmanTest.Podman([]string{"inspect", clone.OutputToString()})
 		ctrInspect.WaitWithDefaultTimeout()
 		Expect(ctrInspect).To(ExitCleanly())
-		Expect(ctrInspect.InspectContainerToJSON()[0]).To(HaveField("ImageName", fedoraMinimal))
+		Expect(ctrInspect.InspectContainerToJSON()[0]).To(HaveField("ImageName", FEDORA_MINIMAL))
 		Expect(ctrInspect.InspectContainerToJSON()[0]).To(HaveField("Name", "new_name"))
 	})
 
@@ -68,7 +70,6 @@ var _ = Describe("Podman container clone", func() {
 	})
 
 	It("podman container clone resource limits override", func() {
-		SkipIfRootlessCgroupsV1("Not supported for rootless + CgroupsV1")
 		create := podmanTest.Podman([]string{"create", "--cpus=5", ALPINE})
 		create.WaitWithDefaultTimeout()
 		Expect(create).To(ExitCleanly())
@@ -139,12 +140,10 @@ var _ = Describe("Podman container clone", func() {
 		cloneInspect.WaitWithDefaultTimeout()
 		Expect(cloneInspect).To(ExitCleanly())
 		cloneData = cloneInspect.InspectContainerToJSON()
-		Expect(cloneData[0].HostConfig).To(HaveField("MemorySwappiness", int64(0)))
-
+		Expect(cloneData[0].HostConfig.MemorySwappiness).To(BeNil())
 	})
 
 	It("podman container clone in a pod", func() {
-		SkipIfRootlessCgroupsV1("starting a container with the memory limits not supported")
 		run := podmanTest.Podman([]string{"run", "-dt", "--pod", "new:1234", ALPINE, "sleep", "20"})
 		run.WaitWithDefaultTimeout()
 		Expect(run).To(ExitCleanly())
@@ -248,7 +247,6 @@ var _ = Describe("Podman container clone", func() {
 		clone = podmanTest.Podman([]string{"container", "clone", "-f", run.OutputToString()})
 		clone.WaitWithDefaultTimeout()
 		Expect(clone).ToNot(ExitCleanly())
-
 	})
 
 	It("podman container clone network passing", func() {
@@ -302,6 +300,53 @@ var _ = Describe("Podman container clone", func() {
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 		Expect(session.OutputToString()).Should(ContainSubstring("12=3"))
+	})
 
+	It("podman container clone with secret env", func() {
+		secretsString := "somesecretdata"
+		secretFilePath := filepath.Join(podmanTest.TempDir, "secret")
+		err := os.WriteFile(secretFilePath, []byte(secretsString), 0o755)
+		Expect(err).ToNot(HaveOccurred())
+
+		podmanTest.PodmanExitCleanly("secret", "create", "mysecret", secretFilePath)
+
+		session := podmanTest.PodmanExitCleanly("run", "--secret", "source=mysecret,type=env", "--name", "secr", ALPINE, "printenv", "mysecret")
+		Expect(session.OutputToString()).To(Equal(secretsString))
+
+		podmanTest.PodmanExitCleanly("container", "clone", "secr")
+
+		session = podmanTest.PodmanExitCleanly("start", "-a", "secr-clone")
+		Expect(session.OutputToString()).To(Equal(secretsString))
+
+		cloneData := podmanTest.PodmanExitCleanly("inspect", "secr-clone").InspectContainerToJSON()[0]
+		Expect(cloneData.Config.Env).To(ContainElement("mysecret=*******"))
+	})
+
+	It("podman container clone container with healthcheck", func() {
+		podmanTest.PodmanExitCleanly(
+			"run", "-d", "--rm",
+			"--health-cmd", "true", "--health-start-period", "10s", "--health-interval", "10s", "--health-timeout", "10s", "--health-retries", "2",
+			"--health-startup-cmd", "true", "--health-startup-interval", "10s", "--health-startup-timeout", "10s", "--health-startup-retries", "2", "--health-startup-success", "1",
+			"--health-on-failure", "stop", "--health-max-log-count", "1", "--health-max-log-size", "1", "--health-log-destination", podmanTest.TempDir,
+			"--name", "parent", ALPINE, "sleep", "200",
+		)
+
+		podmanTest.PodmanExitCleanly("healthcheck", "run", "parent")
+		podmanTest.PodmanExitCleanly("container", "clone", "--run", "parent", "clone", ALPINE)
+		podmanTest.PodmanExitCleanly("healthcheck", "run", "clone")
+
+		parentInspect := podmanTest.PodmanExitCleanly("inspect", "parent")
+		parentData := parentInspect.InspectContainerToJSON()[0]
+
+		cloneInspect := podmanTest.PodmanExitCleanly("inspect", "clone")
+		cloneData := cloneInspect.InspectContainerToJSON()[0]
+
+		Expect(parentData.Config.HealthcheckOnFailureAction).To(Equal(cloneData.Config.HealthcheckOnFailureAction))
+		Expect(*parentData.Config.Healthcheck).To(Equal(*cloneData.Config.Healthcheck))
+		Expect(*parentData.Config.StartupHealthCheck).To(Equal(*cloneData.Config.StartupHealthCheck))
+		Expect(parentData.Config.HealthcheckOnFailureAction).To(Equal(cloneData.Config.HealthcheckOnFailureAction))
+		Expect(parentData.Config.HealthLogDestination).To(Equal(cloneData.Config.HealthLogDestination))
+		Expect(parentData.Config.HealthMaxLogCount).To(Equal(cloneData.Config.HealthMaxLogCount))
+		Expect(parentData.Config.HealthMaxLogSize).To(Equal(cloneData.Config.HealthMaxLogSize))
 	})
 })

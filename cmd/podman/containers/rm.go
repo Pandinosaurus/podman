@@ -7,15 +7,15 @@ import (
 	"os"
 	"strings"
 
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/utils"
-	"github.com/containers/podman/v5/cmd/podman/validate"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/domain/entities"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/utils"
+	"go.podman.io/podman/v6/cmd/podman/validate"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/domain/entities"
 )
 
 var (
@@ -31,10 +31,10 @@ var (
 			return validate.CheckAllLatestAndIDFile(cmd, args, false, "cidfile")
 		},
 		ValidArgsFunction: common.AutocompleteContainers,
-		Example: `podman rm imageID
-  podman rm mywebserver myflaskserver 860a4b23
-  podman rm --force --all
-  podman rm -f c684f0d469f2`,
+		Example: `podman rm ctrID
+podman rm mywebserver myflaskserver 860a4b23
+podman rm --force --all
+podman rm -f c684f0d469f2`,
 	}
 
 	containerRmCommand = &cobra.Command{
@@ -44,10 +44,10 @@ var (
 		RunE:              rmCommand.RunE,
 		Args:              rmCommand.Args,
 		ValidArgsFunction: rmCommand.ValidArgsFunction,
-		Example: `podman container rm imageID
-  podman container rm mywebserver myflaskserver 860a4b23
-  podman container rm --force --all
-  podman container rm -f c684f0d469f2`,
+		Example: `podman container rm ctrID
+podman container rm mywebserver myflaskserver 860a4b23
+podman container rm --force --all
+podman container rm -f c684f0d469f2`,
 	}
 )
 

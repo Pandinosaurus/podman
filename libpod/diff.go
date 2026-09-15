@@ -1,13 +1,13 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package libpod
 
 import (
 	"fmt"
 
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/libpod/layers"
-	"github.com/containers/storage/pkg/archive"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/libpod/layers"
+	"go.podman.io/storage/pkg/archive"
 )
 
 var initInodes = map[string]bool{

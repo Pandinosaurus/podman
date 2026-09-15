@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package libpod
 
@@ -6,13 +6,13 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/containers/common/pkg/config"
-	"github.com/containers/podman/v5/libpod"
-	"github.com/containers/podman/v5/pkg/api/handlers/utils"
-	api "github.com/containers/podman/v5/pkg/api/types"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/domain/infra/abi"
 	"github.com/gorilla/schema"
+	"go.podman.io/common/pkg/config"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/pkg/api/handlers/utils"
+	api "go.podman.io/podman/v6/pkg/api/types"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/domain/infra/abi"
 )
 
 func GenerateSystemd(w http.ResponseWriter, r *http.Request) {
@@ -138,7 +138,5 @@ func GenerateKube(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// FIXME: Content-Type is being set as application/x-tar NOT text/vnd.yaml
-	// https://mailarchive.ietf.org/arch/msg/media-types/e9ZNC0hDXKXeFlAVRWxLCCaG9GI/
-	utils.WriteResponse(w, http.StatusOK, report.Reader)
+	utils.WriteResponseWithContentType(w, http.StatusOK, report.Reader, "text/vnd.yaml")
 }

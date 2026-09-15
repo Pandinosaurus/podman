@@ -3,23 +3,37 @@
 package integration
 
 import (
+	"bytes"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
-	. "github.com/containers/podman/v5/test/utils"
-	"github.com/containers/storage/pkg/archive"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	. "github.com/onsi/gomega/gexec"
+	"go.podman.io/image/v5/signature/simplesequoia"
+	. "go.podman.io/podman/v6/test/utils"
+	"go.podman.io/storage/pkg/archive"
+	"go.podman.io/storage/pkg/fileutils"
 )
 
-var _ = Describe("Podman push", func() {
+// testSequoiaKeyFingerprint is a fingerprint of a test Sequoia key in testdata.
+const testSequoiaKeyFingerprint = "50DDE898DF4E48755C8C2B7AF6F908B6FA48A229"
 
+var _ = Describe("Podman push", func() {
 	BeforeEach(func() {
 		podmanTest.AddImageToRWStore(ALPINE)
+	})
+
+	It("podman push --sign-by errors on remote", func() {
+		SkipIfNotRemote("Signing is only rejected by the remote client")
+		// Signing is not implemented for remote clients. Make sure we say so
+		// rather than pushing an unsigned image and reporting success.
+		session := podmanTest.Podman([]string{"push", "-q", "--sign-by", "foo@bar.com", ALPINE, "docker://localhost:5000/my-alpine"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitWithError(125, "signing is not supported for remote clients"))
 	})
 
 	It("podman push to containers/storage", func() {
@@ -36,14 +50,18 @@ var _ = Describe("Podman push", func() {
 	It("podman push to dir", func() {
 		SkipIfRemote("Remote push does not support dir transport")
 		bbdir := filepath.Join(podmanTest.TempDir, "busybox")
-		session := podmanTest.Podman([]string{"push", "-q", "--remove-signatures", ALPINE,
-			fmt.Sprintf("dir:%s", bbdir)})
+		session := podmanTest.Podman([]string{
+			"push", "-q", "--remove-signatures", ALPINE,
+			fmt.Sprintf("dir:%s", bbdir),
+		})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 
 		bbdir = filepath.Join(podmanTest.TempDir, "busybox")
-		session = podmanTest.Podman([]string{"push", "-q", "--format", "oci", ALPINE,
-			fmt.Sprintf("dir:%s", bbdir)})
+		session = podmanTest.Podman([]string{
+			"push", "-q", "--format", "oci", ALPINE,
+			fmt.Sprintf("dir:%s", bbdir),
+		})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 	})
@@ -57,8 +75,10 @@ var _ = Describe("Podman push", func() {
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitWithError(125, "writing blob: happened during read: gzip: invalid compression level: 40"))
 
-		session = podmanTest.Podman([]string{"push", "-q", "--compression-format=zstd", "--remove-signatures", ALPINE,
-			fmt.Sprintf("oci:%s", bbdir)})
+		session = podmanTest.Podman([]string{
+			"push", "-q", "--compression-format=zstd", "--remove-signatures", ALPINE,
+			fmt.Sprintf("oci:%s", bbdir),
+		})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 
@@ -85,7 +105,7 @@ var _ = Describe("Podman push", func() {
 	})
 
 	It("push test --force-compression", func() {
-		if podmanTest.Host.Arch == "ppc64le" {
+		if runtime.GOARCH == "ppc64le" {
 			Skip("No registry image for ppc64le")
 		}
 		if isRootless() {
@@ -141,8 +161,49 @@ var _ = Describe("Podman push", func() {
 		Expect(output).To(ContainSubstring("zstd"))
 	})
 
+	It("push test --force-compression --format=v2s2", func() {
+		if runtime.GOARCH == "ppc64le" {
+			Skip("No registry image for ppc64le")
+		}
+		if isRootless() {
+			err := podmanTest.RestoreArtifact(REGISTRY_IMAGE)
+			Expect(err).ToNot(HaveOccurred())
+		}
+		lock := GetPortLock("5005")
+		defer lock.Unlock()
+		session := podmanTest.Podman([]string{"run", "-d", "--name", "registry", "-p", "5005:5000", REGISTRY_IMAGE, "/entrypoint.sh", "/etc/docker/registry/config.yml"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+
+		if !WaitContainerReady(podmanTest, "registry", "listening on", 20, 1) {
+			Skip("Cannot start docker registry.")
+		}
+
+		session = podmanTest.Podman([]string{"build", "-t", "imageone", "build/basicalpine"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+
+		push := podmanTest.Podman([]string{"push", "-q", "--tls-verify=false", "--force-compression=true", "--compression-format", "gzip", "--format", "v2s2", "--remove-signatures", "imageone", "localhost:5005/image"})
+		push.WaitWithDefaultTimeout()
+		Expect(push).Should(ExitCleanly())
+
+		skopeoInspect := []string{"inspect", "--tls-verify=false", "--raw", "docker://localhost:5005/image:latest"}
+		skopeo := SystemExec("skopeo", skopeoInspect)
+		skopeo.WaitWithDefaultTimeout()
+		Expect(skopeo).Should(ExitCleanly())
+		output := skopeo.OutputToString()
+		Expect(output).To(ContainSubstring("gzip"))
+
+		push = podmanTest.Podman([]string{"push", "-q", "--tls-verify=false", "--force-compression=true", "--compression-format", "zstd", "--format", "v2s2", "--remove-signatures", "imageone", "localhost:5005/image"})
+		push.WaitWithDefaultTimeout()
+		// the command is asking for an impossible thing; per containers/common#1869, we should detect
+		// that and fail with a precise error, but that does not exist, so we end up reporting this
+		// misleading text. When that is resolved, this test will need updating.
+		Expect(push).Should(ExitWithError(125, "cannot use ForceCompressionFormat with undefined default compression format"))
+	})
+
 	It("podman push to local registry", func() {
-		if podmanTest.Host.Arch == "ppc64le" {
+		if runtime.GOARCH == "ppc64le" {
 			Skip("No registry image for ppc64le")
 		}
 		if isRootless() {
@@ -194,22 +255,26 @@ var _ = Describe("Podman push", func() {
 		Expect(push2).Should(ExitCleanly())
 
 		if !IsRemote() { // Remote does not support signing
-			By("pushing and pulling with --sign-by-sigstore-private-key")
 			// Ideally, this should set SystemContext.RegistriesDirPath, but Podman currently doesn’t
 			// expose that as an option. So, for now, modify /etc/directly, and skip testing sigstore if
 			// we don’t have permission to do so.
+			lookasideDir, err := filepath.Abs(filepath.Join(podmanTest.TempDir, "test-lookaside"))
+			Expect(err).ToNot(HaveOccurred())
 			systemRegistriesDAddition := "/etc/containers/registries.d/podman-test-only-temporary-addition.yaml"
-			cmd := exec.Command("cp", "testdata/sigstore-registries.d-fragment.yaml", systemRegistriesDAddition)
-			output, err := cmd.CombinedOutput()
+			registriesDFragment, err := os.ReadFile("testdata/sigstore-registries.d-fragment.yaml")
+			Expect(err).ToNot(HaveOccurred())
+			registriesDFragment = bytes.ReplaceAll(registriesDFragment, []byte("@lookasideDir@"), []byte(lookasideDir))
+			err = os.WriteFile(systemRegistriesDAddition, registriesDFragment, 0o644)
 			if err != nil {
-				GinkgoWriter.Printf("Skipping sigstore tests because /etc/containers/registries.d isn’t writable: %s\n", string(output))
+				GinkgoWriter.Printf("Skipping sigstore tests because /etc/containers/registries.d isn’t writable: %s\n", err)
 			} else {
+				By("pushing and pulling with --sign-by-sigstore-private-key")
 				defer func() {
 					err := os.Remove(systemRegistriesDAddition)
 					Expect(err).ToNot(HaveOccurred())
 				}()
 				// Generate a signature verification policy file
-				policyPath := generatePolicyFile(podmanTest.TempDir, 5003)
+				policyPath := generatePolicyFile(podmanTest.TempDir, 5003, "testdata/sequoia-key.pub")
 				defer os.Remove(policyPath)
 
 				// Verify that the policy rejects unsigned images
@@ -248,6 +313,40 @@ var _ = Describe("Podman push", func() {
 				pull = podmanTest.Podman([]string{"pull", "-q", "--tls-verify=false", "--signature-policy", policyPath, "localhost:5003/sigstore-signed-params"})
 				pull.WaitWithDefaultTimeout()
 				Expect(pull).Should(ExitCleanly())
+
+				signer, err := simplesequoia.NewSigner(
+					simplesequoia.WithSequoiaHome("testdata"),
+					simplesequoia.WithKeyFingerprint(testSequoiaKeyFingerprint),
+				)
+				if err != nil {
+					GinkgoWriter.Printf("Skipping Sequoia tests because simplesequoia.NewSigner failed: %s\n", err)
+				} else {
+					signer.Close()
+
+					By("pushing and pulling with --sign-by-sq-fingerprint")
+					absSequoiaHome, err := filepath.Abs("testdata")
+					Expect(err).ToNot(HaveOccurred())
+					defer os.Unsetenv("SEQUOIA_HOME")
+					os.Setenv("SEQUOIA_HOME", absSequoiaHome)
+
+					// Verify that the policy rejects unsigned images
+					push = podmanTest.Podman([]string{"push", "-q", "--tls-verify=false", "--remove-signatures", ALPINE, "localhost:5003/simple-sq-signed"})
+					push.WaitWithDefaultTimeout()
+					Expect(push).Should(ExitCleanly())
+
+					pull = podmanTest.Podman([]string{"pull", "-q", "--tls-verify=false", "--signature-policy", policyPath, "localhost:5003/simple-sq-signed"})
+					pull.WaitWithDefaultTimeout()
+					Expect(pull).To(ExitWithError(125, "A signature was required, but no signature exists"))
+
+					// Sign an image, and verify it is accepted.
+					push = podmanTest.Podman([]string{"push", "-q", "--tls-verify=false", "--remove-signatures", "--sign-by-sq-fingerprint", testSequoiaKeyFingerprint, ALPINE, "localhost:5003/simple-sq-signed"})
+					push.WaitWithDefaultTimeout()
+					Expect(push).Should(ExitCleanly())
+
+					pull = podmanTest.Podman([]string{"pull", "-q", "--tls-verify=false", "--signature-policy", policyPath, "localhost:5003/simple-sq-signed"})
+					pull.WaitWithDefaultTimeout()
+					Expect(pull).Should(ExitCleanly())
+				}
 			}
 		}
 	})
@@ -269,7 +368,7 @@ var _ = Describe("Podman push", func() {
 
 	It("podman push to local registry with authorization", func() {
 		SkipIfRootless("/etc/containers/certs.d not writable")
-		if podmanTest.Host.Arch == "ppc64le" {
+		if runtime.GOARCH == "ppc64le" {
 			Skip("No registry image for ppc64le")
 		}
 		authPath := filepath.Join(podmanTest.TempDir, "auth")
@@ -284,40 +383,37 @@ var _ = Describe("Podman push", func() {
 
 		lock := GetPortLock("5004")
 		defer lock.Unlock()
-		htpasswd := SystemExec("htpasswd", []string{"-Bbn", "podmantest", "test"})
-		htpasswd.WaitWithDefaultTimeout()
-		Expect(htpasswd).Should(ExitCleanly())
 
 		f, err := os.Create(filepath.Join(authPath, "htpasswd"))
 		Expect(err).ToNot(HaveOccurred())
 		defer f.Close()
 
-		_, err = f.WriteString(htpasswd.OutputToString())
-		Expect(err).ToNot(HaveOccurred())
-		err = f.Sync()
+		_, err = f.WriteString(htpasswdLine)
 		Expect(err).ToNot(HaveOccurred())
 
-		session := podmanTest.Podman([]string{"run", "-d", "-p", "5004:5000", "--name", "registry", "-v",
+		session := podmanTest.Podman([]string{
+			"run", "-d", "-p", "5004:5000", "--name", "registry", "-v",
 			strings.Join([]string{authPath, "/auth", "z"}, ":"), "-e", "REGISTRY_AUTH=htpasswd", "-e",
 			"REGISTRY_AUTH_HTPASSWD_REALM=Registry Realm", "-e", "REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd",
 			"-v", strings.Join([]string{certPath, "/certs", "z"}, ":"), "-e", "REGISTRY_HTTP_TLS_CERTIFICATE=/certs/domain.crt",
-			"-e", "REGISTRY_HTTP_TLS_KEY=/certs/domain.key", REGISTRY_IMAGE})
+			"-e", "REGISTRY_HTTP_TLS_KEY=/certs/domain.key", REGISTRY_IMAGE,
+		})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 
 		Expect(WaitContainerReady(podmanTest, "registry", "listening on", 20, 1)).To(BeTrue(), "registry container ready")
 
-		push := podmanTest.Podman([]string{"push", "--tls-verify=true", "--format=v2s2", "--creds=podmantest:test", ALPINE, "localhost:5004/tlstest"})
+		push := podmanTest.Podman([]string{"push", "--tls-verify=true", "--format=v2s2", "--creds=" + registryUser + ":" + registryPassword, ALPINE, "localhost:5004/tlstest"})
 		push.WaitWithDefaultTimeout()
 		Expect(push).To(ExitWithError(125, "x509: certificate signed by unknown authority"))
 
-		push = podmanTest.Podman([]string{"push", "--creds=podmantest:test", "--tls-verify=false", ALPINE, "localhost:5004/tlstest"})
+		push = podmanTest.Podman([]string{"push", "--creds=" + registryUser + ":" + registryPassword, "--tls-verify=false", ALPINE, "localhost:5004/tlstest"})
 		push.WaitWithDefaultTimeout()
 		Expect(push).Should(Exit(0))
 		Expect(push.ErrorToString()).To(ContainSubstring("Writing manifest to image destination"))
 
-		setup := SystemExec("cp", []string{filepath.Join(certPath, "domain.crt"), "/etc/containers/certs.d/localhost:5004/ca.crt"})
-		Expect(setup).Should(ExitCleanly())
+		_, err = fileutils.CopyFile(filepath.Join(certPath, "domain.crt"), "/etc/containers/certs.d/localhost:5004/ca.crt")
+		Expect(err).ToNot(HaveOccurred())
 
 		push = podmanTest.Podman([]string{"push", "--creds=podmantest:wrongpasswd", ALPINE, "localhost:5004/credstest"})
 		push.WaitWithDefaultTimeout()
@@ -325,12 +421,12 @@ var _ = Describe("Podman push", func() {
 
 		if !IsRemote() {
 			// remote does not support --cert-dir
-			push = podmanTest.Podman([]string{"push", "--tls-verify=true", "--creds=podmantest:test", "--cert-dir=fakedir", ALPINE, "localhost:5004/certdirtest"})
+			push = podmanTest.Podman([]string{"push", "--tls-verify=true", "--creds=" + registryUser + ":" + registryPassword, "--cert-dir=fakedir", ALPINE, "localhost:5004/certdirtest"})
 			push.WaitWithDefaultTimeout()
 			Expect(push).To(ExitWithError(125, "x509: certificate signed by unknown authority"))
 		}
 
-		push = podmanTest.Podman([]string{"push", "--creds=podmantest:test", ALPINE, "localhost:5004/defaultflags"})
+		push = podmanTest.Podman([]string{"push", "--creds=" + registryUser + ":" + registryPassword, ALPINE, "localhost:5004/defaultflags"})
 		push.WaitWithDefaultTimeout()
 		Expect(push).Should(Exit(0))
 		Expect(push.ErrorToString()).To(ContainSubstring("Writing manifest to image destination"))
@@ -340,7 +436,7 @@ var _ = Describe("Podman push", func() {
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 
-		session = podmanTest.Podman([]string{"manifest", "push", "--creds=podmantest:test", "--tls-verify=false", "--all", "localhost:5004/manifesttest"})
+		session = podmanTest.Podman([]string{"manifest", "push", "--creds=" + registryUser + ":" + registryPassword, "--tls-verify=false", "--all", "localhost:5004/manifesttest"})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(Exit(0))
 		Expect(session.ErrorToString()).To(ContainSubstring("Writing manifest list to image destination"))
@@ -370,8 +466,10 @@ var _ = Describe("Podman push", func() {
 	It("podman push to docker-archive", func() {
 		SkipIfRemote("Remote push does not support docker-archive transport")
 		tarfn := filepath.Join(podmanTest.TempDir, "alp.tar")
-		session := podmanTest.Podman([]string{"push", "-q", ALPINE,
-			fmt.Sprintf("docker-archive:%s:latest", tarfn)})
+		session := podmanTest.Podman([]string{
+			"push", "-q", ALPINE,
+			fmt.Sprintf("docker-archive:%s:latest", tarfn),
+		})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 	})
@@ -381,7 +479,7 @@ var _ = Describe("Podman push", func() {
 		SkipIfRootless("rootless user has no permission to use default docker.sock")
 		setup := SystemExec("bash", []string{"-c", "systemctl status docker 2>&1"})
 
-		if setup.LineInOutputContains("Active: inactive") {
+		if strings.Contains(setup.OutputToString(), "Active: inactive") {
 			setup = SystemExec("systemctl", []string{"start", "docker"})
 			Expect(setup).Should(ExitCleanly())
 			defer func() {
@@ -407,8 +505,10 @@ var _ = Describe("Podman push", func() {
 	It("podman push to oci-archive", func() {
 		SkipIfRemote("Remote push does not support oci-archive transport")
 		tarfn := filepath.Join(podmanTest.TempDir, "alp.tar")
-		session := podmanTest.Podman([]string{"push", "-q", ALPINE,
-			fmt.Sprintf("oci-archive:%s:latest", tarfn)})
+		session := podmanTest.Podman([]string{
+			"push", "-q", ALPINE,
+			fmt.Sprintf("oci-archive:%s:latest", tarfn),
+		})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 	})
@@ -416,8 +516,10 @@ var _ = Describe("Podman push", func() {
 	It("podman push to docker-archive no reference", func() {
 		SkipIfRemote("Remote push does not support docker-archive transport")
 		tarfn := filepath.Join(podmanTest.TempDir, "alp.tar")
-		session := podmanTest.Podman([]string{"push", "-q", ALPINE,
-			fmt.Sprintf("docker-archive:%s", tarfn)})
+		session := podmanTest.Podman([]string{
+			"push", "-q", ALPINE,
+			fmt.Sprintf("docker-archive:%s", tarfn),
+		})
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 	})
@@ -425,11 +527,74 @@ var _ = Describe("Podman push", func() {
 	It("podman push to oci-archive no reference", func() {
 		SkipIfRemote("Remote push does not support oci-archive transport")
 		ociarc := filepath.Join(podmanTest.TempDir, "alp-oci")
-		session := podmanTest.Podman([]string{"push", "-q", ALPINE,
-			fmt.Sprintf("oci-archive:%s", ociarc)})
+		session := podmanTest.Podman([]string{
+			"push", "-q", ALPINE,
+			fmt.Sprintf("oci-archive:%s", ociarc),
+		})
 
 		session.WaitWithDefaultTimeout()
 		Expect(session).Should(ExitCleanly())
 	})
 
+	It("podman push --platform from manifest list", func() {
+		if runtime.GOARCH == "ppc64le" {
+			Skip("No registry image for ppc64le")
+		}
+		if isRootless() {
+			err := podmanTest.RestoreArtifact(REGISTRY_IMAGE)
+			Expect(err).ToNot(HaveOccurred())
+		}
+		lock := GetPortLock("5006")
+		defer lock.Unlock()
+		session := podmanTest.Podman([]string{"run", "-d", "--name", "registry", "-p", "5006:5000", REGISTRY_IMAGE, "/entrypoint.sh", "/etc/docker/registry/config.yml"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+
+		if !WaitContainerReady(podmanTest, "registry", "listening on", 20, 1) {
+			Skip("Cannot start docker registry.")
+		}
+
+		session = podmanTest.Podman([]string{"build", "-q", "--platform", "linux/amd64", "-t", "img1", "build/basicalpine"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+
+		session = podmanTest.Podman([]string{"build", "-q", "--platform", "linux/arm64", "-t", "img2", "build/basicalpine"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+
+		session = podmanTest.Podman([]string{"manifest", "create", "mlist"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+
+		session = podmanTest.Podman([]string{"manifest", "add", "mlist", "containers-storage:localhost/img1"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+
+		session = podmanTest.Podman([]string{"manifest", "add", "mlist", "containers-storage:localhost/img2"})
+		session.WaitWithDefaultTimeout()
+		Expect(session).Should(ExitCleanly())
+
+		push := podmanTest.Podman([]string{"push", "-q", "--tls-verify=false", "--platform", "linux/arm64", "mlist", "localhost:5006/mtest"})
+		push.WaitWithDefaultTimeout()
+		Expect(push).Should(ExitCleanly())
+
+		// Verify we pushed a single manifest, not a manifest list/index
+		// (manifest lists have a "manifests" array, single manifests don't)
+		skopeo := SystemExec("skopeo", []string{"inspect", "--raw", "--tls-verify=false", "docker://localhost:5006/mtest"})
+		skopeo.WaitWithDefaultTimeout()
+		Expect(skopeo).Should(ExitCleanly())
+		Expect(skopeo.OutputToString()).ToNot(ContainSubstring(`"manifests"`))
+
+		// Verify correct architecture and no other platforms
+		skopeo = SystemExec("skopeo", []string{"inspect", "--tls-verify=false", "docker://localhost:5006/mtest"})
+		skopeo.WaitWithDefaultTimeout()
+		Expect(skopeo).Should(ExitCleanly())
+		output := skopeo.OutputToString()
+		Expect(output).To(ContainSubstring(`"Architecture": "arm64"`))
+		Expect(output).ToNot(ContainSubstring(`"amd64"`))
+
+		push = podmanTest.Podman([]string{"push", "-q", "--tls-verify=false", "--platform", "linux/s390x", "mlist", "localhost:5006/mtest"})
+		push.WaitWithDefaultTimeout()
+		Expect(push).Should(ExitWithError(125, "no image found in image index for architecture"))
+	})
 })

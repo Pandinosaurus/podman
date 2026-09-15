@@ -3,13 +3,12 @@
 package integration
 
 import (
-	. "github.com/containers/podman/v5/test/utils"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	. "go.podman.io/podman/v6/test/utils"
 )
 
 var _ = Describe("Podman run restart containers", func() {
-
 	It("Podman start after successful run", func() {
 		session := podmanTest.Podman([]string{"run", "--name", "test", ALPINE, "ls"})
 		session.WaitWithDefaultTimeout()
@@ -26,8 +25,6 @@ var _ = Describe("Podman run restart containers", func() {
 
 	It("Podman start after signal kill", func() {
 		_ = podmanTest.RunTopContainer("test1")
-		ok := WaitForContainer(podmanTest)
-		Expect(ok).To(BeTrue(), "test1 container started")
 
 		killSession := podmanTest.Podman([]string{"kill", "-s", "9", "test1"})
 		killSession.WaitWithDefaultTimeout()

@@ -25,30 +25,7 @@ Stop all running containers.  This does not include paused containers.
 
 Command does not fail when *file* is missing and user specified --ignore.
 
-#### **--filter**, **-f**=*filter*
-
-Filter what containers are going to be stopped.
-Multiple filters can be given with multiple uses of the --filter flag.
-Filters with the same key work inclusive with the only exception being
-`label` which is exclusive. Filters with different keys always work exclusive.
-
-Valid filters are listed below:
-
-| **Filter** | **Description**                                                                  |
-|------------|----------------------------------------------------------------------------------|
-| id         | [ID] Container's ID (CID prefix match by default; accepts regex)                 |
-| name       | [Name] Container's name (accepts regex)                                          |
-| label      | [Key] or [Key=Value] Label assigned to a container                               |
-| exited     | [Int] Container's exit code                                                      |
-| status     | [Status] Container's status: 'created', 'exited', 'paused', 'running', 'unknown' |
-| ancestor   | [ImageName] Image or descendant used to create container                         |
-| before     | [ID] or [Name] Containers created before this container                          |
-| since      | [ID] or [Name] Containers created since this container                           |
-| volume     | [VolumeName] or [MountpointDestination] Volume mounted in container              |
-| health     | [Status] healthy or unhealthy                                                    |
-| pod        | [Pod] name or full or partial ID of pod                                          |
-| network    | [Network] name or full ID of network                                             |
-| until      | [DateTime] Containers created before the given duration or time.                 |
+@@option filter.container
 
 @@option ignore
 
@@ -96,6 +73,24 @@ $ podman stop -a
 Stop the last created container (This option is not available with the remote Podman client, including Mac and Windows (excluding WSL2) machines)
 ```
 $ podman stop --latest
+```
+
+Stop by label.
+```
+$ podman stop --filter label=app=frontend
+9351ccb3ef4272532bc0c188bd4f0ddfc2b0de217732cd108259ea126b014647
+```
+
+Stop by name.
+```
+$ podman stop --filter name=db-replica
+6c2680da61d54690718ac3aecdb04a8aad95ae353e42cc942736823bd05c8a1d
+```
+
+Stop by role label.
+```
+$ podman stop --filter label=role=primary
+bb3ff91d969a8dc622d627e4a8d76c18bdbd417d317c5e7e66543c0b0c8ed1e8
 ```
 
 ## SEE ALSO

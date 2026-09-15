@@ -1,29 +1,32 @@
 % podman-container-prune 1
 
 ## NAME
-podman\-container\-prune - Remove all stopped containers from local storage
+podman\-container\-prune - Remove all stopped containers not associated with pods from local storage
 
 ## SYNOPSIS
 **podman container prune** [*options*]
 
 ## DESCRIPTION
-**podman container prune** removes all stopped containers from local storage.
+**podman container prune** removes all stopped containers that are not associated with a pod from local storage.
 
 ## OPTIONS
 #### **--filter**=*filters*
 
 Provide filter values.
 
-The *filters* argument format is of `key=value`. If there is more than one *filter*, then pass multiple OPTIONS: **--filter** *foo=bar* **--filter** *bif=baz*.
+If there is more than one filter, the `--filter` option should be passed multiple times: **--filter** *label=test* **--filter** *until=10m*.
 
 Supported filters:
 
-| Filter | Description                                                                                          |
-|:------:|------------------------------------------------------------------------------------------------------|
-| label  | Only remove containers, with (or without, in the case of label!=[...] is used) the specified labels. |
-| until  | Only remove containers created before given timestamp.                                               |
+| Filter      | Description                                                                                                    |
+|:-----------:|----------------------------------------------------------------------------------------------------------------|
+| annotation  | Only remove containers, with (or without, in the case of annotation!=[...] is used) the specified annotations. |
+| label       | Only remove containers, with (or without, in the case of label!=[...] is used) the specified labels.           |
+| until       | Only remove containers created before given timestamp.                                                         |
 
-The `label` *filter* accepts two formats. One is the `label`=*key* or `label`=*key*=*value*, which removes containers with the specified labels. The other format is the `label!`=*key* or `label!`=*key*=*value*, which removes containers without the specified labels.
+The `label` *filter* accepts two formats. One is the `label`=*key* or `label`=*key*=*value*, which removes containers with the specified labels. The other format is the `label!`=*key* or `label!`=*key*=*value*, which removes containers without the specified labels. The `annotation` and `annotation!` filters work the same way for container annotations.
+
+**NOTE:** `label!` filters are combined with **AND**, so that the behavior is consistent with `label`, while in Docker, they are combined with **OR**.
 
 The `until` *filter* can be Unix timestamps, date formatted timestamps, or Go duration strings (e.g. 10m, 1h30m) computed relative to the machine’s time.
 
@@ -38,7 +41,7 @@ Print usage statement.\
 The default is **false**.
 
 ## EXAMPLES
-Remove all stopped containers from local storage:
+Remove all stopped containers not associated with pods from local storage:
 ```
 $ podman container prune
 WARNING! This will remove all stopped containers.
@@ -51,7 +54,7 @@ fff1c5b6c3631746055ec40598ce8ecaa4b82aef122f9e3a85b03b55c0d06c23
 602d343cd47e7cb3dfc808282a9900a3e4555747787ec6723bb68cedab8384d5
 ```
 
-Remove all stopped containers from local storage without confirmation:
+Remove all stopped containers not associated with pods from local storage without confirmation:
 ```
 $ podman container prune -f
 878392adf2e6c5c9bb1fc19b69d37d2e98c8abf9d539c0bce4b15b46bbcce471
@@ -62,7 +65,7 @@ fff1c5b6c3631746055ec40598ce8ecaa4b82aef122f9e3a85b03b55c0d06c23
 602d343cd47e7cb3dfc808282a9900a3e4555747787ec6723bb68cedab8384d5
 ```
 
-Remove all stopped containers from local storage created before the last 10 minutes:
+Remove all stopped containers not associated with pods from local storage created before the last 10 minutes:
 ```
 $ podman container prune --filter until="10m"
 WARNING! This will remove all stopped containers.

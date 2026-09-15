@@ -10,9 +10,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/containers/common/pkg/strongunits"
-	"github.com/containers/podman/v5/pkg/machine/define"
-	"github.com/containers/storage/pkg/fileutils"
+	"go.podman.io/podman/v6/pkg/machine/define"
+	"go.podman.io/storage/pkg/fileutils"
 )
 
 // defaultQMPTimeout is the timeout duration for the
@@ -29,16 +28,9 @@ type QemuCmd []string
 // starting with the qemu binary, architecture specific options, and propagated
 // proxy and SSL settings
 func NewQemuBuilder(binary string, options []string) QemuCmd {
-	q := QemuCmd{binary}
+	q := make(QemuCmd, 0, 1+len(options))
+	q = append(q, binary)
 	return append(q, options...)
-}
-
-// SetMemory adds the specified amount of memory for the machine
-func (q *QemuCmd) SetMemory(m strongunits.MiB) {
-	serializedMem := strconv.FormatUint(uint64(m), 10)
-	// In order to use virtiofsd, we must enable shared memory
-	*q = append(*q, "-object", fmt.Sprintf("memory-backend-memfd,id=mem,size=%sM,share=on", serializedMem))
-	*q = append(*q, "-m", serializedMem)
 }
 
 // SetCPUs adds the number of CPUs the machine will have
@@ -125,7 +117,7 @@ type Monitor struct {
 // NewQMPMonitor creates the monitor subsection of our vm
 func NewQMPMonitor(name string, machineRuntimeDir *define.VMFile) (Monitor, error) {
 	if err := fileutils.Exists(machineRuntimeDir.GetPath()); errors.Is(err, fs.ErrNotExist) {
-		if err := os.MkdirAll(machineRuntimeDir.GetPath(), 0755); err != nil {
+		if err := os.MkdirAll(machineRuntimeDir.GetPath(), 0o755); err != nil {
 			return Monitor{}, err
 		}
 	}

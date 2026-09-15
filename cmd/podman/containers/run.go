@@ -6,18 +6,18 @@ import (
 	"os"
 	"strings"
 
-	"github.com/containers/common/pkg/auth"
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/cmd/podman/utils"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/rootless"
-	"github.com/containers/podman/v5/pkg/specgen"
-	"github.com/containers/podman/v5/pkg/specgenutil"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/auth"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/cmd/podman/utils"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/rootless"
+	"go.podman.io/podman/v6/pkg/specgen"
+	"go.podman.io/podman/v6/pkg/specgenutil"
 	"golang.org/x/term"
 )
 
@@ -31,8 +31,8 @@ var (
 		RunE:              run,
 		ValidArgsFunction: common.AutocompleteCreateRun,
 		Example: `podman run imageID ls -alF /etc
-  podman run --network=host imageID dnf -y install java
-  podman run --volume /var/hostdir:/var/ctrdir -i -t fedora /bin/bash`,
+podman run --network=host imageID dnf -y install java
+podman run --volume /var/hostdir:/var/ctrdir -i -t fedora /bin/bash`,
 	}
 
 	containerRunCommand = &cobra.Command{
@@ -43,8 +43,8 @@ var (
 		RunE:              runCommand.RunE,
 		ValidArgsFunction: runCommand.ValidArgsFunction,
 		Example: `podman container run imageID ls -alF /etc
-	podman container run --network=host imageID dnf -y install java
-	podman container run --volume /var/hostdir:/var/ctrdir -i -t fedora /bin/bash`,
+podman container run --network=host imageID dnf -y install java
+podman container run --volume /var/hostdir:/var/ctrdir -i -t fedora /bin/bash`,
 	}
 )
 
@@ -76,11 +76,8 @@ func runFlags(cmd *cobra.Command) {
 	flags.BoolVarP(&runOpts.Detach, "detach", "d", false, "Run container in background and print container ID")
 
 	detachKeysFlagName := "detach-keys"
-	flags.StringVar(&runOpts.DetachKeys, detachKeysFlagName, containerConfig.DetachKeys(), "Override the key sequence for detaching a container. Format is a single character `[a-Z]` or a comma separated sequence of `ctrl-<value>`, where `<value>` is one of: `a-cf`, `@`, `^`, `[`, `\\`, `]`, `^` or `_`")
+	flags.StringVar(&runOpts.DetachKeys, detachKeysFlagName, containerConfig.DetachKeys(), "Override the key sequence for detaching a container. Format is a single character `[a-Z]` or a comma separated sequence of `ctrl-<value>`, where `<value>` is one of: `a-z`, `@`, `[`, `\\`, `]`, `^` or `_`")
 	_ = cmd.RegisterFlagCompletionFunc(detachKeysFlagName, common.AutocompleteDetachKeys)
-
-	passwdFlagName := "passwd"
-	flags.BoolVar(&runOpts.Passwd, passwdFlagName, true, "add entries to /etc/passwd and /etc/group")
 
 	if registry.IsRemote() {
 		_ = flags.MarkHidden(preserveFdsFlagName)
@@ -116,8 +113,8 @@ func run(cmd *cobra.Command, args []string) error {
 		}
 		cliVals.Rm = true
 	}
-	// TODO: Breaking change should be made fatal in next major Release
-	if cliVals.TTY && cliVals.Interactive && !term.IsTerminal(int(os.Stdin.Fd())) {
+
+	if cliVals.TTY && cliVals.Interactive && !runOpts.Detach && !term.IsTerminal(int(os.Stdin.Fd())) {
 		logrus.Warnf("The input device is not a TTY. The --tty and --interactive flags might not work properly")
 	}
 
@@ -129,6 +126,7 @@ func run(cmd *cobra.Command, args []string) error {
 
 	runOpts.CIDFile = cliVals.CIDFile
 	runOpts.Rm = cliVals.Rm
+	runOpts.Passwd = cliVals.Passwd
 	cliVals, err := CreateInit(cmd, cliVals, false)
 	if err != nil {
 		return err
@@ -206,6 +204,10 @@ func run(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	s.RawImageName = rawImageName
+
+	// Include the command used to create the container.
+	s.ContainerCreateCommand = os.Args
+
 	s.ImageOS = cliVals.OS
 	s.ImageArch = cliVals.Arch
 	s.ImageVariant = cliVals.Variant
@@ -221,7 +223,14 @@ func run(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	report, err := registry.ContainerEngine().ContainerRun(registry.GetContext(), runOpts)
+	if s.HealthConfig == nil {
+		s.HealthConfig, err = common.GetHealthCheckOverrideConfig(cmd, &cliVals)
+		if err != nil {
+			return err
+		}
+	}
+
+	report, err := registry.ContainerEngine().ContainerRun(registry.Context(), runOpts)
 	// report.ExitCode is set by ContainerRun even it returns an error
 	if report != nil {
 		registry.SetExitCode(report.ExitCode)
@@ -244,7 +253,7 @@ func run(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 	if runRmi {
-		_, rmErrors := registry.ImageEngine().Remove(registry.GetContext(), []string{imageName}, entities.ImageRemoveOptions{Ignore: true})
+		_, rmErrors := registry.ImageEngine().Remove(registry.Context(), []string{imageName}, entities.ImageRemoveOptions{Ignore: true})
 		for _, err := range rmErrors {
 			logrus.Warnf("Failed to remove image: %v", err)
 		}

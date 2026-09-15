@@ -30,7 +30,7 @@ load helpers
 
 # bats test_tags=ci:parallel
 @test "podman rm - running container, w/o and w/ force" {
-    run_podman run -d $IMAGE sleep 5
+    run_podman run -d $IMAGE sleep 100
     cid="$output"
 
     # rm should fail
@@ -123,14 +123,18 @@ load helpers
     assert "$output" !~ "$(safename)" "container should be removed"
 }
 
+# DO NOT CHANGE "sleep infinity"! This is how we get a container to
+# remain in state "stopping" for long enough to check it.
+# $1 = container name, $2 = optional stop-timeout (default 4)
 function __run_healthcheck_container() {
+    local stop_timeout=${2:-4}
     run_podman run -d --name $1 \
                --health-cmd /bin/false \
                --health-interval 1s \
                --health-retries 2 \
                --health-timeout 1s \
                --health-on-failure=stop \
-               --stop-timeout=2 \
+               --stop-timeout=$stop_timeout \
                --health-start-period 0 \
                --stop-signal SIGTERM \
                $IMAGE sleep infinity
@@ -177,27 +181,45 @@ function __run_healthcheck_container() {
 # bats test_tags=ci:parallel
 @test "podman container rm --force doesn't leave running processes" {
     local cname=c-$(safename)
-    __run_healthcheck_container $cname
+    __run_healthcheck_container $cname 20
     local cid=$output
 
     # We'll use the PID later to confirm that container is not running
     run_podman inspect --format '{{.State.Pid}}' $cname
     local pid=$output
 
-    for i in {1..10}; do
+    for i in {1..20}; do
         run_podman inspect $cname --format '{{.State.Status}}'
         if [ "$output" = "stopping" ]; then
-            break
+            run_podman rm -f $cname
+            if kill -0 $pid; then
+                die "Container $cname process is still running (pid $pid)"
+            fi
+            return
         fi
 
         sleep 0.5
     done
 
-    run_podman rm -f $cname
+    die "Container never entered 'stopping' state"
+}
 
-    if kill -0 $pid; then
-        die "Container $cname process is still running (pid $pid)"
-    fi
+# bats test_tags=ci:parallel
+@test "podman rm after killed conmon" {
+    cname=c_$(safename)
+    run_podman run -d --name $cname $IMAGE sleep 1000
+
+    run_podman inspect --format '{{ .State.ConmonPid }}' $cname
+    conmon_pid=$output
+
+    kill -9 ${conmon_pid}
+
+    # When conmon is killed, the ns_handles may become stale and produce a warning
+    # about creating a new rootless user namespace. This is expected behavior.
+    run_podman 0+w rm -f -t0 $cname
+
+    run_podman 125 container inspect $cname
+    assert "$output" =~ "no such container \"$cname\"" "Container should be removed"
 }
 
 # vim: filetype=sh

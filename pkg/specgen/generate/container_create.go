@@ -1,4 +1,4 @@
-//go:build !remote
+//go:build !remote && (linux || freebsd)
 
 package generate
 
@@ -11,19 +11,19 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/containers/common/libimage"
-	"github.com/containers/common/libnetwork/pasta"
-	"github.com/containers/common/libnetwork/slirp4netns"
-	"github.com/containers/podman/v5/libpod"
-	"github.com/containers/podman/v5/libpod/define"
-	"github.com/containers/podman/v5/pkg/namespaces"
-	"github.com/containers/podman/v5/pkg/rootless"
-	"github.com/containers/podman/v5/pkg/specgen"
-	"github.com/containers/podman/v5/pkg/specgenutil"
-	"github.com/containers/podman/v5/pkg/util"
+	"github.com/jinzhu/copier"
 	"github.com/opencontainers/runtime-spec/specs-go"
-	"github.com/opencontainers/selinux/go-selinux/label"
+	"github.com/opencontainers/selinux/go-selinux"
 	"github.com/sirupsen/logrus"
+	"go.podman.io/common/libimage"
+	"go.podman.io/common/libnetwork/pasta"
+	"go.podman.io/podman/v6/libpod"
+	"go.podman.io/podman/v6/libpod/define"
+	"go.podman.io/podman/v6/pkg/namespaces"
+	"go.podman.io/podman/v6/pkg/rootless"
+	"go.podman.io/podman/v6/pkg/specgen"
+	"go.podman.io/podman/v6/pkg/specgenutil"
+	"go.podman.io/podman/v6/pkg/util"
 	"tags.cncf.io/container-device-interface/pkg/parser"
 )
 
@@ -164,7 +164,9 @@ func MakeContainer(ctx context.Context, rt *libpod.Runtime, s *specgen.SpecGener
 		return nil, nil, nil, err
 	}
 
-	if imageData != nil {
+	if len(s.OCIRuntime) > 0 {
+		options = append(options, libpod.WithCtrOCIRuntime(s.OCIRuntime))
+	} else if imageData != nil {
 		ociRuntimeVariant := rtc.Engine.ImagePlatformToRuntime(imageData.Os, imageData.Architecture)
 		// Don't unnecessarily set and invoke additional libpod
 		// option if OCI runtime is still default.
@@ -203,9 +205,7 @@ func MakeContainer(ctx context.Context, rt *libpod.Runtime, s *specgen.SpecGener
 				return nil, nil, nil, err
 			}
 			switch conf.Network.DefaultRootlessNetworkCmd {
-			case slirp4netns.BinaryName, "":
-				s.NetNS.NSMode = specgen.Slirp
-			case pasta.BinaryName:
+			case pasta.BinaryName, "":
 				s.NetNS.NSMode = specgen.Pasta
 			default:
 				return nil, nil, nil, fmt.Errorf("invalid default_rootless_network_cmd option %q",
@@ -214,6 +214,22 @@ func MakeContainer(ctx context.Context, rt *libpod.Runtime, s *specgen.SpecGener
 		} else {
 			// as root default to bridge
 			s.NetNS.NSMode = specgen.Bridge
+		}
+	}
+
+	// if userns is auto, set up annotation, and default IDMappings if none are set
+	if s.UserNS.IsAuto() {
+		if s.Annotations == nil {
+			s.Annotations = make(map[string]string)
+		}
+		s.Annotations[define.UserNsAnnotation] = string(s.UserNS.NSMode)
+
+		if s.IDMappings == nil {
+			mappings, err := util.ParseIDMapping(namespaces.UsernsMode(s.UserNS.NSMode), nil, nil, "", "")
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			s.IDMappings = mappings
 		}
 	}
 
@@ -245,6 +261,9 @@ func MakeContainer(ctx context.Context, rt *libpod.Runtime, s *specgen.SpecGener
 	if len(s.Name) > 0 {
 		logrus.Debugf("setting container name %s", s.Name)
 		options = append(options, libpod.WithName(s.Name))
+	}
+	if len(s.GPUs) > 0 {
+		options = append(options, libpod.WithGPUs(s.GPUs))
 	}
 	if len(s.Devices) > 0 {
 		opts = ExtractCDIDevices(s)
@@ -312,6 +331,7 @@ func MakeContainer(ctx context.Context, rt *libpod.Runtime, s *specgen.SpecGener
 	}
 	return runtimeSpec, s, options, err
 }
+
 func ExecuteCreate(ctx context.Context, rt *libpod.Runtime, runtimeSpec *specs.Spec, s *specgen.SpecGenerator, infra bool, options ...libpod.CtrCreateOption) (*libpod.Container, error) {
 	ctr, err := rt.NewContainer(ctx, runtimeSpec, s, infra, options...)
 	if err != nil {
@@ -507,6 +527,20 @@ func createContainerOptions(rt *libpod.Runtime, s *specgen.SpecGenerator, pod *l
 		options = append(options, libpod.WithImageVolumes(vols))
 	}
 
+	if len(s.ArtifactVolumes) != 0 {
+		vols := make([]*libpod.ContainerArtifactVolume, 0, len(s.ArtifactVolumes))
+		for _, v := range s.ArtifactVolumes {
+			vols = append(vols, &libpod.ContainerArtifactVolume{
+				Dest:   v.Destination,
+				Source: v.Source,
+				Digest: v.Digest,
+				Title:  v.Title,
+				Name:   v.Name,
+			})
+		}
+		options = append(options, libpod.WithArtifactVolumes(vols))
+	}
+
 	if s.Command != nil {
 		options = append(options, libpod.WithCommand(s.Command))
 	}
@@ -547,7 +581,9 @@ func createContainerOptions(rt *libpod.Runtime, s *specgen.SpecGenerator, pod *l
 		if len(s.LogConfiguration.Options) > 0 && s.LogConfiguration.Options["tag"] != "" {
 			options = append(options, libpod.WithLogTag(s.LogConfiguration.Options["tag"]))
 		}
-
+		if len(s.LogConfiguration.Labels) > 0 {
+			options = append(options, libpod.WithLogLabels(s.LogConfiguration.Labels))
+		}
 		if len(s.LogConfiguration.Driver) > 0 {
 			options = append(options, libpod.WithLogDriver(s.LogConfiguration.Driver))
 		}
@@ -565,7 +601,7 @@ func createContainerOptions(rt *libpod.Runtime, s *specgen.SpecGenerator, pod *l
 			return nil, err
 		}
 		if processLabel != "" {
-			selinuxOpts, err := label.DupSecOpt(processLabel)
+			selinuxOpts, err := selinux.DupSecOpt(processLabel)
 			if err != nil {
 				return nil, err
 			}
@@ -720,12 +756,7 @@ func Inherit(infra *libpod.Container, s *specgen.SpecGenerator, rt *libpod.Runti
 	compatibleOptions.SelinuxOpts = append(compatibleOptions.SelinuxOpts, s.SelinuxOpts...)
 	compatibleOptions.Volumes = append(compatibleOptions.Volumes, s.Volumes...)
 
-	compatByte, err := json.Marshal(compatibleOptions)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	err = json.Unmarshal(compatByte, s)
-	if err != nil {
+	if err := applyInfraInherit(compatibleOptions, s); err != nil {
 		return nil, nil, nil, err
 	}
 
@@ -739,4 +770,9 @@ func Inherit(infra *libpod.Container, s *specgen.SpecGenerator, rt *libpod.Runti
 		s.ShmSize = nil
 	}
 	return options, infraSpec, compatibleOptions, nil
+}
+
+// applyInfraInherit copies the InfraInherit fields into the SpecGenerator.
+func applyInfraInherit(compatibleOptions *libpod.InfraInherit, s *specgen.SpecGenerator) error {
+	return copier.CopyWithOption(s, compatibleOptions, copier.Option{IgnoreEmpty: true})
 }

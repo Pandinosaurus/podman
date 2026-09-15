@@ -5,15 +5,15 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/containers/common/pkg/auth"
-	"github.com/containers/common/pkg/completion"
-	"github.com/containers/common/pkg/report"
-	"github.com/containers/image/v5/types"
-	"github.com/containers/podman/v5/cmd/podman/common"
-	"github.com/containers/podman/v5/cmd/podman/registry"
-	"github.com/containers/podman/v5/pkg/domain/entities"
-	"github.com/containers/podman/v5/pkg/errorhandling"
 	"github.com/spf13/cobra"
+	"go.podman.io/common/pkg/auth"
+	"go.podman.io/common/pkg/completion"
+	"go.podman.io/common/pkg/report"
+	"go.podman.io/image/v5/types"
+	"go.podman.io/podman/v6/cmd/podman/common"
+	"go.podman.io/podman/v6/cmd/podman/registry"
+	"go.podman.io/podman/v6/pkg/domain/entities"
+	"go.podman.io/podman/v6/pkg/errorhandling"
 )
 
 type cliAutoUpdateOptions struct {
@@ -38,7 +38,7 @@ var (
 		RunE:              autoUpdate,
 		ValidArgsFunction: completion.AutocompleteNone,
 		Example: `podman auto-update
-  podman auto-update --authfile ~/authfile.json`,
+podman auto-update --authfile ~/authfile.json`,
 	}
 )
 
@@ -77,7 +77,7 @@ func autoUpdate(cmd *cobra.Command, args []string) error {
 		autoUpdateOptions.InsecureSkipTLSVerify = types.NewOptionalBool(!autoUpdateOptions.tlsVerify)
 	}
 
-	allReports, failures := registry.ContainerEngine().AutoUpdate(registry.GetContext(), autoUpdateOptions.AutoUpdateOptions)
+	allReports, failures := registry.ContainerEngine().AutoUpdate(registry.Context(), autoUpdateOptions.AutoUpdateOptions)
 	if allReports == nil {
 		return errorhandling.JoinErrors(failures)
 	}

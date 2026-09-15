@@ -15,36 +15,24 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	. "go.podman.io/podman/v6/test/utils"
 )
+
+var RemoteTestingTarget = PodmanTestCreateUtilTarget(os.Getenv("REMOTEINTEGRATION_TRANSPORT"))
 
 func IsRemote() bool {
 	return true
 }
 
-// Podman is the exec call to podman on the filesystem
+// Podman executes podman on the filesystem with default options.
 func (p *PodmanTestIntegration) Podman(args []string) *PodmanSessionIntegration {
-	args = p.makeOptions(args, false, false)
-	podmanSession := p.PodmanBase(args, false, false)
-	return &PodmanSessionIntegration{podmanSession}
+	return p.PodmanWithOptions(PodmanExecOptions{}, args...)
 }
 
-// PodmanSystemdScope runs the podman command in a new systemd scope
-func (p *PodmanTestIntegration) PodmanSystemdScope(args []string) *PodmanSessionIntegration {
-	args = p.makeOptions(args, false, false)
-
-	wrapper := []string{"systemd-run", "--scope"}
-	if isRootless() {
-		wrapper = []string{"systemd-run", "--scope", "--user"}
-	}
-
-	podmanSession := p.PodmanAsUserBase(args, 0, 0, "", nil, false, false, wrapper, nil)
-	return &PodmanSessionIntegration{podmanSession}
-}
-
-// PodmanExtraFiles is the exec call to podman on the filesystem and passes down extra files
-func (p *PodmanTestIntegration) PodmanExtraFiles(args []string, extraFiles []*os.File) *PodmanSessionIntegration {
-	args = p.makeOptions(args, false, false)
-	podmanSession := p.PodmanAsUserBase(args, 0, 0, "", nil, false, false, nil, extraFiles)
+// PodmanWithOptions executes podman on the filesystem with the supplied options.
+func (p *PodmanTestIntegration) PodmanWithOptions(options PodmanExecOptions, args ...string) *PodmanSessionIntegration {
+	args = p.makeOptions(args, options)
+	podmanSession := p.PodmanExecBaseWithOptions(args, options)
 	return &PodmanSessionIntegration{podmanSession}
 }
 
@@ -60,22 +48,17 @@ func (p *PodmanTestIntegration) setDefaultRegistriesConfigEnv() {
 func (p *PodmanTestIntegration) setRegistriesConfigEnv(b []byte) {
 	outfile := filepath.Join(p.TempDir, "registries.conf")
 	os.Setenv("CONTAINERS_REGISTRIES_CONF", outfile)
-	err := os.WriteFile(outfile, b, 0644)
+	err := os.WriteFile(outfile, b, 0o644)
 	Expect(err).ToNot(HaveOccurred())
 }
 
 func resetRegistriesConfigEnv() {
 	os.Setenv("CONTAINERS_REGISTRIES_CONF", "")
 }
-func PodmanTestCreate(tempDir string) *PodmanTestIntegration {
-	pti := PodmanTestCreateUtil(tempDir, true)
-	pti.StartRemoteService()
-	return pti
-}
 
 func (p *PodmanTestIntegration) StartRemoteService() {
 	if !isRootless() {
-		err := os.MkdirAll("/run/podman", 0755)
+		err := os.MkdirAll("/run/podman", 0o755)
 		Expect(err).ToNot(HaveOccurred())
 	}
 
@@ -83,11 +66,31 @@ func (p *PodmanTestIntegration) StartRemoteService() {
 	if _, found := os.LookupEnv("DEBUG_SERVICE"); found {
 		args = append(args, "--log-level", "trace")
 	}
+	if p.RemoteTLSDetails != "" {
+		args = append(args, "--tls-details", p.RemoteTLSDetails)
+	}
+
 	remoteSocket := p.RemoteSocket
-	args = append(args, "system", "service", "--time", "0", remoteSocket)
+	args = append(args, "system", "service", "--time", "0")
+
+	if p.RemoteTLSClientCAFile != "" {
+		args = append(args, "--tls-client-ca", p.RemoteTLSClientCAFile)
+	}
+	if p.RemoteTLSServerCertFile != "" {
+		args = append(args, "--tls-cert", p.RemoteTLSServerCertFile)
+	}
+	if p.RemoteTLSServerKeyFile != "" {
+		args = append(args, "--tls-key", p.RemoteTLSServerKeyFile)
+	}
+
+	args = append(args, remoteSocket)
+
 	podmanOptions := getRemoteOptions(p, args)
-	cacheOptions := []string{"--storage-opt",
-		fmt.Sprintf("%s.imagestore=%s", p.PodmanTest.ImageCacheFS, p.PodmanTest.ImageCacheDir)}
+	cacheOptions := []string{
+		"--storage-opt",
+		fmt.Sprintf("%s.imagestore=%s", p.PodmanTest.ImageCacheFS, p.PodmanTest.ImageCacheDir),
+	}
+
 	podmanOptions = append(cacheOptions, podmanOptions...)
 	command := exec.Command(p.PodmanBinary, podmanOptions...)
 	command.Stdout = GinkgoWriter
@@ -123,11 +126,26 @@ func (p *PodmanTestIntegration) StopRemoteService() {
 // getRemoteOptions assembles all the podman main options
 func getRemoteOptions(p *PodmanTestIntegration, args []string) []string {
 	networkDir := p.NetworkConfigDir
-	podmanOptions := strings.Split(fmt.Sprintf("--root %s --runroot %s --runtime %s --conmon %s --network-config-dir %s --network-backend %s --cgroup-manager %s --tmpdir %s --events-backend %s --db-backend %s",
-		p.Root, p.RunRoot, p.OCIRuntime, p.ConmonBinary, networkDir, p.NetworkBackend.ToString(), p.CgroupManager, p.TmpDir, "file", p.DatabaseBackend), " ")
+	podmanOptions := []string{
+		"--root", p.Root,
+		"--runroot", p.RunRoot,
+		"--runtime", p.OCIRuntime,
+		"--conmon", p.ConmonBinary,
+		"--network-config-dir", networkDir,
+		"--cgroup-manager", p.CgroupManager,
+		"--tmpdir", p.CliTmpDir,
+		"--events-backend", "file",
+	}
+
 	podmanOptions = append(podmanOptions, strings.Split(p.StorageOptions, " ")...)
 	podmanOptions = append(podmanOptions, args...)
 	return podmanOptions
+}
+
+func PodmanTestCreate(tempDir string) *PodmanTestIntegration {
+	pti := PodmanTestCreateUtil(tempDir, RemoteTestingTarget)
+	pti.StartRemoteService()
+	return pti
 }
 
 // RestoreArtifact puts the cached image into our test store
@@ -153,7 +171,7 @@ func (p *PodmanTestIntegration) DelayForService() error {
 	var err error
 	var conn net.Conn
 	for i := 0; i < 100; i++ {
-		conn, err = net.Dial("unix", strings.TrimPrefix(p.RemoteSocket, "unix:"))
+		conn, err = net.Dial(p.RemoteSocketScheme, strings.TrimPrefix(p.RemoteSocket, p.RemoteSocketScheme+"://"))
 		if err == nil {
 			conn.Close()
 			return nil
